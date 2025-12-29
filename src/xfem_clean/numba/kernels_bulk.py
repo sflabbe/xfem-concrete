@@ -302,6 +302,171 @@ def dp_integrate_plane_stress_numba(
 
 
 # -----------------------------------------------------------------------------
+# Concrete Damaged Plasticity (CDP-lite) kernel
+# -----------------------------------------------------------------------------
+
+
+@njit(cache=True)
+def _cdp_update_damage(
+    eps3: np.ndarray,
+    kappa_t_old: float,
+    kappa_c_old: float,
+    damage_t_old: float,
+    damage_c_old: float,
+    w_fract_t_old: float,
+    w_fract_c_old: float,
+    E: float,
+    ft: float,
+    fc: float,
+    Gf_t: float,
+    Gf_c: float,
+    lch: float,
+) -> Tuple[float, float, float, float, float, float]:
+    """Update damage variables from 2D strain (principal strain criterion).
+
+    Returns
+    -------
+    damage_t_new, damage_c_new, kappa_t_new, kappa_c_new, w_fract_t_new, w_fract_c_new
+    """
+    exx, eyy, gxy = eps3[0], eps3[1], eps3[2]
+    exy = 0.5 * gxy  # engineering -> tensor shear
+
+    # 2D principal strains
+    e_avg = 0.5 * (exx + eyy)
+    dx = 0.5 * (exx - eyy)
+    R = math.sqrt(dx * dx + exy * exy)
+    e1 = e_avg + R
+    e2 = e_avg - R
+
+    # Tension/compression drivers
+    e_t = max(0.0, e1)
+    e_c = max(0.0, -e2)
+
+    # Thresholds
+    eps0_t = ft / max(1e-12, E)
+    epsf_t = eps0_t + 2.0 * Gf_t / max(1e-12, ft * max(1e-12, lch))
+    eps0_c = fc / max(1e-12, E)
+    epsf_c = eps0_c + 2.0 * Gf_c / max(1e-12, fc * max(1e-12, lch))
+
+    # Tension damage
+    kt = max(kappa_t_old, e_t)
+    dt = damage_t_old
+    wft = w_fract_t_old
+    if kt > eps0_t:
+        sig_t = ft * max(0.0, 1.0 - (kt - eps0_t) / max(1e-12, epsf_t - eps0_t))
+        dt_trial = 1.0 - sig_t / max(1e-12, E * kt)
+        dt = max(dt, min(0.9999, max(0.0, dt_trial)))
+
+        # Energy density (linear softening)
+        a = min(kt, epsf_t) - eps0_t
+        L = max(1e-12, epsf_t - eps0_t)
+        Wt = ft * (a - 0.5 * (a * a) / L)
+        Wt = min(Wt, Gf_t / max(1e-12, lch))
+        wft = max(wft, Wt)
+
+    # Compression damage
+    kc = max(kappa_c_old, e_c)
+    dc = damage_c_old
+    wfc = w_fract_c_old
+    if kc > eps0_c:
+        sig_c = fc * max(0.0, 1.0 - (kc - eps0_c) / max(1e-12, epsf_c - eps0_c))
+        dc_trial = 1.0 - sig_c / max(1e-12, E * kc)
+        dc = max(dc, min(0.9999, max(0.0, dc_trial)))
+
+        # Energy density
+        a = min(kc, epsf_c) - eps0_c
+        L = max(1e-12, epsf_c - eps0_c)
+        Wc = fc * (a - 0.5 * (a * a) / L)
+        Wc = min(Wc, Gf_c / max(1e-12, lch))
+        wfc = max(wfc, Wc)
+
+    return dt, dc, kt, kc, wft, wfc
+
+
+@njit(cache=True)
+def cdp_integrate_plane_stress_numba(
+    eps3: np.ndarray,
+    eps_p6_old: np.ndarray,
+    eps_zz_old: float,
+    kappa_old: float,
+    damage_t_old: float,
+    damage_c_old: float,
+    kappa_t_old: float,
+    kappa_c_old: float,
+    w_plastic_old: float,
+    w_fract_t_old: float,
+    w_fract_c_old: float,
+    E: float,
+    nu: float,
+    alpha: float,
+    k0: float,
+    H: float,
+    ft: float,
+    fc: float,
+    Gf_t: float,
+    Gf_c: float,
+    lch: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float, float, float, float, float, float]:
+    """CDP-lite: DP plasticity on effective stress + scalar damage.
+
+    Returns
+    -------
+    sigma3 : (3,) ndarray (nominal stress)
+    Ct3 : (3,3) ndarray (tangent, frozen damage)
+    eps_p6_new : (6,) ndarray
+    eps_zz_new : float
+    kappa_new : float
+    damage_t_new : float
+    damage_c_new : float
+    kappa_t_new : float
+    kappa_c_new : float
+    w_plastic_new : float
+    w_fract_t_new : float
+    w_fract_c_new : float
+    """
+
+    # Update damage based on current strain (frozen during plasticity solve)
+    dt, dc, kt, kc, wft, wfc = _cdp_update_damage(
+        eps3,
+        kappa_t_old,
+        kappa_c_old,
+        damage_t_old,
+        damage_c_old,
+        w_fract_t_old,
+        w_fract_c_old,
+        E,
+        ft,
+        fc,
+        Gf_t,
+        Gf_c,
+        lch,
+    )
+    d = max(dt, dc)  # combined damage
+
+    # DP return mapping on effective stress (same as dp_integrate but on undamaged material)
+    sigma3_eff, Ct3_eff, eps_p6, ezz, kappa, dW = dp_integrate_plane_stress_numba(
+        eps3,
+        eps_p6_old,
+        eps_zz_old,
+        kappa_old,
+        E,
+        nu,
+        alpha,
+        k0,
+        H,
+    )
+
+    # Apply damage to stress and tangent (frozen)
+    scale = 1.0 - d
+    sigma3 = sigma3_eff * scale
+    Ct3 = Ct3_eff * scale
+
+    w_plastic = w_plastic_old + dW
+
+    return sigma3, Ct3, eps_p6, ezz, kappa, dt, dc, kt, kc, w_plastic, wft, wfc
+
+
+# -----------------------------------------------------------------------------
 # Packing helpers used by the Python driver
 # -----------------------------------------------------------------------------
 
@@ -313,6 +478,7 @@ def pack_bulk_params(model) -> Tuple[int, Optional[np.ndarray]]:
       0 -> disabled / use Python material.integrate
       1 -> elastic plane-stress
       2 -> Drucker–Prager plane-stress
+      3 -> CDP-lite (DP plasticity + scalar damage)
     """
     bulk = str(getattr(model, "bulk_material", "elastic")).lower().strip()
     if bulk in ("elastic", "lin", "linear"):
@@ -323,5 +489,23 @@ def pack_bulk_params(model) -> Tuple[int, Optional[np.ndarray]]:
         H = float(getattr(model, "dp_H", 0.0))
         alpha, k0 = _dp_alpha_k(math.radians(phi), cohesion)
         return 2, np.array([float(model.E), float(model.nu), float(alpha), float(k0), float(H)], dtype=float)
-    # CDP not ported in Phase 2b yet.
+    if bulk in ("cdp", "concrete", "cdp-lite"):
+        # CDP-lite: DP plasticity + damage
+        phi = float(getattr(model, "dp_phi_deg", 30.0))
+        cohesion = float(getattr(model, "dp_cohesion", None) or (0.25 * float(model.fc)))
+        H = float(getattr(model, "dp_H", 0.0))
+        alpha, k0 = _dp_alpha_k(math.radians(phi), cohesion)
+
+        ft = float(model.ft)
+        fc = float(model.fc)
+        Gf_t = float(model.Gf)
+        Gf_c = float(getattr(model, "Gf_c", None) or (10.0 * Gf_t))
+        lch = float(model.lch)
+
+        params = np.array([
+            float(model.E), float(model.nu), alpha, k0, H,
+            ft, fc, Gf_t, Gf_c, lch
+        ], dtype=float)
+        return 3, params
+    # Fallback to Python material (e.g., ConcreteCDPReal with tables)
     return 0, None

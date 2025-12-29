@@ -79,8 +79,7 @@ def assemble_xfem_system(
     use_coh_arrays = isinstance(coh_states_comm, CohesiveStateArrays)
     use_mp_arrays = isinstance(mp_states_comm, BulkStateArrays)
 
-    use_bulk_numba = bool(use_numba) and use_mp_arrays and (bulk_params is not None) and (int(bulk_kind) in (1, 2))
-    use_bulk_numba = bool(use_numba) and use_mp_arrays and (bulk_params is not None) and (int(bulk_kind) in (1, 2))
+    use_bulk_numba = bool(use_numba) and use_mp_arrays and (bulk_params is not None) and (int(bulk_kind) in (1, 2, 3))
 
     coh_updates: Union[Dict[Tuple[int, int], CohesiveState], CohesiveStatePatch]
     mp_updates: Union[Dict[Tuple[int, int], MaterialPoint], BulkStatePatch]
@@ -202,8 +201,15 @@ def assemble_xfem_system(
                                 eps_p6_new = eps_p6_old
                                 ezz_new = ezz_old
                                 kappa_new = kappa_old
+                                dt_new = dt0
+                                dc_new = dc0
+                                kt_new = kt0
+                                kc_new = kc0
+                                wpl_new = wpl0
+                                wft_new = wft0
+                                wfc_new = wfc0
                                 dW = 0.0
-                            else:
+                            elif int(bulk_kind) == 2:
                                 E = float(bulk_params[0])
                                 nu = float(bulk_params[1])
                                 alpha = float(bulk_params[2])
@@ -220,6 +226,51 @@ def assemble_xfem_system(
                                     k0,
                                     Hh,
                                 )
+                                dt_new = dt0
+                                dc_new = dc0
+                                kt_new = kt0
+                                kc_new = kc0
+                                wpl_new = wpl0 + dW
+                                wft_new = wft0
+                                wfc_new = wfc0
+                            elif int(bulk_kind) == 3:
+                                # CDP-lite kernel
+                                from xfem_clean.numba.kernels_bulk import cdp_integrate_plane_stress_numba
+                                E = float(bulk_params[0])
+                                nu = float(bulk_params[1])
+                                alpha = float(bulk_params[2])
+                                k0 = float(bulk_params[3])
+                                Hh = float(bulk_params[4])
+                                ft = float(bulk_params[5])
+                                fc = float(bulk_params[6])
+                                Gf_t = float(bulk_params[7])
+                                Gf_c = float(bulk_params[8])
+                                lch = float(bulk_params[9])
+                                sig, Ct, eps_p6_new, ezz_new, kappa_new, dt_new, dc_new, kt_new, kc_new, wpl_new, wft_new, wfc_new = cdp_integrate_plane_stress_numba(
+                                    eps,
+                                    eps_p6_old,
+                                    ezz_old,
+                                    kappa_old,
+                                    dt0,
+                                    dc0,
+                                    kt0,
+                                    kc0,
+                                    wpl0,
+                                    wft0,
+                                    wfc0,
+                                    E,
+                                    nu,
+                                    alpha,
+                                    k0,
+                                    Hh,
+                                    ft,
+                                    fc,
+                                    Gf_t,
+                                    Gf_c,
+                                    lch,
+                                )
+                            else:
+                                raise ValueError(f"Unknown bulk_kind={bulk_kind}")
 
                             eps_p3_new = np.array([eps_p6_new[0], eps_p6_new[1], eps_p6_new[3]], dtype=float)
                             if isinstance(mp_updates, BulkStatePatch):
@@ -229,16 +280,16 @@ def assemble_xfem_system(
                                     eps=np.asarray(eps, dtype=float),
                                     sigma=np.asarray(sig, dtype=float),
                                     eps_p=eps_p3_new,
-                                    damage_t=dt0,
-                                    damage_c=dc0,
+                                    damage_t=float(dt_new),
+                                    damage_c=float(dc_new),
                                     kappa=float(kappa_new),
-                                    w_plastic=float(wpl0 + dW),
-                                    w_fract_t=wft0,
-                                    w_fract_c=wfc0,
+                                    w_plastic=float(wpl_new),
+                                    w_fract_t=float(wft_new),
+                                    w_fract_c=float(wfc_new),
                                     eps_p6=np.asarray(eps_p6_new, dtype=float),
                                     eps_zz=float(ezz_new),
-                                    kappa_t=kt0,
-                                    kappa_c=kc0,
+                                    kappa_t=float(kt_new),
+                                    kappa_c=float(kc_new),
                                     cdp_w_t=cwt0,
                                     cdp_eps_in_c=ceps0,
                                 )
@@ -247,16 +298,16 @@ def assemble_xfem_system(
                                 mp.eps = np.asarray(eps, dtype=float)
                                 mp.sigma = np.asarray(sig, dtype=float)
                                 mp.eps_p = eps_p3_new
-                                mp.damage_t = dt0
-                                mp.damage_c = dc0
+                                mp.damage_t = float(dt_new)
+                                mp.damage_c = float(dc_new)
                                 mp.kappa = float(kappa_new)
-                                mp.w_plastic = float(wpl0 + dW)
-                                mp.w_fract_t = wft0
-                                mp.w_fract_c = wfc0
+                                mp.w_plastic = float(wpl_new)
+                                mp.w_fract_t = float(wft_new)
+                                mp.w_fract_c = float(wfc_new)
                                 mp.extra["eps_p6"] = np.asarray(eps_p6_new, dtype=float)
                                 mp.extra["eps_zz"] = float(ezz_new)
-                                mp.extra["kappa_t"] = kt0
-                                mp.extra["kappa_c"] = kc0
+                                mp.extra["kappa_t"] = float(kt_new)
+                                mp.extra["kappa_c"] = float(kc_new)
                                 mp.extra["cdp_w_t"] = cwt0
                                 mp.extra["cdp_eps_in_c"] = ceps0
                                 mp_updates[(e, ipid)] = mp
