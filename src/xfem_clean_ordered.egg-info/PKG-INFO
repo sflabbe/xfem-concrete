@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: xfem-clean-ordered
+Version: 0.1.0
+Summary: Ordered XFEM prototype (stable solver reorganized into clean kernel structure).
+Requires-Python: >=3.10
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: matplotlib

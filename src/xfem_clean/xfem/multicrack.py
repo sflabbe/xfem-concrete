@@ -1,0 +1,1077 @@
+"""Multi-crack (Heaviside + cohesive) XFEM extension.
+
+This module is a direct refactor of the multi-crack section that used to live in
+`xfem_xfem.py`. The intent is to keep numerical behavior identical while
+isolating the optional multi-crack workflow.
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+from dataclasses import dataclass
+from typing import Dict, Tuple, List, Union, Optional
+
+import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
+
+from xfem_clean.cohesive_laws import CohesiveLaw, CohesiveState, cohesive_update
+from xfem_clean.numba.kernels_cohesive import pack_cohesive_law_params, cohesive_update_values_numba
+from xfem_clean.crack_criteria import principal_max_dir, nonlocal_bar_stress
+from xfem_clean.fem.q4 import q4_shape
+from xfem_clean.fem.mesh import structured_quad_mesh
+from xfem_clean.fem.bcs import apply_dirichlet
+from xfem_clean.rebar import prepare_rebar_segments, rebar_contrib
+
+from xfem_clean.xfem.geometry import XFEMCrack, clip_segment_to_bbox
+from xfem_clean.xfem.material import plane_stress_C
+from xfem_clean.xfem.model import XFEMModel
+from xfem_clean.xfem.q4_utils import map_global_to_parent_Q4
+from xfem_clean.xfem.utils import find_nearest_node
+from xfem_clean.xfem.state_arrays import CohesiveStateArrays, CohesiveStatePatch
+# Multi-crack (Heaviside + cohesive) extension
+# ==========================================================
+
+@dataclass
+class MultiXFEMDofs:
+    """DOF mapping for multiple Heaviside cracks.
+
+    - Standard dofs are always present (u_x, u_y at every node).
+    - For each crack k, additional Heaviside dofs (a_x, a_y) exist only
+      at nodes whose support is cut by the current crack segment.
+
+    Notes
+    -----
+    * Tip enrichment is intentionally disabled for robustness.
+    * Dofs are rebuilt whenever a crack is initiated or propagated.
+    """
+    std: np.ndarray  # (nnode, 2)
+    H: list          # list of (nnode, 2) arrays
+    H_nodes: list    # list of (nnode,) bool arrays
+    ndof: int
+
+
+def _node_xy(nodes, idx: int) -> tuple[float, float]:
+    """Return node coordinates for both supported node containers.
+
+    The codebase uses `nodes` either as:
+      1) numpy array of shape (nnode, 2) with columns [x, y]
+      2) list of node-like objects with `.x` and `.y` attributes
+    """
+    n = nodes[idx]
+    if hasattr(n, "x"):
+        return float(n.x), float(n.y)
+    # numpy row / sequence
+    return float(n[0]), float(n[1])
+
+
+def _node_y(nodes, idx: int) -> float:
+    return _node_xy(nodes, idx)[1]
+
+
+def _node_x(nodes, idx: int) -> float:
+    return _node_xy(nodes, idx)[0]
+
+
+def _nodes_y(nodes) -> np.ndarray:
+    """Vector of all y coordinates."""
+    if len(nodes) == 0:
+        return np.zeros(0, dtype=float)
+    if hasattr(nodes[0], "y"):
+        return np.array([float(n.y) for n in nodes], dtype=float)
+    return np.asarray(nodes, dtype=float)[:, 1]
+
+
+def build_xfem_dofs_multi(nodes, elems, cracks: list[XFEMCrack], ny: int) -> MultiXFEMDofs:
+    nnode = len(nodes)
+
+    # Standard dofs
+    std = -np.ones((nnode, 2), dtype=int)
+    dof = 0
+    for a in range(nnode):
+        std[a, 0] = dof; dof += 1
+        std[a, 1] = dof; dof += 1
+
+    yvals = _nodes_y(nodes)
+    dy = (float(np.max(yvals)) - float(np.min(yvals))) / max(1, ny)
+
+    H_list: list[np.ndarray] = []
+    Hn_list: list[np.ndarray] = []
+
+    for crack in cracks:
+        H = -np.ones((nnode, 2), dtype=int)
+        H_nodes = np.zeros(nnode, dtype=bool)
+
+        if crack.active:
+            # Mark nodes in elements cut by this crack segment
+            for e, conn in enumerate(elems):
+                xe = np.array([_node_xy(nodes, i) for i in conn], dtype=float)
+                if crack.cuts_element(xe):
+                    for i in conn:
+                        H_nodes[i] = True
+
+            # Optional: avoid enriching nodes above the current tip too far
+            tip_y = crack.tip_y
+            for a in range(nnode):
+                if _node_y(nodes, a) > tip_y + 1.5 * dy:
+                    H_nodes[a] = False
+
+            # Assign dofs
+            for a in range(nnode):
+                if H_nodes[a]:
+                    H[a, 0] = dof; dof += 1
+                    H[a, 1] = dof; dof += 1
+
+        H_list.append(H)
+        Hn_list.append(H_nodes)
+
+    return MultiXFEMDofs(std=std, H=H_list, H_nodes=Hn_list, ndof=dof)
+
+
+def transfer_q_between_dofs_multi(q_old: np.ndarray, dofs_old: MultiXFEMDofs, dofs_new: MultiXFEMDofs) -> np.ndarray:
+    """Transfer solution vector to new DOF numbering after crack updates."""
+    q_new = np.zeros(dofs_new.ndof, dtype=float)
+
+    # Standard dofs always present
+    nnode = dofs_new.std.shape[0]
+    for a in range(nnode):
+        for comp in (0, 1):
+            d_old = int(dofs_old.std[a, comp])
+            d_new = int(dofs_new.std[a, comp])
+            if d_old >= 0 and d_new >= 0 and d_old < len(q_old):
+                q_new[d_new] = q_old[d_old]
+
+    # Crack dofs: map by (crack_index, node, comp)
+    ncr_old = len(dofs_old.H)
+    ncr_new = len(dofs_new.H)
+    ncr = min(ncr_old, ncr_new)
+    for k in range(ncr):
+        Hold = dofs_old.H[k]
+        Hnew = dofs_new.H[k]
+        for a in range(nnode):
+            for comp in (0, 1):
+                d_old = int(Hold[a, comp])
+                d_new = int(Hnew[a, comp])
+                if d_old >= 0 and d_new >= 0 and d_old < len(q_old):
+                    q_new[d_new] = q_old[d_old]
+
+    return q_new
+
+
+def _build_B_enriched_multi(
+    N,
+    dNdx,
+    nodes,
+    conn,
+    cracks: list[XFEMCrack],
+    dofs: MultiXFEMDofs,
+    x_gp: float,
+    y_gp: float,
+    enr_scale: float = 1.0,
+):
+    """Build strain-displacement matrix B for multi-crack Heaviside enrichment.
+
+    Returns
+    -------
+    edofs : list[int]
+        Global dof indices in the same order as B columns.
+    B : (3, ndof_el) ndarray
+    """
+    nen = len(conn)
+
+    edofs: list[int] = []
+    # standard dofs
+    for a_local, a in enumerate(conn):
+        edofs.append(int(dofs.std[a, 0]))
+        edofs.append(int(dofs.std[a, 1]))
+
+    # Heaviside dofs for each crack
+    # Keep a mapping from (k, a_local, comp) -> column index
+    h_cols = []
+    for k, crack in enumerate(cracks):
+        if not crack.active:
+            continue
+        Hmap = dofs.H[k]
+        for a_local, a in enumerate(conn):
+            for comp in (0, 1):
+                d = int(Hmap[a, comp])
+                if d >= 0:
+                    h_cols.append((k, a_local, comp, len(edofs)))
+                    edofs.append(d)
+
+    B = np.zeros((3, len(edofs)), dtype=float)
+
+    # standard part
+    for a_local in range(nen):
+        B[0, 2*a_local + 0] = dNdx[a_local, 0]
+        B[1, 2*a_local + 1] = dNdx[a_local, 1]
+        B[2, 2*a_local + 0] = dNdx[a_local, 1]
+        B[2, 2*a_local + 1] = dNdx[a_local, 0]
+
+    # enriched part: for each crack
+    if h_cols:
+        # Precompute node positions
+        xy_nodes = np.array([_node_xy(nodes, a) for a in conn], dtype=float)
+
+        for (k, a_local, comp, col) in h_cols:
+            crack = cracks[k]
+            # Heaviside with behind-tip gating (same idea as single-crack implementation)
+            H_gp = crack.H(x_gp, y_gp)
+            H_a = crack.H(xy_nodes[a_local, 0], xy_nodes[a_local, 1])
+            G_y = crack.behind_tip(x_gp, y_gp)
+            # Optional continuation/ramping factor for enrichment activation.
+            # When enr_scale < 1, the enrichment is gradually introduced to
+            # improve robustness right after crack initiation/growth.
+            fac = float(enr_scale) * float(H_gp - H_a) * float(G_y)
+            if abs(fac) < 1e-14:
+                continue
+
+            if comp == 0:
+                B[0, col] = fac * dNdx[a_local, 0]
+                B[2, col] = fac * dNdx[a_local, 1]
+            else:
+                B[1, col] = fac * dNdx[a_local, 1]
+                B[2, col] = fac * dNdx[a_local, 0]
+
+    return edofs, B
+
+
+def assemble_xfem_system_multi(
+    nodes,
+    elems,
+    q,
+    dofs: MultiXFEMDofs,
+    cracks: list[XFEMCrack],
+    model: XFEMModel,
+    C,
+    rebar_segs,
+    coh_states: Union[dict[tuple, CohesiveState], CohesiveStateArrays],
+    u_bar: float,
+    visc_damp: float,
+    law: CohesiveLaw,
+    use_numba: bool = False,
+    coh_params: Optional[np.ndarray] = None,
+    enr_scale: float = 1.0,
+):
+    """Assemble global stiffness and residual with multiple Heaviside cracks.
+
+    Cohesive history is stored either as a legacy dict keyed by
+    ``(crack_id, elem_id, igp)`` or as :class:`~xfem_clean.xfem.state_arrays.CohesiveStateArrays`
+    (Phase-1). Assembly returns trial history as a *patch* so committed history
+    is never mutated inside Newton iterations.
+    """
+    ndof = dofs.ndof
+    rows: list[int] = []
+    cols: list[int] = []
+    data: list[float] = []
+    fint = np.zeros(ndof, dtype=float)
+    fext = np.zeros(ndof, dtype=float)
+    # external load (point load at load node)
+    # It is enforced via Dirichlet (displacement control) in the solver, so fext can be zero.
+
+    # Bulk integration (2x2 Gauss). For cut elements we use a subcell integration
+    # identical in spirit to the single-crack solver (uniform nsub x nsub split).
+    gp = [-1.0/math.sqrt(3.0), +1.0/math.sqrt(3.0)]
+    gw = [1.0, 1.0]
+    thickness = float(model.b)
+    
+    aux_gp_pos = []
+    aux_gp_sig = []
+
+    use_coh_arrays = isinstance(coh_states, CohesiveStateArrays)
+    coh_updates = CohesiveStatePatch.empty() if use_coh_arrays else dict(coh_states)
+    
+    nsub_cut = 4  # subcell integration resolution for cut elements
+    
+    for e, conn in enumerate(elems):
+        xe = np.array([_node_xy(nodes, i) for i in conn], dtype=float)
+    
+        is_cut = False
+        for crack in cracks:
+            if crack.active and crack.cuts_element(xe):
+                is_cut = True
+                break
+    
+        if not is_cut:
+            subdomains = [(-1.0, 1.0, -1.0, 1.0)]
+        else:
+            xis = np.linspace(-1.0, 1.0, nsub_cut + 1)
+            etas = np.linspace(-1.0, 1.0, nsub_cut + 1)
+            subdomains = []
+            for i in range(nsub_cut):
+                for j in range(nsub_cut):
+                    subdomains.append((float(xis[i]), float(xis[i+1]), float(etas[j]), float(etas[j+1])))
+    
+        for (xi_a, xi_b, eta_a, eta_b) in subdomains:
+            for i, xi_hat in enumerate(gp):
+                xi = 0.5*(xi_b - xi_a)*xi_hat + 0.5*(xi_b + xi_a)
+                wx = gw[i] * 0.5*(xi_b - xi_a)
+                for j, eta_hat in enumerate(gp):
+                    eta = 0.5*(eta_b - eta_a)*eta_hat + 0.5*(eta_b + eta_a)
+                    wy = gw[j] * 0.5*(eta_b - eta_a)
+                    w = float(wx * wy)
+    
+                    N, dN_dxi_s, dN_deta_s = q4_shape(xi, eta)
+                    dN_dxi = np.column_stack((dN_dxi_s, dN_deta_s))  # (4,2)
+    
+                    J = xe.T @ dN_dxi
+                    detJ = float(np.linalg.det(J))
+                    if detJ <= 1e-14:
+                        continue
+                    invJ = np.linalg.inv(J)
+                    dNdx = dN_dxi @ invJ  # (4,2) columns are [dN/dx, dN/dy]
+    
+                    x_gp = float(N @ xe[:, 0])
+                    y_gp = float(N @ xe[:, 1])
+    
+                    edofs, B = _build_B_enriched_multi(
+                        N,
+                        dNdx,
+                        nodes,
+                        conn,
+                        cracks,
+                        dofs,
+                        x_gp,
+                        y_gp,
+                        enr_scale=float(enr_scale),
+                    )
+                    q_e = q[np.array(edofs, dtype=int)]
+                    eps = B @ q_e
+                    sig = C @ eps
+    
+                    # store aux data for nonlocal averaging
+                    aux_gp_pos.append((x_gp, y_gp))
+                    aux_gp_sig.append((float(sig[0]), float(sig[1]), float(sig[2])))
+    
+                    w_bulk = detJ * w * thickness
+                    Ke = (B.T @ C @ B) * w_bulk
+                    fe_int = (B.T @ sig) * w_bulk
+    
+                    # scatter (sparse triplets)
+                    for a_loc, A in enumerate(edofs):
+                        fint[A] += fe_int[a_loc]
+                    for a_loc, A in enumerate(edofs):
+                        for b_loc, Bidx in enumerate(edofs):
+                            data.append(float(Ke[a_loc, b_loc]))
+                            rows.append(int(A))
+                            cols.append(int(Bidx))
+    
+    # Cohesive integration: per crack, per cut element.
+    # Phase-1: return a patch (sparse update) instead of materializing a full
+    # trial dictionary every Newton iteration.
+    use_coh_arrays = isinstance(coh_states, CohesiveStateArrays)
+    coh_updates: Union[dict[tuple, CohesiveState], CohesiveStatePatch]
+    coh_updates = CohesiveStatePatch.empty() if use_coh_arrays else dict(coh_states)
+
+    for k, crack in enumerate(cracks):
+        if not crack.active:
+            continue
+
+        for e, conn in enumerate(elems):
+            xe = np.array([_node_xy(nodes, i) for i in conn], dtype=float)
+            if not crack.cuts_element(xe):
+                continue
+
+            bbox = (float(np.min(xe[:, 0])), float(np.max(xe[:, 0])), float(np.min(xe[:, 1])), float(np.max(xe[:, 1])))
+            seg = clip_segment_to_bbox(crack.p0(), crack.pt(), *bbox)
+            if seg is None:
+                continue
+            pA, pB = seg
+            seg_len = float(np.linalg.norm(pB - pA))
+            if seg_len <= 1e-14:
+                continue
+
+            # 2-pt Gauss on [0,1]
+            sgp = [-1.0/math.sqrt(3.0), +1.0/math.sqrt(3.0)]
+            sgw = [1.0, 1.0]
+
+            # build element dof list incl this crack dofs
+            edofs = []
+            for a in conn:
+                edofs.append(int(dofs.std[a, 0]))
+                edofs.append(int(dofs.std[a, 1]))
+            Hmap = dofs.H[k]
+            hcols = []
+            for a_local, a in enumerate(conn):
+                for comp in (0, 1):
+                    d = int(Hmap[a, comp])
+                    if d >= 0:
+                        hcols.append((a_local, comp, len(edofs)))
+                        edofs.append(d)
+
+            q_e = q[np.array(edofs, dtype=int)]
+
+            # normal to crack (opening mode)
+            t = (crack.pt() - crack.p0())
+            t = t / max(1e-14, float(np.linalg.norm(t)))
+            n = np.array([-t[1], t[0]], dtype=float)
+
+            for igp, shat in enumerate(sgp):
+                s = 0.5*(shat + 1.0)
+                w = sgw[igp] * 0.5
+                x = float(pA[0] + s*(pB[0] - pA[0]))
+                y = float(pA[1] + s*(pB[1] - pA[1]))
+
+                # param coords
+                xi, eta = map_global_to_parent_Q4(x, y, xe)
+                N, _dN_dxi_s, _dN_deta_s = q4_shape(xi, eta)
+
+                # displacement jump operator J such that jump = J @ q_e
+                # only enriched dofs contribute to jump (via N*(H+ - H-)) ~ 2N for cut elements
+                Jop = np.zeros((2, len(edofs)), dtype=float)
+
+                # standard dofs: continuous, no jump
+
+                # enriched dofs: jump across crack is 2*N*a_i (since H flips sign)
+                for (a_local, comp, col) in hcols:
+                    # Continuation/ramping: scale jump operator to gradually activate
+                    # the discontinuity constraints after initiation/growth.
+                    val = float(enr_scale) * 2.0 * float(N[a_local])
+                    if comp == 0:
+                        Jop[0, col] = val
+                    else:
+                        Jop[1, col] = val
+
+                jump_u = Jop @ q_e
+                delta_n = float(np.dot(jump_u, n))
+
+                key = (k, e, igp)
+                # --- Cohesive state update (Phase 2: value-kernel option) ---
+                if use_numba and (coh_params is not None) and use_coh_arrays:
+                    assert isinstance(coh_states, CohesiveStateArrays)
+                    dm_old, dmg_old = coh_states.get_values(e, igp, k=k)
+                    t_n, dtn_dd, dm_new, dmg_new = cohesive_update_values_numba(
+                        delta_n,
+                        dm_old,
+                        dmg_old,
+                        coh_params,
+                        visc_damp=float(visc_damp),
+                    )
+                    assert isinstance(coh_updates, CohesiveStatePatch)
+                    coh_updates.add_values(k, e, igp, delta_max=dm_new, damage=dmg_new)
+                else:
+                    if use_coh_arrays:
+                        assert isinstance(coh_states, CohesiveStateArrays)
+                        st_old = coh_states.get_state(e, igp, k=k)
+                    else:
+                        st_old = coh_states.get(key, CohesiveState())
+                    t_n, dtn_dd, st_new = cohesive_update(law, delta_n, st_old, visc_damp=visc_damp)
+                    if isinstance(coh_updates, CohesiveStatePatch):
+                        coh_updates.add(k, e, igp, st_new)
+                    else:
+                        coh_updates[key] = st_new
+
+                # cohesive force vector in global dofs
+                # f = J^T * (t_n * n)
+                tr_vec = t_n * n
+                fe = Jop.T @ tr_vec
+
+                # cohesive tangent
+                Ke = Jop.T @ (dtn_dd * np.outer(n, n)) @ Jop
+
+                # scale by segment length
+                scale = seg_len * w * thickness
+
+                for a_loc, A in enumerate(edofs):
+                    fint[A] += fe[a_loc] * scale
+                for a_loc, A in enumerate(edofs):
+                    for b_loc, Bidx in enumerate(edofs):
+                        data.append(float(Ke[a_loc, b_loc] * scale))
+                        rows.append(int(A))
+                        cols.append(int(Bidx))
+
+
+    # Build sparse global stiffness (duplicates are summed in CSR conversion)
+    if len(data) == 0:
+        K = sp.csr_matrix((ndof, ndof), dtype=float)
+    else:
+        K = sp.coo_matrix((np.array(data, dtype=float), (np.array(rows, dtype=int), np.array(cols, dtype=int))),
+                          shape=(ndof, ndof)).tocsr()
+
+    # Stabilize enriched DOFs (avoid singularities right after enrichment activation)
+    if float(getattr(model, "k_stab", 0.0)) > 0.0:
+        nnode = int(nodes.shape[0]) if hasattr(nodes, "shape") else len(nodes)
+        diagK = K.diagonal()
+        if 2*nnode <= diagK.size:
+            k_ref = float(np.max(np.abs(diagK[:2*nnode])))
+        else:
+            k_ref = float(np.max(np.abs(diagK)))
+        if (not np.isfinite(k_ref)) or (k_ref <= 0.0):
+            k_ref = 1.0
+        k_stab_eff = float(model.k_stab)
+        if k_stab_eff < 1.0:
+            k_stab_eff *= k_ref
+        stab = np.zeros(ndof, dtype=float)
+        stab[2*nnode:] = k_stab_eff
+        K = K + sp.diags(stab, 0, shape=(ndof, ndof), format="csr")
+
+    # --- Rebar (global 1D segments) ---
+    # We add rebar contribution *after* the 2D bulk+cohesive assembly.
+    # This keeps the multi-crack assembly simple and reuses the existing
+    # `rebar_contrib` routine (defined in xfem_beam.py).
+    if rebar_segs is not None:
+        f_rb, K_rb = rebar_contrib(
+            nodes,
+            rebar_segs,
+            q,
+            model.steel_A_total,
+            model.steel_E,
+            model.steel_fy,
+            model.steel_fu,
+            model.steel_Eh,
+        )
+
+        # Embed into XFEM global system if the rebar routine returns only the
+        # standard (2*nnode) block.
+        if f_rb.shape[0] != dofs.ndof:
+            f_full = np.zeros(dofs.ndof, dtype=float)
+            f_full[: f_rb.shape[0]] = f_rb
+            f_rb = f_full
+
+        if getattr(K_rb, "shape", None) is not None and K_rb.shape != (dofs.ndof, dofs.ndof):
+            # top-left embedding (standard dofs first by construction)
+            K_full = sp.lil_matrix((dofs.ndof, dofs.ndof), dtype=float)
+            K_full[: K_rb.shape[0], : K_rb.shape[1]] = K_rb
+            K_rb = K_full.tocsr()
+        else:
+            K_rb = K_rb.tocsr() if sp.issparse(K_rb) else sp.csr_matrix(K_rb)
+
+        fint = fint + f_rb
+        K = K + K_rb
+
+    aux_gp_pos = np.array(aux_gp_pos, dtype=float)
+    aux_gp_sig = np.array(aux_gp_sig, dtype=float)
+
+    return K, fint, fext, coh_updates, aux_gp_pos, aux_gp_sig
+
+
+def _candidate_points_zone(model: XFEMModel, zone: str, nx: int) -> list[tuple[float, float]]:
+    """Generate candidate points for crack initiation."""
+    L = model.L
+    H = model.H
+    y0 = 0.0
+
+    if zone == "flexure":
+        x0 = 0.15 * L
+        x1 = 0.85 * L
+    elif zone == "shear_left":
+        x0 = 0.08 * L
+        x1 = 0.35 * L
+    elif zone == "shear_right":
+        x0 = 0.65 * L
+        x1 = 0.92 * L
+    else:
+        x0 = 0.0
+        x1 = L
+
+    xs = np.linspace(x0, x1, max(3, int(0.5*nx)))
+    pts = [(float(x), float(y0)) for x in xs]
+    return pts
+
+
+def _too_close_to_existing(x0: float, y0: float, cracks: list[XFEMCrack], min_spacing: float) -> bool:
+    for c in cracks:
+        if not c.active:
+            continue
+        if abs(x0 - c.x0) < min_spacing and abs(y0 - c.y0) < 0.05:
+            return True
+    return False
+
+
+def _init_crack_from_stress(x0: float, y0: float, sigbar: np.ndarray, model: XFEMModel) -> XFEMCrack:
+    # direction of maximum principal stress
+    s1, v1 = principal_max_dir(sigbar)
+    # crack tangent is perpendicular to v1 (crack normal aligned with v1)
+    t = np.array([-v1[1], v1[0]], dtype=float)
+    if t[1] < 0:
+        t = -t
+
+    # enforce growth toward interior and toward midspan
+    if x0 < 0.5 * model.L and t[0] < 0:
+        t = -t
+    if x0 > 0.5 * model.L and t[0] > 0:
+        t = -t
+
+    t = t / max(1e-14, float(np.linalg.norm(t)))
+    ds = model.H / max(1, model.ny)  # about one element height
+
+    tip_x = x0 + ds * float(t[0])
+    tip_y = y0 + ds * float(t[1])
+
+    angle = math.degrees(math.atan2(t[1], t[0]))
+    stop_y = float(model.crack_tip_stop_y) if getattr(model, "crack_tip_stop_y", None) is not None else (
+        0.5 * float(model.H) if getattr(model, "arrest_at_half_height", True) else float(model.H)
+    )
+    crack = XFEMCrack(x0=float(x0), y0=float(y0), tip_x=float(tip_x), tip_y=float(tip_y),
+                      stop_y=float(stop_y), angle_deg=float(angle), active=True)
+    return crack
+
+
+def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, umax=0.01,
+                                max_cracks: int = 8,
+                                crack_mode: str = "option2",
+                                u_diag_mm: float = 2.0,
+                                min_crack_spacing_factor: float = 2.0,
+                                law: Optional[CohesiveLaw] = None):
+    """Run displacement-controlled analysis with multiple cracks.
+
+    crack_mode:
+        - "option1": multiple flexural (mostly vertical) cracks only.
+        - "option2": flexural cracks + allow diagonal/shear cracks after u>=u_diag_mm.
+
+    Returns
+    -------
+    nodes, elems, q, results, cracks
+    """
+    if getattr(model, 'bulk_material', 'elastic') != 'elastic':
+        raise NotImplementedError(
+            "Multi-crack currently supports only bulk_material='elastic'. "
+            "Use the single-crack solver for 'dp' or 'cdp'."
+        )
+
+    # Mesh (reuse the same generator used by the single-crack solver)
+    nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
+
+    # Infer mesh spacing (dx, dy) from unique coordinate grids
+    xs = np.unique(nodes[:, 0]); ys = np.unique(nodes[:, 1])
+    xs.sort(); ys.sort()
+    dx = float(np.min(np.diff(xs))) if len(xs) > 1 else float(model.L)
+    dy = float(np.min(np.diff(ys))) if len(ys) > 1 else float(model.H)
+    model.ny = ny
+    model.lch = math.sqrt(dx*dy)
+
+    # Cohesive law (shared by all cracks). If not provided, build the default
+    # bilinear law from model parameters.
+    if law is None:
+        Kn = model.Kn_factor * model.E / max(1e-12, model.lch)
+        law = CohesiveLaw(Kn=Kn, ft=model.ft, Gf=model.Gf)
+
+    # Optional Numba kernels: pack cohesive parameters once.
+    use_numba = bool(getattr(model, "use_numba", False))
+    coh_params = pack_cohesive_law_params(law) if use_numba else None
+
+    # Nonlocal averaging radius for crack initiation/propagation.
+    # Keep consistent with the single-crack solver: `crack_rho` is a physical length [m].
+    rho = float(model.crack_rho)
+    r_cut = 3.0 * rho
+    stop_y = float(model.crack_tip_stop_y) if model.crack_tip_stop_y is not None else (
+        0.5 * float(model.H) if getattr(model, "arrest_at_half_height", True) else float(model.H)
+    )
+
+    C = plane_stress_C(model.E, model.nu)
+
+    # Rebar
+    rebar_segs = prepare_rebar_segments(nodes, cover=model.cover)
+
+    # Boundary conditions
+    left_node = find_nearest_node(nodes, 0.0, 0.0)
+    right_node = find_nearest_node(nodes, model.L, 0.0)
+    load_node = find_nearest_node(nodes, model.L/2.0, model.H)
+
+    fixed = {
+        (left_node, 0): 0.0,
+        (left_node, 1): 0.0,
+        (right_node, 1): 0.0,
+    }
+
+    # displacement control
+    u_targets = np.linspace(0.0, umax, nsteps+1)[1:]
+
+    cracks: list[XFEMCrack] = []
+    dofs = build_xfem_dofs_multi(nodes, elems, cracks, ny)
+    q_n = np.zeros(dofs.ndof, dtype=float)
+
+    # Phase-1: cohesive history in flat arrays (Numba-friendly).
+    coh_states: CohesiveStateArrays = CohesiveStateArrays.zeros(
+        n_primary=int(max_cracks), nelem=int(elems.shape[0]), ngp=2
+    )
+
+    results = []
+
+    # candidate points
+    pts_flex = _candidate_points_zone(model, "flexure", nx)
+    pts_shear = _candidate_points_zone(model, "shear_left", nx) + _candidate_points_zone(model, "shear_right", nx)
+
+    def solve_step(u_bar, q_init, coh_states_committed, *, enr_scale: float = 1.0):
+        """Newton solve for one load/displacement level.
+
+        Important: cohesive states are *not* mutated inside Newton; we always
+        assemble from the committed states and obtain a trial state for the
+        current iterate.
+        """
+        q = q_init.copy()
+        # Defensive: make sure the initial guess matches the current DOF layout.
+        # Adaptive substepping stores guesses on a stack; if the enrichment basis
+        # changes (new crack / growth) between stack creation and use, the stored
+        # guess can have a stale size.
+        if q.shape[0] != int(dofs.ndof):
+            nd = int(dofs.ndof)
+            if q.shape[0] < nd:
+                q = np.pad(q, (0, nd - q.shape[0]), mode="constant", constant_values=0.0)
+            else:
+                q = q[:nd].copy()
+
+        # Build a Dirichlet map in global DOF indices (supports + displacement control)
+        def build_fixed(u_target: float) -> Dict[int, float]:
+            f = {
+                int(dofs.std[left_node, 0]): 0.0,
+                int(dofs.std[left_node, 1]): 0.0,
+                int(dofs.std[right_node, 1]): 0.0,
+                int(dofs.std[load_node, 1]): -u_target,
+            }
+            # Enriched DOFs at constrained nodes must also be fixed to avoid singular modes.
+            # Multi-crack implementation uses ONLY Heaviside enrichments (no tip DOFs).
+            nnode = int(dofs.std.shape[0])
+            for a in range(nnode):
+                for comp in (0, 1):
+                    d_std = int(dofs.std[a, comp])
+                    if d_std in f:
+                        for Hk in dofs.H:
+                            dH = int(Hk[a, comp])
+                            if dH >= 0:
+                                f[dH] = 0.0
+            return f
+
+        fixed_step = build_fixed(u_bar)
+        for dof, val in fixed_step.items():
+            q[dof] = val
+
+        last_aux_pos = np.zeros((0, 2), dtype=float)
+        last_aux_sig = np.zeros((0, 3), dtype=float)
+        last_fint = np.zeros(dofs.ndof, dtype=float)
+        res0 = None  # reference residual for relative tolerance (set at first Newton iteration)
+
+        for it in range(model.newton_maxit):
+            K, fint, fext, coh_updates, aux_pos, aux_sig = assemble_xfem_system_multi(
+                nodes,
+                elems,
+                q,
+                dofs,
+                cracks,
+                model,
+                C,
+                rebar_segs,
+                coh_states_committed,
+                u_bar,
+                model.visc_damp,
+                law,
+                use_numba=use_numba,
+                coh_params=coh_params,
+                enr_scale=float(enr_scale),
+            )
+            R = fint - fext
+            free, K_ff, r_f, _ = apply_dirichlet(K, R, fixed_step, q)
+            rhs = -r_f
+
+            last_aux_pos, last_aux_sig = aux_pos, aux_sig
+            last_fint = fint
+            # Note: we deliberately do NOT commit cohesive history during
+            # Newton iterations. History is only committed on convergence.
+
+            res = float(np.linalg.norm(rhs))
+
+            # Gutierrez (Eq. 4.59): ||R|| / ||F_ext|| <= beta.
+            # With displacement control, use the current reaction at the loaded dofs as force scale.
+            load_dof = int(dofs.std[load_node, 1])
+            P_est = -float(R[load_dof])
+            fscale = max(1.0, abs(P_est))
+            tol = model.newton_tol_r + model.newton_beta * fscale
+            if res < tol:
+                if isinstance(coh_states_committed, CohesiveStateArrays):
+                    assert isinstance(coh_updates, CohesiveStatePatch)
+                    coh_trial = coh_states_committed.copy()
+                    coh_updates.apply_to(coh_trial)
+                else:
+                    coh_trial = coh_updates
+                return True, q, coh_trial, aux_pos, aux_sig, "res", it + 1, fint
+
+            try:
+                du_f = spla.spsolve(K_ff, rhs)
+            except Exception:
+                du_f = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)[0]
+            if not np.all(np.isfinite(du_f)):
+                du_f = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)[0]
+            norm_du = float(np.linalg.norm(du_f))
+            # Stagnation check: use absolute tolerance only (no displacement scaling)
+            # Previous version scaled by u_scale which made it too strict for small displacements
+            if norm_du < model.newton_tol_du:
+                return False, q, coh_states_committed, aux_pos, aux_sig, "stagnated", it + 1, fint
+
+            # Line search (optional): backtracking on residual norm
+            alpha = 1.0
+            if model.line_search:
+                r0 = float(np.linalg.norm(r_f))
+                accepted = False
+                for _ls in range(8):
+                    q_try = q.copy()
+                    q_try[free] += alpha * du_f
+                    for dof, val in fixed_step.items():
+                        q_try[dof] = val
+
+                    _, fint_t, fext_t, _coh_upd_t, aux_pos_t, aux_sig_t = assemble_xfem_system_multi(
+                        nodes,
+                        elems,
+                        q_try,
+                        dofs,
+                        cracks,
+                        model,
+                        C,
+                        rebar_segs,
+                        coh_states_committed,
+                        u_bar,
+                        model.visc_damp,
+                        law,
+                        use_numba=use_numba,
+                        coh_params=coh_params,
+                        enr_scale=float(enr_scale),
+                    )
+                    r_try = (fint_t - fext_t)[free]
+                    r1 = float(np.linalg.norm(r_try))
+                    if r1 <= r0:
+                        q = q_try
+                        last_aux_pos, last_aux_sig = aux_pos_t, aux_sig_t
+                        last_fint = fint_t
+                        accepted = True
+                        break
+                    alpha *= 0.5
+
+                if accepted:
+                    continue
+
+            # No (or failed) line search: full step
+            q[free] += du_f
+            for dof, val in fixed_step.items():
+                q[dof] = val
+
+        return False, q, coh_states_committed, last_aux_pos, last_aux_sig, "maxit", model.newton_maxit, last_fint
+
+    def ramp_solve_step(u_bar, q_init, coh_committed):
+        """Gutierrez-style adaptive ramping/continuation after init/grow.
+
+        We solve the same displacement level multiple times while gradually
+        activating enrichment/cohesive contributions. This greatly improves
+        robustness right after topology changes (new crack or growth) where
+        a direct Newton step can stagnate.
+
+        Returns the same tuple as `solve_step` with `enr_scale=1.0` on success.
+        """
+
+        # Defaults tuned for robustness (cheap because alpha=0 solves instantly).
+        a0 = float(getattr(model, "ramp_alpha0", 0.0))
+        da = float(getattr(model, "ramp_dalpha0", 0.25))
+        da_min = float(getattr(model, "ramp_dalpha_min", 0.02))
+
+        a = max(0.0, min(1.0, a0))
+        q_cur = q_init
+        coh_cur = coh_committed
+
+        # Always do an initial solve at alpha=a (including a=0)
+        ok, q_cur, coh_cur, aux_pos, aux_sig, why, iters, fint_last = solve_step(
+            u_bar, q_cur, coh_cur, enr_scale=a
+        )
+        if not ok:
+            return False, q_cur, coh_cur, aux_pos, aux_sig, why, iters, fint_last
+
+        # Continuation to full enrichment
+        while a < 1.0:
+            a_try = min(1.0, a + da)
+            ok, q_try, coh_try, aux_pos, aux_sig, why, iters, fint_last = solve_step(
+                u_bar, q_cur, coh_cur, enr_scale=a_try
+            )
+            if ok:
+                a = a_try
+                q_cur = q_try
+                coh_cur = coh_try
+                da = min(0.5, da * 1.5)
+                continue
+
+            # failed: reduce ramp increment
+            da *= 0.5
+            if da < da_min:
+                return False, q_try, coh_try, aux_pos, aux_sig, why, iters, fint_last
+
+        return True, q_cur, coh_cur, aux_pos, aux_sig, "ramp", 0, fint_last
+
+    # adaptive substepping stack (same logic as single)
+    for istep, u1 in enumerate(u_targets, start=1):
+        u0 = results[-1]["u"] if results else 0.0
+        stack = [(0, u0, u1, q_n.copy(), coh_states.copy())]
+
+        while stack:
+            lvl, ua, ub, q_start, coh_comm = stack.pop()
+            du = ub - ua
+            print(f"[substep] lvl={lvl:02d} u0={ua*1e3:5.3f}mm -> u1={ub*1e3:5.3f}mm  du={du*1e3:5.3f}mm  ncr={len([c for c in cracks if c.active])}")
+
+            ok, q_sol, coh_trial, aux_pos, aux_sig, why, iters, fint_last = solve_step(ub, q_start, coh_comm)
+            if ok:
+                print(f"    [newton] converged({why}) it={iters:02d} ||rhs||=OK u={ub*1e3:.3f}mm")
+
+                # ------------------------------------------------------------
+                # Gutierrez-style inner loop:
+                # After any crack initiation/growth, rebuild DOFs and **re-solve**
+                # at the *same* ub until no further crack update is triggered.
+                # This avoids carrying a non-equilibrated state into the next step.
+                # ------------------------------------------------------------
+                cracks_before = copy.deepcopy(cracks)
+                dofs_before = dofs
+
+                q_loc = q_sol
+                coh_loc = coh_trial
+                aux_pos_loc = aux_pos
+                aux_sig_loc = aux_sig
+                fint_loc = fint_last
+
+                inner_failed = False
+
+                for _inner in range(int(model.crack_max_inner)):
+                    changed = False
+                    initiated = False
+                    min_spacing = min_crack_spacing_factor * dx
+
+                    # ---- Crack initiation ----
+                    nactive = len([c for c in cracks if c.active])
+                    allow_diag = (crack_mode.lower() == "option2") and (ub * 1e3 >= u_diag_mm)
+
+                    if nactive < max_cracks:
+                        zones = ["flexure"]
+                        if allow_diag:
+                            zones.append("shear")
+
+                        best = None
+                        for zone in zones:
+                            pts = pts_flex if zone == "flexure" else pts_shear
+                            for (x0, y0) in pts:
+                                if _too_close_to_existing(x0, y0, cracks, min_spacing):
+                                    continue
+                                sigbar = nonlocal_bar_stress(
+                                    aux_pos_loc, aux_sig_loc, x0, y0 + 1e-6, rho, y_max=stop_y, r_cut=r_cut
+                                )
+                                s1, _ = principal_max_dir(sigbar)
+                                if best is None or s1 > best[0]:
+                                    best = (s1, x0, y0, sigbar)
+
+                        if best is not None and best[0] >= model.ft * float(model.ft_initiation_factor):
+                            s1, x0, y0, sigbar = best
+
+                            # In option1 force vertical-ish flexural cracks by overriding direction
+                            if crack_mode.lower() == "option1":
+                                crack = XFEMCrack(
+                                    x0=float(x0), y0=float(y0),
+                                    tip_x=float(x0), tip_y=float(y0 + dy),
+                                    stop_y=float(stop_y), angle_deg=90.0, active=True
+                                )
+                            else:
+                                crack = _init_crack_from_stress(x0, y0, sigbar, model)
+
+                            cracks.append(crack)
+                            initiated = True
+                            print(
+                                f"[crack] initiate #{len(cracks)} at ({crack.x0:.4f},{crack.y0:.4f}) "
+                                f"tip=({crack.tip_x:.4f},{crack.tip_y:.4f}) angle={crack.angle_deg:.1f}° "
+                                f"s1={s1/1e6:.3f}MPa ft={model.ft/1e6:.3f}MPa"
+                            )
+                            changed = True
+
+                    # ---- Crack propagation: grow at most one crack per inner iteration ----
+                    if cracks:
+                        grow_best = None
+                        for idx, c in enumerate(cracks):
+                            if not c.active:
+                                continue
+                            if c.tip_y >= stop_y:
+                                continue
+                            px = c.tip_x + 0.25 * dy * math.cos(math.radians(c.angle_deg))
+                            py = c.tip_y + 0.25 * dy * math.sin(math.radians(c.angle_deg))
+                            sigbar = nonlocal_bar_stress(
+                                aux_pos_loc, aux_sig_loc, px, py, rho, y_max=stop_y, r_cut=r_cut
+                            )
+                            s1, _ = principal_max_dir(sigbar)
+                            if s1 >= model.ft * float(model.ft_initiation_factor):
+                                if grow_best is None or s1 > grow_best[0]:
+                                    grow_best = (s1, idx, sigbar)
+
+                        if grow_best is not None:
+                            s1, idx, sigbar = grow_best
+                            c = cracks[idx]
+                            s1_tip, v1 = principal_max_dir(sigbar)
+                            t = np.array([-v1[1], v1[0]], dtype=float)
+                            if t[1] < 0:
+                                t = -t
+                            if c.x0 < 0.5 * model.L and t[0] < 0:
+                                t = -t
+                            if c.x0 > 0.5 * model.L and t[0] > 0:
+                                t = -t
+                            t = t / max(1e-14, float(np.linalg.norm(t)))
+
+                            c.tip_x = float(c.tip_x + dy * float(t[0]))
+                            c.tip_y = float(c.tip_y + dy * float(t[1]))
+                            c.angle_deg = float(math.degrees(math.atan2(t[1], t[0])))
+                            print(
+                                f"[crack] grow #{idx+1} tip=({c.tip_x:.4f},{c.tip_y:.4f}) "
+                                f"angle={c.angle_deg:.1f}° s1={s1/1e6:.3f}MPa"
+                            )
+                            changed = True
+
+                    if not changed:
+                        break
+
+                    # Rebuild DOFs and transfer equilibrium guess, then re-solve at same ub
+                    dofs_new = build_xfem_dofs_multi(nodes, elems, cracks, ny)
+                    q_loc = transfer_q_between_dofs_multi(q_loc, dofs, dofs_new)
+                    dofs = dofs_new
+
+                    # Always re-equilibrate at the same u_bar after *initiation* or *growth*.
+                    # Use adaptive continuation (enrichment/cohesive ramping) to stabilize the Newton solve.
+                    ok2, q_loc, coh_loc, aux_pos_loc, aux_sig_loc, why2, it2, fint_loc = ramp_solve_step(
+                        ub, q_loc, coh_loc
+                    )
+                    if not ok2:
+                        print(f"    [inner] re-solve failed({why2}) it={it2:02d} at u={ub*1e3:.3f}mm -> will subdivide")
+                        cracks[:] = cracks_before
+                        dofs = dofs_before
+                        inner_failed = True
+                        ok = False
+                        why = why2
+                        iters = it2
+                        break
+                    else:
+                        print(f"    [inner] re-solve converged({why2}) it={it2:02d} at u={ub*1e3:.3f}mm")
+
+                if inner_failed:
+                    # fall through to bisection logic below
+                    pass
+                else:
+                    # Accept final equilibrium at ub (after inner crack updates)
+                    q_n = q_loc
+                    coh_states = coh_loc
+
+                    dof_load = int(dofs.std[load_node, 1])
+                    P = -float(fint_loc[dof_load])
+
+                    results.append({
+                        "step": istep,
+                        "u": float(ub),
+                        "P": float(P),
+                        "ncr": len([c for c in cracks if c.active]),
+                    })
+
+                    # When the first half converges, the next substep on the stack (if any)
+                    # starts at this accepted `ub`. Update its initial state accordingly.
+                    if stack:
+                        lvl_n, ua_n, ub_n, _q_s, _coh_s = stack[-1]
+                        if abs(float(ua_n) - float(ub)) < 1e-14:
+                            stack[-1] = (lvl_n, ua_n, ub_n, q_n.copy(), coh_states.copy())
+
+                    continue
+
+            # not ok -> subdivide
+            print(f"    [newton] failed({why}) it={iters:02d} u={ub*1e3:.3f}mm")
+            if lvl >= model.max_subdiv:
+                raise RuntimeError(f"Substepping exceeded max_subdiv={model.max_subdiv} at u={ub} m")
+
+            um = 0.5*(ua + ub)
+            stack.append((lvl+1, um, ub, q_start.copy(), coh_comm))
+            stack.append((lvl+1, ua, um, q_start.copy(), coh_comm))
+
+    return nodes, elems, q_n, results, cracks
