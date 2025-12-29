@@ -55,6 +55,11 @@ class BondSlipModelCode2010:
 
     Unloading/reloading follows a secant path to the maximum historical slip.
 
+    Part B (Dissertation Model):
+      - Steel yielding reduction: Ωy(εs) per Eq. 3.57-3.58
+      - Crack deterioration: Ωcrack(s, wmax) per Eq. 3.60-3.61
+      - Secant stiffness option for stability (Eq. 5.2-5.3)
+
     Parameters
     ----------
     f_cm : float
@@ -63,6 +68,16 @@ class BondSlipModelCode2010:
         Bar diameter [m]
     condition : str
         Bond condition: "good" (unconfined) or "poor" (all other)
+    f_y : float, optional
+        Steel yield stress [Pa] (for Ωy calculation)
+    E_s : float, optional
+        Steel Young's modulus [Pa] (for Ωy calculation)
+    use_secant_stiffness : bool
+        Use secant instead of tangent stiffness for stability (Part B7)
+    enable_yielding_reduction : bool
+        Apply steel yielding reduction factor Ωy (Part B3)
+    enable_crack_deterioration : bool
+        Apply crack deterioration factor Ωcrack (Part B4)
 
     Attributes
     ----------
@@ -79,6 +94,11 @@ class BondSlipModelCode2010:
     f_cm: float
     d_bar: float
     condition: str = "good"
+    f_y: float = 500e6  # Steel yield stress [Pa] (Part B3)
+    E_s: float = 200e9  # Steel Young's modulus [Pa] (Part B3)
+    use_secant_stiffness: bool = True  # Part B7: Use secant for stability
+    enable_yielding_reduction: bool = False  # Part B3: Steel yielding Ωy
+    enable_crack_deterioration: bool = False  # Part B4: Crack deterioration Ωcrack
 
     def __post_init__(self):
         """Initialize Model Code 2010 parameters."""
@@ -153,7 +173,101 @@ class BondSlipModelCode2010:
 
         return float(tau), float(dtau_ds)
 
-    def tau_and_tangent(self, s: float, s_max_history: float) -> Tuple[float, float]:
+    def compute_yielding_reduction(self, eps_s: float) -> float:
+        """Compute steel yielding reduction factor Ωy per Eq. 3.57-3.58.
+
+        Parameters
+        ----------
+        eps_s : float
+            Steel strain (axial, in bar direction) [-]
+
+        Returns
+        -------
+        omega_y : float
+            Reduction factor [0, 1] where 1 = no yielding, 0 = full yielding
+
+        Notes
+        -----
+        From dissertation Eq. 3.57-3.58:
+            eps_y = f_y / E_s
+            If eps_s <= eps_y: Ωy = 1
+            If eps_s > eps_y: Ωy = exp(-k_y * (eps_s - eps_y) / eps_y)
+        where k_y ≈ 10 (calibration parameter).
+        """
+        if not self.enable_yielding_reduction:
+            return 1.0
+
+        eps_y = self.f_y / self.E_s  # Yield strain
+        k_y = 10.0  # Calibration parameter (dissertation uses ~10)
+
+        if eps_s <= eps_y:
+            return 1.0
+        else:
+            # Exponential decay after yielding
+            delta_eps = (eps_s - eps_y) / eps_y
+            omega_y = math.exp(-k_y * delta_eps)
+            return max(0.0, min(1.0, omega_y))  # Clamp to [0, 1]
+
+    def compute_crack_deterioration(
+        self, dist_to_crack: float, w_max: float, t_n_cohesive_stress: float, f_t: float
+    ) -> float:
+        """Compute crack deterioration factor Ωcrack per Eq. 3.60-3.61 (modified).
+
+        Parameters
+        ----------
+        dist_to_crack : float
+            Distance from interface point to nearest transverse crack [m]
+        w_max : float
+            Maximum crack opening (historical) at interface level [m]
+        t_n_cohesive_stress : float
+            Normal cohesive stress t_n(w_max) from cohesive law [Pa]
+        f_t : float
+            Concrete tensile strength [Pa]
+
+        Returns
+        -------
+        omega_crack : float
+            Reduction factor [0, 1] where 1 = no deterioration, 0 = full deterioration
+
+        Notes
+        -----
+        From dissertation Eq. 3.60-3.61 (modified):
+            l_ch = characteristic length (e.g., 2*d_bar)
+            chi = t_n(w_max) / f_t  (FPZ state indicator)
+            Ωcrack = exp(-dist_to_crack / l_ch * (1 - chi))
+
+        When chi = 1 (no crack): Ωcrack = 1
+        When chi = 0 (fully open crack): Ωcrack = exp(-dist/l_ch)
+        """
+        if not self.enable_crack_deterioration:
+            return 1.0
+
+        l_ch = 2.0 * self.d_bar  # Characteristic length
+
+        # FPZ state indicator (Eq. 3.61)
+        if f_t > 1e-9:
+            chi = max(0.0, min(1.0, t_n_cohesive_stress / f_t))
+        else:
+            chi = 0.0
+
+        # Deterioration factor (Eq. 3.60 modified)
+        if dist_to_crack < 1e-12:
+            # At crack: maximum deterioration
+            omega_crack = chi  # Reduces to chi at crack
+        else:
+            # Exponential decay
+            omega_crack = math.exp(-dist_to_crack / l_ch * (1.0 - chi))
+            omega_crack = max(chi, min(1.0, omega_crack))  # Clamp [chi, 1]
+
+        return omega_crack
+
+    def tau_and_tangent(
+        self,
+        s: float,
+        s_max_history: float,
+        eps_s: float = 0.0,
+        omega_crack: float = 1.0,
+    ) -> Tuple[float, float]:
         """Compute bond stress and tangent stiffness with unloading/reloading.
 
         Parameters
@@ -162,18 +276,25 @@ class BondSlipModelCode2010:
             Current slip (signed) [m]
         s_max_history : float
             Maximum absolute slip reached in history [m]
+        eps_s : float, optional
+            Steel axial strain (for Ωy calculation, Part B3)
+        omega_crack : float, optional
+            Crack deterioration factor (for Ωcrack, Part B4)
 
         Returns
         -------
         tau : float
             Bond stress (signed) [Pa]
         dtau_ds : float
-            Tangent stiffness [Pa/m]
+            Tangent (or secant) stiffness [Pa/m]
 
         Notes
         -----
         - Loading: follows monotonic envelope
         - Unloading/reloading: secant stiffness to historical maximum
+        - Part B3: Multiplies by Ωy(eps_s) if enabled
+        - Part B4: Multiplies by Ωcrack if enabled
+        - Part B7: Returns secant stiffness if use_secant_stiffness=True
         """
         s_abs = abs(s)
         sign = 1.0 if s >= 0.0 else -1.0
@@ -194,7 +315,93 @@ class BondSlipModelCode2010:
                 tau_abs = 0.0
                 dtau_abs = 0.0
 
+        # Part B3: Apply steel yielding reduction
+        omega_y = self.compute_yielding_reduction(eps_s)
+
+        # Part B3+B4: Apply reduction factors
+        tau_abs *= omega_y * omega_crack
+        dtau_abs *= omega_y * omega_crack
+
+        # Part B7: Use secant stiffness for stability
+        if self.use_secant_stiffness and s_abs > 1e-14:
+            dtau_abs = tau_abs / s_abs  # Secant stiffness
+
         return sign * float(tau_abs), float(dtau_abs)
+
+
+# ------------------------------------------------------------------------------
+# Dowel Action Model (Part B5)
+# ------------------------------------------------------------------------------
+
+@dataclass
+class DowelActionModel:
+    """Dowel action model for transverse stress-opening relationship.
+
+    Based on Brenna et al. model (Eqs. 3.62-3.68 in dissertation).
+
+    Parameters
+    ----------
+    d_bar : float
+        Bar diameter [m]
+    f_c : float
+        Concrete compressive strength [Pa]
+    E_s : float
+        Steel Young's modulus [Pa]
+
+    Notes
+    -----
+    The radial stress-opening relationship is:
+        σ_r(w) = σ_r_max * (1 - exp(-k_d * w / d_bar))
+
+    where:
+        σ_r_max = k_c * sqrt(f_c)  (maximum radial stress)
+        k_c ≈ 0.8 (calibration constant)
+        k_d ≈ 50 (shape parameter)
+    """
+
+    d_bar: float
+    f_c: float
+    E_s: float = 200e9
+
+    def __post_init__(self):
+        """Initialize dowel parameters."""
+        # Calibration constants (from Brenna et al.)
+        self.k_c = 0.8  # Radial stress coefficient
+        self.k_d = 50.0  # Shape parameter for exponential
+
+        # Maximum radial stress
+        f_c_mpa = self.f_c / 1e6
+        self.sigma_r_max = self.k_c * math.sqrt(f_c_mpa) * 1e6  # Convert back to Pa
+
+    def sigma_r_and_tangent(self, w: float) -> Tuple[float, float]:
+        """Compute radial stress and tangent stiffness.
+
+        Parameters
+        ----------
+        w : float
+            Crack opening (normal to bar) [m]
+
+        Returns
+        -------
+        sigma_r : float
+            Radial stress [Pa]
+        dsigma_r_dw : float
+            Tangent stiffness [Pa/m]
+
+        Notes
+        -----
+        From Eq. 3.62-3.68:
+            σ_r = σ_r_max * (1 - exp(-k_d * w / d_bar))
+            dσ_r/dw = σ_r_max * (k_d / d_bar) * exp(-k_d * w / d_bar)
+        """
+        w_abs = abs(w)
+
+        # Exponential model
+        exp_term = math.exp(-self.k_d * w_abs / self.d_bar)
+        sigma_r = self.sigma_r_max * (1.0 - exp_term)
+        dsigma_r_dw = self.sigma_r_max * (self.k_d / self.d_bar) * exp_term
+
+        return float(sigma_r), float(dsigma_r_dw)
 
 
 # ------------------------------------------------------------------------------
@@ -247,10 +454,136 @@ class BondSlipStateArrays:
 
 
 # ------------------------------------------------------------------------------
+# Preflight Validation (Part A1)
+# ------------------------------------------------------------------------------
+
+def validate_bond_inputs(
+    u_total: np.ndarray,
+    segs: np.ndarray,
+    steel_dof_map: np.ndarray,
+    steel_dof_offset: int,
+    bond_states: BondSlipStateArrays,
+) -> None:
+    """Validate all bond-slip inputs before calling Numba kernel.
+
+    This function detects invalid DOF mappings, out-of-bounds indices,
+    and inconsistent array shapes that would cause kernel hangs.
+
+    Raises
+    ------
+    RuntimeError
+        If any validation check fails, with detailed diagnostic message.
+    """
+    ndof_total = len(u_total)
+    n_seg = segs.shape[0]
+
+    # Check segs shape
+    if segs.ndim != 2 or segs.shape[1] != 5:
+        raise RuntimeError(
+            f"bond-slip invalid segs shape: expected (n_seg, 5), got {segs.shape}"
+        )
+
+    # Check steel_dof_map shape and dtype
+    if steel_dof_map.ndim != 2 or steel_dof_map.shape[1] != 2:
+        raise RuntimeError(
+            f"bond-slip invalid steel_dof_map shape: expected (nnode, 2), got {steel_dof_map.shape}"
+        )
+
+    if steel_dof_map.dtype not in [np.int32, np.int64]:
+        raise RuntimeError(
+            f"bond-slip invalid steel_dof_map dtype: expected int64, got {steel_dof_map.dtype}"
+        )
+
+    nnode = steel_dof_map.shape[0]
+
+    # Check steel_dof_offset in range
+    if steel_dof_offset < 0 or steel_dof_offset >= ndof_total:
+        raise RuntimeError(
+            f"bond-slip invalid steel_dof_offset={steel_dof_offset}, ndof_total={ndof_total}"
+        )
+
+    # Check each segment's nodes and DOF indices
+    errors = []
+    for iseg in range(n_seg):
+        n1 = int(segs[iseg, 0])
+        n2 = int(segs[iseg, 1])
+
+        # Validate node indices
+        if n1 < 0 or n1 >= nnode:
+            errors.append(f"  seg {iseg}: n1={n1} out of range [0, {nnode})")
+        if n2 < 0 or n2 >= nnode:
+            errors.append(f"  seg {iseg}: n2={n2} out of range [0, {nnode})")
+
+        if n1 < 0 or n1 >= nnode or n2 < 0 or n2 >= nnode:
+            continue  # Skip DOF checks if node indices invalid
+
+        # Validate concrete DOF indices (these are computed directly as 2*n)
+        dof_c1x = 2 * n1
+        dof_c1y = 2 * n1 + 1
+        dof_c2x = 2 * n2
+        dof_c2y = 2 * n2 + 1
+
+        if dof_c1x >= steel_dof_offset or dof_c1y >= steel_dof_offset:
+            errors.append(
+                f"  seg {iseg}: concrete DOFs ({dof_c1x}, {dof_c1y}) >= steel_dof_offset={steel_dof_offset}"
+            )
+        if dof_c2x >= steel_dof_offset or dof_c2y >= steel_dof_offset:
+            errors.append(
+                f"  seg {iseg}: concrete DOFs ({dof_c2x}, {dof_c2y}) >= steel_dof_offset={steel_dof_offset}"
+            )
+
+        # Validate steel DOF indices from mapping
+        dof_s1x = int(steel_dof_map[n1, 0])
+        dof_s1y = int(steel_dof_map[n1, 1])
+        dof_s2x = int(steel_dof_map[n2, 0])
+        dof_s2y = int(steel_dof_map[n2, 1])
+
+        # Steel DOFs must be either -1 (no steel) or in valid range
+        if dof_s1x != -1 and (dof_s1x < steel_dof_offset or dof_s1x >= ndof_total):
+            errors.append(
+                f"  seg {iseg}: dof_s1x={dof_s1x} out of range [{steel_dof_offset}, {ndof_total})"
+            )
+        if dof_s1y != -1 and (dof_s1y < steel_dof_offset or dof_s1y >= ndof_total):
+            errors.append(
+                f"  seg {iseg}: dof_s1y={dof_s1y} out of range [{steel_dof_offset}, {ndof_total})"
+            )
+        if dof_s2x != -1 and (dof_s2x < steel_dof_offset or dof_s2x >= ndof_total):
+            errors.append(
+                f"  seg {iseg}: dof_s2x={dof_s2x} out of range [{steel_dof_offset}, {ndof_total})"
+            )
+        if dof_s2y != -1 and (dof_s2y < steel_dof_offset or dof_s2y >= ndof_total):
+            errors.append(
+                f"  seg {iseg}: dof_s2y={dof_s2y} out of range [{steel_dof_offset}, {ndof_total})"
+            )
+
+        # For bond-slip segments, steel DOFs must not be -1
+        if dof_s1x == -1 or dof_s1y == -1:
+            errors.append(f"  seg {iseg}: n1={n1} has no steel DOFs (dof_s1x={dof_s1x}, dof_s1y={dof_s1y})")
+        if dof_s2x == -1 or dof_s2y == -1:
+            errors.append(f"  seg {iseg}: n2={n2} has no steel DOFs (dof_s2x={dof_s2x}, dof_s2y={dof_s2y})")
+
+    # Check bond_states consistency
+    if bond_states.n_segments != n_seg:
+        errors.append(
+            f"  bond_states.n_segments={bond_states.n_segments} != n_seg={n_seg}"
+        )
+
+    if len(bond_states.s_max) != n_seg:
+        errors.append(
+            f"  len(bond_states.s_max)={len(bond_states.s_max)} != n_seg={n_seg}"
+        )
+
+    if errors:
+        error_msg = "bond-slip invalid DOF mapping detected:\n" + "\n".join(errors)
+        error_msg += f"\n\nContext: ndof_total={ndof_total}, nnode={nnode}, n_seg={n_seg}, steel_dof_offset={steel_dof_offset}"
+        raise RuntimeError(error_msg)
+
+
+# ------------------------------------------------------------------------------
 # Bond-Slip Assembly (Numba-accelerated)
 # ------------------------------------------------------------------------------
 
-@njit(cache=True, parallel=False)  # TODO: Fix parallel loop (entry_idx conflict)
+@njit(cache=False, boundscheck=True)  # Part A3: Enable boundscheck for debugging
 def _bond_slip_assembly_numba(
     u_total: np.ndarray,        # [ndof_total] displacement vector
     segs: np.ndarray,           # [n_seg, 5]: [n1, n2, L0, cx, cy]
@@ -512,6 +845,7 @@ def assemble_bond_slip(
     steel_dof_map: np.ndarray = None,
     steel_EA: float = 0.0,
     use_numba: bool = True,
+    enable_validation: bool = True,  # Part A1: Enable preflight checks
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Assemble bond-slip interface forces and stiffness.
 
@@ -530,8 +864,12 @@ def assemble_bond_slip(
     steel_dof_map : np.ndarray, optional
         [nnode, 2] array mapping node → steel DOF indices (or -1 if no steel)
         If None, assumes dense contiguous steel DOFs (legacy behavior)
+    steel_EA : float
+        Steel axial stiffness (E*A)
     use_numba : bool
         Use Numba acceleration if available
+    enable_validation : bool
+        Run preflight validation checks (Part A1)
 
     Returns
     -------
@@ -574,13 +912,52 @@ def assemble_bond_slip(
                 steel_dof_map[n, 0] = steel_dof_offset + 2 * n
                 steel_dof_map[n, 1] = steel_dof_offset + 2 * n + 1
 
-        f_bond, rows, cols, data, s_curr = _bond_slip_assembly_numba(
-            u_total,
-            steel_segments,
-            steel_dof_map,
-            bond_params,
-            bond_states.s_max,
-        )
+        # Part A2: Force dtypes and contiguity
+        u_total = np.ascontiguousarray(u_total, dtype=np.float64)
+        steel_segments = np.ascontiguousarray(steel_segments, dtype=np.float64)
+        steel_dof_map = np.ascontiguousarray(steel_dof_map, dtype=np.int64)
+        bond_params = np.ascontiguousarray(bond_params, dtype=np.float64)
+        s_max_hist = np.ascontiguousarray(bond_states.s_max, dtype=np.float64)
+
+        # Part A1: Preflight validation
+        if enable_validation:
+            try:
+                validate_bond_inputs(
+                    u_total=u_total,
+                    segs=steel_segments,
+                    steel_dof_map=steel_dof_map,
+                    steel_dof_offset=steel_dof_offset,
+                    bond_states=bond_states,
+                )
+            except RuntimeError as e:
+                # Add context about when/where this error occurred
+                import traceback
+                tb = traceback.format_exc()
+                raise RuntimeError(
+                    f"Bond-slip validation failed!\n"
+                    f"This error indicates invalid DOF mapping after crack growth.\n"
+                    f"Original error:\n{str(e)}\n\n"
+                    f"Traceback:\n{tb}"
+                ) from e
+
+        # Call Numba kernel
+        try:
+            f_bond, rows, cols, data, s_curr = _bond_slip_assembly_numba(
+                u_total,
+                steel_segments,
+                steel_dof_map,
+                bond_params,
+                s_max_hist,
+                steel_EA,
+            )
+        except Exception as e:
+            # Enhanced error reporting for kernel failures
+            raise RuntimeError(
+                f"Bond-slip Numba kernel failed!\n"
+                f"Context: ndof={ndof_total}, n_seg={n_seg}, steel_dof_offset={steel_dof_offset}\n"
+                f"This likely indicates an array indexing bug in the Numba kernel.\n"
+                f"Original error: {str(e)}"
+            ) from e
 
         K_bond = sp.csr_matrix((data, (rows, cols)), shape=(ndof_total, ndof_total))
 
@@ -593,10 +970,183 @@ def assemble_bond_slip(
         )
 
     else:
-        # Pure Python fallback (not implemented here for brevity)
-        raise NotImplementedError("Python fallback for bond-slip assembly not yet implemented. Use Numba.")
+        # Part A4: Pure Python fallback for debugging
+        f_bond, K_bond, bond_states_new = _bond_slip_assembly_python(
+            u_total=u_total,
+            steel_segments=steel_segments,
+            steel_dof_map=steel_dof_map if steel_dof_map is not None else _build_legacy_dof_map(ndof_total, steel_dof_offset),
+            bond_law=bond_law,
+            bond_states=bond_states,
+            steel_EA=steel_EA,
+        )
 
     return f_bond, K_bond, bond_states_new
+
+
+# ------------------------------------------------------------------------------
+# Python Fallback (Part A4)
+# ------------------------------------------------------------------------------
+
+def _build_legacy_dof_map(ndof_total: int, steel_dof_offset: int) -> np.ndarray:
+    """Build legacy dense DOF mapping for backward compatibility."""
+    nnode = int(ndof_total - steel_dof_offset) // 2
+    steel_dof_map = -np.ones((nnode, 2), dtype=np.int64)
+    for n in range(nnode):
+        steel_dof_map[n, 0] = steel_dof_offset + 2 * n
+        steel_dof_map[n, 1] = steel_dof_offset + 2 * n + 1
+    return steel_dof_map
+
+
+def _bond_slip_assembly_python(
+    u_total: np.ndarray,
+    steel_segments: np.ndarray,
+    steel_dof_map: np.ndarray,
+    bond_law: BondSlipModelCode2010,
+    bond_states: BondSlipStateArrays,
+    steel_EA: float = 0.0,
+) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
+    """Pure Python fallback for bond-slip assembly (for debugging).
+
+    This implementation has explicit bounds checks and assertions
+    to help diagnose kernel bugs.
+    """
+    ndof = u_total.shape[0]
+    n_seg = steel_segments.shape[0]
+
+    f_bond = np.zeros(ndof, dtype=float)
+    rows = []
+    cols = []
+    data = []
+    s_current = np.zeros(n_seg, dtype=float)
+
+    perimeter = math.pi * bond_law.d_bar
+
+    for i in range(n_seg):
+        # Extract segment data
+        n1 = int(steel_segments[i, 0])
+        n2 = int(steel_segments[i, 1])
+        L0 = steel_segments[i, 2]
+        cx = steel_segments[i, 3]
+        cy = steel_segments[i, 4]
+
+        # Concrete DOFs (with bounds check)
+        dof_c1x = 2 * n1
+        dof_c1y = 2 * n1 + 1
+        dof_c2x = 2 * n2
+        dof_c2y = 2 * n2 + 1
+
+        assert 0 <= dof_c1x < ndof, f"dof_c1x={dof_c1x} out of bounds [0, {ndof})"
+        assert 0 <= dof_c1y < ndof, f"dof_c1y={dof_c1y} out of bounds [0, {ndof})"
+        assert 0 <= dof_c2x < ndof, f"dof_c2x={dof_c2x} out of bounds [0, {ndof})"
+        assert 0 <= dof_c2y < ndof, f"dof_c2y={dof_c2y} out of bounds [0, {ndof})"
+
+        # Steel DOFs (with bounds check)
+        dof_s1x = int(steel_dof_map[n1, 0])
+        dof_s1y = int(steel_dof_map[n1, 1])
+        dof_s2x = int(steel_dof_map[n2, 0])
+        dof_s2y = int(steel_dof_map[n2, 1])
+
+        assert dof_s1x != -1, f"seg {i}: n1={n1} has no steel DOF (x)"
+        assert dof_s1y != -1, f"seg {i}: n1={n1} has no steel DOF (y)"
+        assert dof_s2x != -1, f"seg {i}: n2={n2} has no steel DOF (x)"
+        assert dof_s2y != -1, f"seg {i}: n2={n2} has no steel DOF (y)"
+
+        assert 0 <= dof_s1x < ndof, f"dof_s1x={dof_s1x} out of bounds [0, {ndof})"
+        assert 0 <= dof_s1y < ndof, f"dof_s1y={dof_s1y} out of bounds [0, {ndof})"
+        assert 0 <= dof_s2x < ndof, f"dof_s2x={dof_s2x} out of bounds [0, {ndof})"
+        assert 0 <= dof_s2y < ndof, f"dof_s2y={dof_s2y} out of bounds [0, {ndof})"
+
+        # Displacements
+        u_c1x = u_total[dof_c1x]
+        u_c1y = u_total[dof_c1y]
+        u_c2x = u_total[dof_c2x]
+        u_c2y = u_total[dof_c2y]
+
+        u_s1x = u_total[dof_s1x]
+        u_s1y = u_total[dof_s1y]
+        u_s2x = u_total[dof_s2x]
+        u_s2y = u_total[dof_s2y]
+
+        # Average slip
+        u_c_mid_x = 0.5 * (u_c1x + u_c2x)
+        u_c_mid_y = 0.5 * (u_c1y + u_c2y)
+        u_s_mid_x = 0.5 * (u_s1x + u_s2x)
+        u_s_mid_y = 0.5 * (u_s1y + u_s2y)
+
+        du_x = u_s_mid_x - u_c_mid_x
+        du_y = u_s_mid_y - u_c_mid_y
+
+        # Slip in bar direction
+        s = du_x * cx + du_y * cy
+        s_current[i] = s
+
+        # Bond stress
+        s_max = max(bond_states.s_max[i], abs(s))
+        tau, dtau_ds = bond_law.tau_and_tangent(s, s_max)
+
+        # Bond force
+        F_bond = tau * perimeter * L0
+
+        # Distribute to nodes
+        Fx_s = F_bond * cx
+        Fy_s = F_bond * cy
+        Fx_c = -Fx_s
+        Fy_c = -Fy_s
+
+        f_bond[dof_s1x] += 0.5 * Fx_s
+        f_bond[dof_s1y] += 0.5 * Fy_s
+        f_bond[dof_s2x] += 0.5 * Fx_s
+        f_bond[dof_s2y] += 0.5 * Fy_s
+
+        f_bond[dof_c1x] += 0.5 * Fx_c
+        f_bond[dof_c1y] += 0.5 * Fy_c
+        f_bond[dof_c2x] += 0.5 * Fx_c
+        f_bond[dof_c2y] += 0.5 * Fy_c
+
+        # Stiffness
+        K_bond = dtau_ds * perimeter * L0
+        Kxx = K_bond * cx * cx
+        Kxy = K_bond * cx * cy
+        Kyy = K_bond * cy * cy
+
+        # Diagonal terms (simplified)
+        rows.extend([dof_s1x, dof_s1y, dof_s2x, dof_s2y, dof_c1x, dof_c1y, dof_c2x, dof_c2y])
+        cols.extend([dof_s1x, dof_s1y, dof_s2x, dof_s2y, dof_c1x, dof_c1y, dof_c2x, dof_c2y])
+        data.extend([0.25 * Kxx, 0.25 * Kyy, 0.25 * Kxx, 0.25 * Kyy, 0.25 * Kxx, 0.25 * Kyy, 0.25 * Kxx, 0.25 * Kyy])
+
+        # Add steel axial stiffness if requested
+        if steel_EA > 0.0:
+            K_steel = steel_EA / L0
+            Kxx_s = K_steel * cx * cx
+            Kxy_s = K_steel * cx * cy
+            Kyy_s = K_steel * cy * cy
+
+            # Add 16 entries for full 4x4 block
+            for ri, ci, val in [
+                (dof_s1x, dof_s1x, Kxx_s), (dof_s1x, dof_s1y, Kxy_s),
+                (dof_s1y, dof_s1x, Kxy_s), (dof_s1y, dof_s1y, Kyy_s),
+                (dof_s2x, dof_s2x, Kxx_s), (dof_s2x, dof_s2y, Kxy_s),
+                (dof_s2y, dof_s2x, Kxy_s), (dof_s2y, dof_s2y, Kyy_s),
+                (dof_s1x, dof_s2x, -Kxx_s), (dof_s1x, dof_s2y, -Kxy_s),
+                (dof_s1y, dof_s2x, -Kxy_s), (dof_s1y, dof_s2y, -Kyy_s),
+                (dof_s2x, dof_s1x, -Kxx_s), (dof_s2x, dof_s1y, -Kxy_s),
+                (dof_s2y, dof_s1x, -Kxy_s), (dof_s2y, dof_s1y, -Kyy_s),
+            ]:
+                rows.append(ri)
+                cols.append(ci)
+                data.append(val)
+
+    K_bond_sp = sp.csr_matrix((data, (rows, cols)), shape=(ndof, ndof))
+
+    # Update states
+    bond_states_new = BondSlipStateArrays(
+        n_segments=n_seg,
+        s_max=np.maximum(bond_states.s_max, np.abs(s_current)),
+        s_current=s_current,
+        tau_current=np.zeros(n_seg),
+    )
+
+    return f_bond, K_bond_sp, bond_states_new
 
 
 # ------------------------------------------------------------------------------
