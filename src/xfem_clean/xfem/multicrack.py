@@ -18,6 +18,7 @@ import scipy.sparse.linalg as spla
 
 from xfem_clean.cohesive_laws import CohesiveLaw, CohesiveState, cohesive_update
 from xfem_clean.numba.kernels_cohesive import pack_cohesive_law_params, cohesive_update_values_numba
+from xfem_clean.numba.kernels_bulk import pack_bulk_params
 from xfem_clean.crack_criteria import principal_max_dir, nonlocal_bar_stress
 from xfem_clean.fem.q4 import q4_shape
 from xfem_clean.fem.mesh import structured_quad_mesh
@@ -29,7 +30,14 @@ from xfem_clean.xfem.material import plane_stress_C
 from xfem_clean.xfem.model import XFEMModel
 from xfem_clean.xfem.q4_utils import map_global_to_parent_Q4
 from xfem_clean.xfem.utils import find_nearest_node
-from xfem_clean.xfem.state_arrays import CohesiveStateArrays, CohesiveStatePatch
+from xfem_clean.xfem.state_arrays import CohesiveStateArrays, CohesiveStatePatch, BulkStateArrays, BulkStatePatch
+from xfem_clean.material_point import MaterialPoint, mp_default
+from xfem_clean.numba.kernels_bulk import (
+    elastic_integrate_plane_stress_numba,
+    dp_integrate_plane_stress_numba,
+    cdp_integrate_plane_stress_numba,
+)
+from xfem_clean.constitutive import LinearElasticPlaneStress
 # Multi-crack (Heaviside + cohesive) extension
 # ==========================================================
 
@@ -253,6 +261,10 @@ def assemble_xfem_system_multi(
     use_numba: bool = False,
     coh_params: Optional[np.ndarray] = None,
     enr_scale: float = 1.0,
+    bulk_states: Optional[Union[dict, "BulkStateArrays"]] = None,
+    bulk_kind: int = 0,
+    bulk_params: Optional[np.ndarray] = None,
+    material: Optional["ConstitutiveModel"] = None,
 ):
     """Assemble global stiffness and residual with multiple Heaviside cracks.
 
@@ -260,6 +272,8 @@ def assemble_xfem_system_multi(
     ``(crack_id, elem_id, igp)`` or as :class:`~xfem_clean.xfem.state_arrays.CohesiveStateArrays`
     (Phase-1). Assembly returns trial history as a *patch* so committed history
     is never mutated inside Newton iterations.
+
+    Phase 2: Now supports bulk material nonlinearity (CDP/DP) via Numba kernels.
     """
     ndof = dofs.ndof
     rows: list[int] = []
@@ -275,12 +289,23 @@ def assemble_xfem_system_multi(
     gp = [-1.0/math.sqrt(3.0), +1.0/math.sqrt(3.0)]
     gw = [1.0, 1.0]
     thickness = float(model.b)
-    
+
     aux_gp_pos = []
     aux_gp_sig = []
 
     use_coh_arrays = isinstance(coh_states, CohesiveStateArrays)
     coh_updates = CohesiveStatePatch.empty() if use_coh_arrays else dict(coh_states)
+
+    # Phase 2: Bulk material states
+    use_bulk_arrays = isinstance(bulk_states, BulkStateArrays)
+    use_bulk_numba = bool(use_numba) and use_bulk_arrays and (bulk_params is not None) and (int(bulk_kind) in (1, 2, 3))
+    bulk_updates: Union[dict, BulkStatePatch]
+    bulk_updates = BulkStatePatch.empty() if use_bulk_arrays else {}
+
+    # Default material (retrocompat)
+    if material is None and not use_bulk_numba:
+        material = LinearElasticPlaneStress(E=float(model.E), nu=float(model.nu))
+        material.C = np.asarray(C, dtype=float)
     
     nsub_cut = 4  # subcell integration resolution for cut elements
     
@@ -338,14 +363,112 @@ def assemble_xfem_system_multi(
                     )
                     q_e = q[np.array(edofs, dtype=int)]
                     eps = B @ q_e
-                    sig = C @ eps
-    
+
+                    # Integration-point id (same logic as single-crack)
+                    ip_local = int(ixi + 2 * ieta)
+                    ipid = ip_local if (not is_cut) else int(4 + 4 * sidx + ip_local)
+
+                    # Phase 2: Constitutive integration (Numba path or Python material)
+                    if use_bulk_numba:
+                        assert isinstance(bulk_states, BulkStateArrays)
+                        # Load state
+                        dt0 = float(bulk_states.damage_t[e, ipid])
+                        dc0 = float(bulk_states.damage_c[e, ipid])
+                        wpl0 = float(bulk_states.w_plastic[e, ipid])
+                        wft0 = float(bulk_states.w_fract_t[e, ipid])
+                        wfc0 = float(bulk_states.w_fract_c[e, ipid])
+                        eps_p6_old = np.asarray(bulk_states.eps_p6[e, ipid, :], dtype=float)
+                        ezz_old = float(bulk_states.eps_zz[e, ipid])
+                        kappa_old = float(bulk_states.kappa[e, ipid])
+                        kt0 = float(bulk_states.kappa_t[e, ipid])
+                        kc0 = float(bulk_states.kappa_c[e, ipid])
+
+                        if int(bulk_kind) == 1:
+                            E_mat = float(bulk_params[0])
+                            nu_mat = float(bulk_params[1])
+                            sig, Ct = elastic_integrate_plane_stress_numba(eps, E_mat, nu_mat, dt0, dc0)
+                            eps_p6_new = eps_p6_old
+                            ezz_new = ezz_old
+                            kappa_new = kappa_old
+                            dt_new, dc_new = dt0, dc0
+                            kt_new, kc_new = kt0, kc0
+                            wpl_new, wft_new, wfc_new = wpl0, wft0, wfc0
+                        elif int(bulk_kind) == 2:
+                            E_mat = float(bulk_params[0])
+                            nu_mat = float(bulk_params[1])
+                            alpha = float(bulk_params[2])
+                            k0 = float(bulk_params[3])
+                            Hh = float(bulk_params[4])
+                            sig, Ct, eps_p6_new, ezz_new, kappa_new, dW = dp_integrate_plane_stress_numba(
+                                eps, eps_p6_old, ezz_old, kappa_old, E_mat, nu_mat, alpha, k0, Hh
+                            )
+                            dt_new, dc_new = dt0, dc0
+                            kt_new, kc_new = kt0, kc0
+                            wpl_new = wpl0 + dW
+                            wft_new, wfc_new = wft0, wfc0
+                        elif int(bulk_kind) == 3:
+                            E_mat = float(bulk_params[0])
+                            nu_mat = float(bulk_params[1])
+                            alpha = float(bulk_params[2])
+                            k0 = float(bulk_params[3])
+                            Hh = float(bulk_params[4])
+                            ft = float(bulk_params[5])
+                            fc = float(bulk_params[6])
+                            Gf_t = float(bulk_params[7])
+                            Gf_c = float(bulk_params[8])
+                            lch = float(bulk_params[9])
+                            sig, Ct, eps_p6_new, ezz_new, kappa_new, dt_new, dc_new, kt_new, kc_new, wpl_new, wft_new, wfc_new = cdp_integrate_plane_stress_numba(
+                                eps, eps_p6_old, ezz_old, kappa_old, dt0, dc0, kt0, kc0, wpl0, wft0, wfc0,
+                                E_mat, nu_mat, alpha, k0, Hh, ft, fc, Gf_t, Gf_c, lch
+                            )
+                        else:
+                            raise ValueError(f"Unknown bulk_kind={bulk_kind}")
+
+                        # Store trial state
+                        eps_p3_new = np.array([eps_p6_new[0], eps_p6_new[1], eps_p6_new[3]], dtype=float)
+                        if isinstance(bulk_updates, BulkStatePatch):
+                            bulk_updates.add_values(
+                                e, ipid,
+                                eps=np.asarray(eps, dtype=float),
+                                sigma=np.asarray(sig, dtype=float),
+                                eps_p=eps_p3_new,
+                                damage_t=float(dt_new),
+                                damage_c=float(dc_new),
+                                kappa=float(kappa_new),
+                                w_plastic=float(wpl_new),
+                                w_fract_t=float(wft_new),
+                                w_fract_c=float(wfc_new),
+                                eps_p6=np.asarray(eps_p6_new, dtype=float),
+                                eps_zz=float(ezz_new),
+                                kappa_t=float(kt_new),
+                                kappa_c=float(kc_new),
+                                cdp_w_t=0.0,
+                                cdp_eps_in_c=0.0,
+                            )
+                    elif bulk_states is not None and material is not None:
+                        # Python material path (retrocompat or ConcreteCDPReal with tables)
+                        if use_bulk_arrays:
+                            assert isinstance(bulk_states, BulkStateArrays)
+                            mp0 = bulk_states.get_mp(e, ipid)
+                        else:
+                            mp0 = bulk_states.get((e, ipid), mp_default())
+                        mp = mp0.copy_shallow()
+                        sig, Ct = material.integrate(mp, eps)
+                        if isinstance(bulk_updates, BulkStatePatch):
+                            bulk_updates.add(e, ipid, mp)
+                        else:
+                            bulk_updates[(e, ipid)] = mp
+                    else:
+                        # Fallback: linear elastic (retrocompat)
+                        sig = C @ eps
+                        Ct = C
+
                     # store aux data for nonlocal averaging
                     aux_gp_pos.append((x_gp, y_gp))
                     aux_gp_sig.append((float(sig[0]), float(sig[1]), float(sig[2])))
-    
+
                     w_bulk = detJ * w * thickness
-                    Ke = (B.T @ C @ B) * w_bulk
+                    Ke = (B.T @ Ct @ B) * w_bulk
                     fe_int = (B.T @ sig) * w_bulk
     
                     # scatter (sparse triplets)
@@ -543,7 +666,7 @@ def assemble_xfem_system_multi(
     aux_gp_pos = np.array(aux_gp_pos, dtype=float)
     aux_gp_sig = np.array(aux_gp_sig, dtype=float)
 
-    return K, fint, fext, coh_updates, aux_gp_pos, aux_gp_sig
+    return K, fint, fext, coh_updates, bulk_updates, aux_gp_pos, aux_gp_sig
 
 
 def _candidate_points_zone(model: XFEMModel, zone: str, nx: int) -> list[tuple[float, float]]:
@@ -624,11 +747,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
     -------
     nodes, elems, q, results, cracks
     """
-    if getattr(model, 'bulk_material', 'elastic') != 'elastic':
-        raise NotImplementedError(
-            "Multi-crack currently supports only bulk_material='elastic'. "
-            "Use the single-crack solver for 'dp' or 'cdp'."
-        )
+    # Phase 2: CDP support enabled for multi-crack!
 
     # Mesh (reuse the same generator used by the single-crack solver)
     nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
@@ -687,13 +806,41 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
         n_primary=int(max_cracks), nelem=int(elems.shape[0]), ngp=2
     )
 
+    # Phase-2: bulk material history (CDP/DP support)
+    bulk_kind, bulk_params = pack_bulk_params(model)
+    # Estimate max integration points per element: uncut elements have 4 IPs,
+    # cut elements can have up to 4 + 4*nsub_cut*nsub_cut with nsub_cut=4 => 68 IPs
+    max_ip_per_elem = 4 + 4 * 4 * 4
+    bulk_states: BulkStateArrays = BulkStateArrays.zeros(
+        nelem=int(elems.shape[0]), max_ip=int(max_ip_per_elem)
+    )
+
+    # Initialize constitutive model (if not using Numba)
+    material = None
+    if bulk_kind == 0:
+        # Use Python material (retrocompat or ConcreteCDPReal)
+        bulk_mat = str(getattr(model, "bulk_material", "elastic")).lower().strip()
+        if bulk_mat in ("cdp", "concrete"):
+            from xfem_clean.constitutive import ConcreteCDP
+            material = ConcreteCDP(
+                E=float(model.E),
+                nu=float(model.nu),
+                ft=float(model.ft),
+                fc=float(model.fc),
+                Gf_t=float(model.Gf),
+                lch=float(model.lch),
+                phi_deg=float(getattr(model, "dp_phi_deg", 30.0)),
+                cohesion=float(getattr(model, "dp_cohesion", None) or (0.25 * model.fc)),
+                H=float(getattr(model, "dp_H", 0.0)),
+            )
+
     results = []
 
     # candidate points
     pts_flex = _candidate_points_zone(model, "flexure", nx)
     pts_shear = _candidate_points_zone(model, "shear_left", nx) + _candidate_points_zone(model, "shear_right", nx)
 
-    def solve_step(u_bar, q_init, coh_states_committed, *, enr_scale: float = 1.0):
+    def solve_step(u_bar, q_init, coh_states_committed, bulk_states_committed, *, enr_scale: float = 1.0):
         """Newton solve for one load/displacement level.
 
         Important: cohesive states are *not* mutated inside Newton; we always
@@ -743,7 +890,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
         res0 = None  # reference residual for relative tolerance (set at first Newton iteration)
 
         for it in range(model.newton_maxit):
-            K, fint, fext, coh_updates, aux_pos, aux_sig = assemble_xfem_system_multi(
+            K, fint, fext, coh_updates, bulk_updates, aux_pos, aux_sig = assemble_xfem_system_multi(
                 nodes,
                 elems,
                 q,
@@ -759,6 +906,10 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                 use_numba=use_numba,
                 coh_params=coh_params,
                 enr_scale=float(enr_scale),
+                bulk_states=bulk_states_committed,
+                bulk_kind=bulk_kind,
+                bulk_params=bulk_params,
+                material=material,
             )
             R = fint - fext
             free, K_ff, r_f, _ = apply_dirichlet(K, R, fixed_step, q)
@@ -766,7 +917,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
 
             last_aux_pos, last_aux_sig = aux_pos, aux_sig
             last_fint = fint
-            # Note: we deliberately do NOT commit cohesive history during
+            # Note: we deliberately do NOT commit cohesive/bulk history during
             # Newton iterations. History is only committed on convergence.
 
             res = float(np.linalg.norm(rhs))
@@ -778,13 +929,21 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
             fscale = max(1.0, abs(P_est))
             tol = model.newton_tol_r + model.newton_beta * fscale
             if res < tol:
+                # Commit cohesive and bulk states
                 if isinstance(coh_states_committed, CohesiveStateArrays):
                     assert isinstance(coh_updates, CohesiveStatePatch)
                     coh_trial = coh_states_committed.copy()
                     coh_updates.apply_to(coh_trial)
                 else:
                     coh_trial = coh_updates
-                return True, q, coh_trial, aux_pos, aux_sig, "res", it + 1, fint
+
+                if isinstance(bulk_states_committed, BulkStateArrays):
+                    assert isinstance(bulk_updates, BulkStatePatch)
+                    bulk_trial = bulk_states_committed.copy()
+                    bulk_updates.apply_to(bulk_trial)
+                else:
+                    bulk_trial = bulk_updates
+                return True, q, coh_trial, bulk_trial, aux_pos, aux_sig, "res", it + 1, fint
 
             try:
                 du_f = spla.spsolve(K_ff, rhs)
