@@ -55,6 +55,13 @@ def assemble_xfem_system(
     bond_states_comm: Optional[object] = None,
     enable_bond_slip: bool = False,
     steel_EA: float = 0.0,
+    # Dissertation parity features
+    reinforcement_layers: Optional[list] = None,
+    enable_reinforcement: bool = False,
+    n_gauss_line: int = 7,
+    reinforcement_states_comm: Optional[list] = None,
+    rebar_contact_points: Optional[list] = None,
+    enable_rebar_contact: bool = False,
 ) -> Tuple[
     sp.csr_matrix,
     np.ndarray,
@@ -62,6 +69,8 @@ def assemble_xfem_system(
     Union[Dict[Tuple[int, int], MaterialPoint], BulkStatePatch],
     Dict[str, np.ndarray],
     Optional[object],
+    Optional[list],  # reinforcement_states
+    Optional[object],  # contact state (unused for penalty)
 ]:
     """Assemble global tangent and internal force vector.
 
@@ -627,6 +636,42 @@ def assemble_xfem_system(
         fint += f_bond
         K = K + K_bond
 
+    # Reinforcement layers contribution (Dissertation Chapter 4.5, Eq. 4.92-4.103)
+    reinforcement_updates = None
+    if enable_reinforcement and reinforcement_layers is not None and len(reinforcement_layers) > 0:
+        from xfem_clean.reinforcement import assemble_reinforcement_layers
+
+        f_reinf, K_reinf, reinforcement_updates = assemble_reinforcement_layers(
+            q=q,
+            nodes=nodes,
+            elems=elems,
+            dofs_map=dofs,
+            layers=reinforcement_layers,
+            states_comm=reinforcement_states_comm,
+            n_gauss_line=n_gauss_line,
+            use_plasticity=True,  # Use bilinear elasto-plastic steel model
+        )
+
+        # Add reinforcement contribution to global system
+        fint += f_reinf
+        K = K + K_reinf
+
+    # Rebar contact contribution (Dissertation Chapter 4.5.3, Eq. 4.120-4.129)
+    contact_updates = None
+    if enable_rebar_contact and rebar_contact_points is not None and len(rebar_contact_points) > 0:
+        from xfem_clean.contact_rebar import assemble_rebar_contact
+
+        f_contact, K_contact = assemble_rebar_contact(
+            contact_points=rebar_contact_points,
+            u_total=q,
+            dofs_map=dofs,
+            ndof_total=ndof,
+        )
+
+        # Add contact contribution to global system
+        fint += f_contact
+        K = K + K_contact
+
     aux = {
         "gp_pos": np.asarray(gp_pos, dtype=float),
         "gp_sig": np.asarray(gp_sig, dtype=float),
@@ -637,4 +682,4 @@ def assemble_xfem_system(
         "coh_weight": np.asarray(coh_wgt, dtype=float),
         "coh_delta_max": np.asarray(coh_delta_max, dtype=float),
     }
-    return K, fint, coh_updates, mp_updates, aux, bond_updates
+    return K, fint, coh_updates, mp_updates, aux, bond_updates, reinforcement_updates, contact_updates

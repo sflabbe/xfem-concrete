@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional, Tuple, Literal
+from dataclasses import dataclass, field
+from typing import Optional, Tuple, Literal, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from xfem_clean.reinforcement import ReinforcementLayer
+    from xfem_clean.contact_rebar import RebarContactPoint
+    from xfem_clean.numerical_aspects import StabilizationParams
+    from xfem_clean.compression_damage import ConcreteCompressionModel
 
 # Type alias for tip enrichment mode
 TipEnrichmentType = Literal["lefm_branch", "non_singular_cohesive"]
@@ -144,6 +150,40 @@ class XFEMModel:
     # Load application patch (half-width in meters)
     load_halfwidth: float = 0.0
 
+    # ========================================================================
+    # Dissertation Parity Features (Chapter 4)
+    # ========================================================================
+
+    # Reinforcement layers (Heaviside enrichment, Eq. 4.92-4.103)
+    reinforcement_layers: List = field(default_factory=list)  # List[ReinforcementLayer]
+
+    # Rebar contact points (penalty method, Eq. 4.120-4.129)
+    rebar_contact_points: List = field(default_factory=list)  # List[RebarContactPoint]
+
+    # Numerical stabilization parameters (Chapter 4.3)
+    stabilization: Optional[object] = None  # StabilizationParams (initialized in __post_init__)
+
+    # Compression damage model (Eq. 3.44-3.46)
+    compression_damage_model: Optional[object] = None  # ConcreteCompressionModel
+
+    # Quadrature knobs
+    n_gauss_line: int = 7  # Line integration for reinforcement (thesis default)
+    n_gauss_quad: int = 2  # Standard 2x2 for quadrilaterals
+    n_gauss_tri: int = 3  # Triangle integration order
+    n_gauss_near_tip: int = 4  # Higher-order integration near crack tip
+
+    # Enable flags for dissertation features
+    enable_reinforcement_heaviside: bool = False  # Mesh-independent reinforcement (Eq. 4.92)
+    enable_rebar_contact: bool = False  # Rebar-rebar penalty contact (Eq. 4.120)
+    enable_junction_enrichment: bool = False  # Junction enrichment at coalescence (Eq. 4.64)
+    enable_dof_projection: bool = False  # L2 DOF projection on topology change (Eq. 4.60)
+    enable_dolbow_removal: bool = False  # Ill-conditioning node removal (Eq. 4.3)
+    enable_kinked_tips: bool = False  # Kinked crack tip coordinates (Chapter 4.3)
+    enable_compression_damage: bool = False  # Compression damage model (Eq. 3.44)
+
+    # Junction detection tolerance
+    junction_merge_tolerance: float = 0.01  # meters
+
     def __post_init__(self):
         """Backwards-compatible parameter normalization."""
 
@@ -178,3 +218,11 @@ class XFEMModel:
             self.steel_Eh = self.steel_H
         if self.steel_fu == 0.0 and self.steel_fy != 0.0:
             self.steel_fu = 1.145 * self.steel_fy
+
+        # Initialize stabilization parameters if None
+        if self.stabilization is None and self.enable_dolbow_removal:
+            from xfem_clean.numerical_aspects import StabilizationParams
+            self.stabilization = StabilizationParams(
+                use_dolbow_removal=self.enable_dolbow_removal,
+                use_kinked_tips=self.enable_kinked_tips,
+            )

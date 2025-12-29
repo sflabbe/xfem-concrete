@@ -57,6 +57,8 @@ def build_xfem_dofs(
     tip_patch: Tuple[float, float, float, float],
     rebar_segs: np.ndarray = None,
     enable_bond_slip: bool = False,
+    enable_dolbow_removal: bool = False,
+    tol_dolbow: float = 1e-4,
 ) -> XFEMDofs:
     """Build XFEM dof layout for the current crack configuration.
 
@@ -108,6 +110,17 @@ def build_xfem_dofs(
             for a in en:
                 if float(nodes[a, 1]) <= yH + 1e-12:
                     H_nodes[int(a)] = True
+
+    # Apply Dolbow ill-conditioning node removal (Dissertation Eq. 4.3)
+    if enable_dolbow_removal and crack.active:
+        from xfem_clean.numerical_aspects import remove_ill_conditioned_nodes
+        H_nodes = remove_ill_conditioned_nodes(
+            nodes=nodes,
+            elems=elems,
+            crack=crack,
+            enriched_nodes=H_nodes,
+            tol_dolbow=tol_dolbow,
+        )
 
     xmin, xmax, ymin, ymax = tip_patch
     tip_nodes = (xs >= xmin) & (xs <= xmax) & (ys >= ymin) & (ys <= ymax)
