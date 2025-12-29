@@ -955,7 +955,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
             # Stagnation check: use absolute tolerance only (no displacement scaling)
             # Previous version scaled by u_scale which made it too strict for small displacements
             if norm_du < model.newton_tol_du:
-                return False, q, coh_states_committed, aux_pos, aux_sig, "stagnated", it + 1, fint
+                return False, q, coh_states_committed, bulk_states_committed, aux_pos, aux_sig, "stagnated", it + 1, fint
 
             # Line search (optional): backtracking on residual norm
             alpha = 1.0
@@ -968,7 +968,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                     for dof, val in fixed_step.items():
                         q_try[dof] = val
 
-                    _, fint_t, fext_t, _coh_upd_t, aux_pos_t, aux_sig_t = assemble_xfem_system_multi(
+                    _, fint_t, fext_t, _coh_upd_t, _bulk_upd_t, aux_pos_t, aux_sig_t = assemble_xfem_system_multi(
                         nodes,
                         elems,
                         q_try,
@@ -984,6 +984,10 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                         use_numba=use_numba,
                         coh_params=coh_params,
                         enr_scale=float(enr_scale),
+                        bulk_states=bulk_states_committed,
+                        bulk_kind=bulk_kind,
+                        bulk_params=bulk_params,
+                        material=material,
                     )
                     r_try = (fint_t - fext_t)[free]
                     r1 = float(np.linalg.norm(r_try))
@@ -1003,9 +1007,9 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
             for dof, val in fixed_step.items():
                 q[dof] = val
 
-        return False, q, coh_states_committed, last_aux_pos, last_aux_sig, "maxit", model.newton_maxit, last_fint
+        return False, q, coh_states_committed, bulk_states_committed, last_aux_pos, last_aux_sig, "maxit", model.newton_maxit, last_fint
 
-    def ramp_solve_step(u_bar, q_init, coh_committed):
+    def ramp_solve_step(u_bar, q_init, coh_committed, bulk_committed):
         """Gutierrez-style adaptive ramping/continuation after init/grow.
 
         We solve the same displacement level multiple times while gradually
@@ -1024,45 +1028,47 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
         a = max(0.0, min(1.0, a0))
         q_cur = q_init
         coh_cur = coh_committed
+        bulk_cur = bulk_committed
 
         # Always do an initial solve at alpha=a (including a=0)
-        ok, q_cur, coh_cur, aux_pos, aux_sig, why, iters, fint_last = solve_step(
-            u_bar, q_cur, coh_cur, enr_scale=a
+        ok, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, why, iters, fint_last = solve_step(
+            u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a
         )
         if not ok:
-            return False, q_cur, coh_cur, aux_pos, aux_sig, why, iters, fint_last
+            return False, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, why, iters, fint_last
 
         # Continuation to full enrichment
         while a < 1.0:
             a_try = min(1.0, a + da)
-            ok, q_try, coh_try, aux_pos, aux_sig, why, iters, fint_last = solve_step(
-                u_bar, q_cur, coh_cur, enr_scale=a_try
+            ok, q_try, coh_try, bulk_try, aux_pos, aux_sig, why, iters, fint_last = solve_step(
+                u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a_try
             )
             if ok:
                 a = a_try
                 q_cur = q_try
                 coh_cur = coh_try
+                bulk_cur = bulk_try
                 da = min(0.5, da * 1.5)
                 continue
 
             # failed: reduce ramp increment
             da *= 0.5
             if da < da_min:
-                return False, q_try, coh_try, aux_pos, aux_sig, why, iters, fint_last
+                return False, q_try, coh_try, bulk_try, aux_pos, aux_sig, why, iters, fint_last
 
-        return True, q_cur, coh_cur, aux_pos, aux_sig, "ramp", 0, fint_last
+        return True, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, "ramp", 0, fint_last
 
     # adaptive substepping stack (same logic as single)
     for istep, u1 in enumerate(u_targets, start=1):
         u0 = results[-1]["u"] if results else 0.0
-        stack = [(0, u0, u1, q_n.copy(), coh_states.copy())]
+        stack = [(0, u0, u1, q_n.copy(), coh_states.copy(), bulk_states.copy())]
 
         while stack:
-            lvl, ua, ub, q_start, coh_comm = stack.pop()
+            lvl, ua, ub, q_start, coh_comm, bulk_comm = stack.pop()
             du = ub - ua
             print(f"[substep] lvl={lvl:02d} u0={ua*1e3:5.3f}mm -> u1={ub*1e3:5.3f}mm  du={du*1e3:5.3f}mm  ncr={len([c for c in cracks if c.active])}")
 
-            ok, q_sol, coh_trial, aux_pos, aux_sig, why, iters, fint_last = solve_step(ub, q_start, coh_comm)
+            ok, q_sol, coh_trial, bulk_trial, aux_pos, aux_sig, why, iters, fint_last = solve_step(ub, q_start, coh_comm, bulk_comm)
             if ok:
                 print(f"    [newton] converged({why}) it={iters:02d} ||rhs||=OK u={ub*1e3:.3f}mm")
 
@@ -1077,6 +1083,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
 
                 q_loc = q_sol
                 coh_loc = coh_trial
+                bulk_loc = bulk_trial
                 aux_pos_loc = aux_pos
                 aux_sig_loc = aux_sig
                 fint_loc = fint_last
@@ -1182,8 +1189,8 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
 
                     # Always re-equilibrate at the same u_bar after *initiation* or *growth*.
                     # Use adaptive continuation (enrichment/cohesive ramping) to stabilize the Newton solve.
-                    ok2, q_loc, coh_loc, aux_pos_loc, aux_sig_loc, why2, it2, fint_loc = ramp_solve_step(
-                        ub, q_loc, coh_loc
+                    ok2, q_loc, coh_loc, bulk_loc, aux_pos_loc, aux_sig_loc, why2, it2, fint_loc = ramp_solve_step(
+                        ub, q_loc, coh_loc, bulk_loc
                     )
                     if not ok2:
                         print(f"    [inner] re-solve failed({why2}) it={it2:02d} at u={ub*1e3:.3f}mm -> will subdivide")
@@ -1204,6 +1211,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                     # Accept final equilibrium at ub (after inner crack updates)
                     q_n = q_loc
                     coh_states = coh_loc
+                    bulk_states = bulk_loc
 
                     dof_load = int(dofs.std[load_node, 1])
                     P = -float(fint_loc[dof_load])
@@ -1218,9 +1226,9 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                     # When the first half converges, the next substep on the stack (if any)
                     # starts at this accepted `ub`. Update its initial state accordingly.
                     if stack:
-                        lvl_n, ua_n, ub_n, _q_s, _coh_s = stack[-1]
+                        lvl_n, ua_n, ub_n, _q_s, _coh_s, _bulk_s = stack[-1]
                         if abs(float(ua_n) - float(ub)) < 1e-14:
-                            stack[-1] = (lvl_n, ua_n, ub_n, q_n.copy(), coh_states.copy())
+                            stack[-1] = (lvl_n, ua_n, ub_n, q_n.copy(), coh_states.copy(), bulk_states.copy())
 
                     continue
 
@@ -1230,7 +1238,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                 raise RuntimeError(f"Substepping exceeded max_subdiv={model.max_subdiv} at u={ub} m")
 
             um = 0.5*(ua + ub)
-            stack.append((lvl+1, um, ub, q_start.copy(), coh_comm))
-            stack.append((lvl+1, ua, um, q_start.copy(), coh_comm))
+            stack.append((lvl+1, um, ub, q_start.copy(), coh_comm.copy(), bulk_comm.copy()))
+            stack.append((lvl+1, ua, um, q_start.copy(), coh_comm.copy(), bulk_comm.copy()))
 
     return nodes, elems, q_n, results, cracks
