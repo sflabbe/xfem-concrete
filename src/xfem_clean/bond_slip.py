@@ -255,7 +255,7 @@ def _bond_slip_assembly_numba(
     u_total: np.ndarray,        # [ndof_total] displacement vector
     segs: np.ndarray,           # [n_seg, 5]: [n1, n2, L0, cx, cy]
     steel_dof_map: np.ndarray,  # [nnode, 2]: node → steel DOF indices
-    bond_params: np.ndarray,    # [tau_max, s1, s2, s3, tau_f, alpha, perimeter]
+    bond_params: np.ndarray,    # [tau_max, s1, s2, s3, tau_f, alpha, perimeter, dtau_max]
     s_max_hist: np.ndarray,     # [n_seg] history
     steel_EA: float = 0.0,      # E * A for steel (if > 0, adds axial stiffness)
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -288,6 +288,7 @@ def _bond_slip_assembly_numba(
     tau_f = bond_params[4]
     alpha = bond_params[5]
     perimeter = bond_params[6]  # π * d_bar
+    dtau_max = bond_params[7] if bond_params.shape[0] > 7 else 1e20  # Tangent cap (Priority #1)
 
     entry_idx = 0
 
@@ -341,23 +342,45 @@ def _bond_slip_assembly_numba(
         s_max = max(s_max_hist[i], s_abs)
         sign = 1.0 if s >= 0.0 else -1.0
 
-        # Regularization: linear elastic branch for very small slip to avoid singularity
+        # C1-continuous regularization for s -> 0 singularity (Priority #1)
         # Use s_reg = 0.01 * s1 as threshold
         s_reg = 0.01 * s1
-        tau_reg = tau_max * (s_reg / s1) ** alpha
-        K_reg = tau_reg / s_reg  # Secant stiffness at regularization point
+
+        # Design C1-continuous transition:
+        # For s <= s_reg: τ(s) = k0 * s (linear)
+        # For s > s_reg: τ(s) = τ_max * ((s - s_reg + s_off) / s1)^α
+        #
+        # Match τ and dτ/ds at s = s_reg:
+        # 1) τ(s_reg) from power law = k0 * s_reg
+        # 2) dτ/ds(s_reg) from power law = k0
+        #
+        # From (2): τ_max * α / s1 * (s_off / s1)^(α-1) = k0
+        # => s_off = s1 * (k0 * s1 / (τ_max * α))^(1/(α-1))
+        #
+        # From (1): τ_max * (s_off / s1)^α = k0 * s_reg
+        # => k0 = τ_max / s_reg * (s_off / s1)^α
+        #
+        # Solve iteratively or use s_off heuristic:
+        # Choose k0 = τ_max / s1 * s_reg^(α-1) (tangent at s_reg from original law)
+        # Then s_off = s1 * (k0 * s1 / (τ_max * α))^(1/(α-1))
+
+        k0 = tau_max / s1 * (s_reg ** (alpha - 1.0))  # Tangent stiffness at s_reg
+        s_off = s1 * ((k0 * s1 / (tau_max * alpha)) ** (1.0 / (alpha - 1.0)))
+        tau_offset = tau_max * ((s_off / s1) ** alpha) - k0 * s_reg  # Offset to match τ at s_reg
 
         # Envelope evaluation (inline for Numba)
         if s_abs >= s_max - 1e-14:
             # Loading envelope
             if s_abs <= s1:
                 if s_abs < s_reg:
-                    # Regularized linear branch
-                    tau_abs = K_reg * s_abs
-                    dtau_abs = K_reg
+                    # Regularized linear branch (C1-continuous)
+                    tau_abs = k0 * s_abs
+                    dtau_abs = k0
                 else:
-                    ratio = s_abs / s1
-                    tau_abs = tau_max * (ratio ** alpha)
+                    # Power law with offset for C1 continuity
+                    s_eff = s_abs - s_reg + s_off
+                    ratio = s_eff / s1
+                    tau_abs = tau_max * (ratio ** alpha) - tau_offset
                     dtau_abs = tau_max * alpha / s1 * (ratio ** (alpha - 1.0))
             elif s_abs <= s2:
                 tau_abs = tau_max
@@ -389,6 +412,13 @@ def _bond_slip_assembly_numba(
 
         tau = sign * tau_abs
         dtau_ds = dtau_abs
+
+        # Tangent capping (numerical stabilization, Priority #1)
+        # NOTE: dtau_max passed as parameter; set to large value (1e20) if no capping desired
+        # In practice, set dtau_max = bond_tangent_cap_factor * median(diag(K_bulk))
+        # This prevents bond stiffness from dominating and causing ill-conditioning
+        if dtau_ds > dtau_max:
+            dtau_ds = dtau_max
 
         # Bond force (distributed over segment length)
         F_bond = tau * perimeter * L0
@@ -525,6 +555,12 @@ def assemble_bond_slip(
 
     # Pack bond parameters for Numba
     perimeter = math.pi * float(bond_law.d_bar)
+
+    # Tangent capping for numerical stability (Priority #1)
+    # dtau_max is typically set to bond_tangent_cap_factor * median(diag(K_bulk))
+    # For now, use a large value (no capping); caller can override via bond_law
+    dtau_max = getattr(bond_law, 'dtau_max', 1e20)  # Default: no cap
+
     bond_params = np.array([
         bond_law.tau_max,
         bond_law.s1,
@@ -533,6 +569,7 @@ def assemble_bond_slip(
         bond_law.tau_f,
         bond_law.alpha,
         perimeter,
+        dtau_max,
     ], dtype=float)
 
     if use_numba and NUMBA_AVAILABLE:

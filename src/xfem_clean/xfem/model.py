@@ -85,6 +85,8 @@ class XFEMModel:
     enable_bond_slip: bool = False
     rebar_diameter: float = 0.016  # meters (default: 16mm)
     bond_condition: str = "good"   # "good" | "poor" (Model Code 2010)
+    steel_EA_min: float = 1e3      # Minimum steel axial stiffness [N] to avoid rigid body mode
+    bond_tangent_cap_factor: float = 1e2  # Cap bond tangent at factor × median(diag(K_bulk))
 
     # Dowel action at crack-rebar intersections (Phase 5)
     enable_dowel: bool = False
@@ -100,6 +102,7 @@ class XFEMModel:
     newton_beta: float = 1e-3
     newton_tol_du: float = 1e-8
     line_search: bool = True
+    enable_diagonal_scaling: bool = True  # Diagonal equilibration for ill-conditioned systems
     max_subdiv: int = 12
 
     # Optional Numba acceleration (Phase 2/3)

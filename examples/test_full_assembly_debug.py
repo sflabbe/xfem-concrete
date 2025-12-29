@@ -104,10 +104,51 @@ print(f"  Max |diagonal|: {np.max(np.abs(diag)):.3e}")
 if len(zero_diag) > 0:
     print(f"\nFirst 10 near-zero diagonal DOFs: {zero_diag[:10]}")
 
+# Classify DOFs by magnitude
+n_concrete = 2 * nnode  # Concrete DOFs: 0..2*nnode-1
+n_steel_start = dofs.steel_dof_offset
+
+low_stiffness = np.where(np.abs(diag) < 1e6)[0]  # Less than 1 MN/m
+print(f"\nLOW STIFFNESS DOFS (< 1e6 N/m): {len(low_stiffness)}")
+
+concrete_low = [d for d in low_stiffness if d < n_concrete]
+steel_low = [d for d in low_stiffness if d >= n_steel_start]
+enrichment_low = [d for d in low_stiffness if n_concrete <= d < n_steel_start]
+
+print(f"  Concrete DOFs with low stiffness: {len(concrete_low)}")
+print(f"  Steel DOFs with low stiffness: {len(steel_low)}")
+print(f"  Enrichment DOFs with low stiffness: {len(enrichment_low)}")
+
+if len(concrete_low) > 0:
+    print(f"\n⚠️  BUG: Concrete DOFs have absurdly low stiffness!")
+    print(f"  First 10 concrete DOFs with low K: {concrete_low[:10]}")
+    print(f"  Their diagonal values:")
+    for d in concrete_low[:10]:
+        node_id = d // 2
+        dof_dir = 'x' if d % 2 == 0 else 'y'
+        print(f"    DOF {d} (node {node_id}, dir {dof_dir}): K[{d},{d}] = {diag[d]:.3e} N/m")
+elif len(steel_low) > 0:
+    print(f"\n✓ Only steel DOFs have low stiffness (expected with steel_EA)")
+
+# Check concrete-only diagonal range
+concrete_diag = diag[:n_concrete]
+print(f"\nConcrete DOFs (0..{n_concrete-1}):")
+print(f"  Min diagonal: {np.min(np.abs(concrete_diag)):.3e} N/m")
+print(f"  Max diagonal: {np.max(np.abs(concrete_diag)):.3e} N/m")
+print(f"  Median diagonal: {np.median(np.abs(concrete_diag)):.3e} N/m")
+
+# Expected concrete stiffness: K ~ E*t/L
+L_elem = L / nx  # Element size
+K_expected = E * thickness / L_elem
+print(f"\nExpected concrete stiffness (E*t/L_elem):")
+print(f"  E = {E:.2e} Pa, t = {thickness:.3f} m, L_elem = {L_elem:.4f} m")
+print(f"  K_expected ~ {K_expected:.2e} N/m")
+print(f"  Ratio (actual/expected) = {np.median(np.abs(concrete_diag))/K_expected:.3f}")
+
 # Check conditioning
 try:
     K_dense = K.toarray()
     cond = np.linalg.cond(K_dense)
-    print(f"  Condition number: {cond:.3e}")
+    print(f"\n  Condition number: {cond:.3e}")
 except:
-    print(f"  Condition number: FAILED to compute")
+    print(f"\n  Condition number: FAILED to compute")
