@@ -261,6 +261,8 @@ def run_analysis_xfem(
                             dt = int(dofs_in.tip[a, k, comp])
                             if dt >= 0:
                                 fixed[dt] = 0.0
+                        # Bond-slip: DO NOT fix steel DOFs - they should be free to slip!
+                        # Steel is coupled to concrete through bond-slip interface only
 
             for dof in load_dofs:
                 fixed[int(dof)] = -float(u_target)
@@ -292,6 +294,7 @@ def run_analysis_xfem(
                 bond_law=bond_law,
                 bond_states_comm=bond_states,
                 enable_bond_slip=model.enable_bond_slip,
+                steel_EA=0.0,  # No explicit steel stiffness - rely on bond-slip coupling only
             )
 
             # Perfect bond rebar contribution (legacy: only if bond-slip disabled)
@@ -398,6 +401,7 @@ def run_analysis_xfem(
                         bond_law=bond_law,
                         bond_states_comm=bond_states,
                         enable_bond_slip=model.enable_bond_slip,
+                        steel_EA=0.0,  # No explicit steel stiffness - rely on bond-slip coupling only
                     )
                     # Perfect bond rebar (only if bond-slip disabled)
                     if not model.enable_bond_slip:

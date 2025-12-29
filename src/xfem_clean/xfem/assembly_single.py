@@ -54,6 +54,7 @@ def assemble_xfem_system(
     bond_law: Optional[object] = None,
     bond_states_comm: Optional[object] = None,
     enable_bond_slip: bool = False,
+    steel_EA: float = 0.0,
 ) -> Tuple[
     sp.csr_matrix,
     np.ndarray,
@@ -618,6 +619,7 @@ def assemble_xfem_system(
             bond_law=bond_law,
             bond_states=bond_states_comm,
             steel_dof_map=dofs.steel,  # Pass sparse DOF mapping
+            steel_EA=steel_EA,  # Steel axial stiffness
             use_numba=use_numba,
         )
 
