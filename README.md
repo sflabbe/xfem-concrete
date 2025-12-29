@@ -1,7 +1,4 @@
-# XFEM (stable) — reorganized into the clean-kernel repo structure
-
-This repo takes the stable working prototype (`xfem-lineal-estable`) and rearranges it to match the
-structure of the previously studied `xfem_clean` kernel repo (`src/`, `docs/`, `examples/`, `tests/`).
+# XFEM for concrete
 
 ## Run (without install)
 
