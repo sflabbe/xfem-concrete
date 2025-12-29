@@ -55,6 +55,11 @@ class BondSlipModelCode2010:
 
     Unloading/reloading follows a secant path to the maximum historical slip.
 
+    Part B (Dissertation Model):
+      - Steel yielding reduction: Ωy(εs) per Eq. 3.57-3.58
+      - Crack deterioration: Ωcrack(s, wmax) per Eq. 3.60-3.61
+      - Secant stiffness option for stability (Eq. 5.2-5.3)
+
     Parameters
     ----------
     f_cm : float
@@ -63,6 +68,16 @@ class BondSlipModelCode2010:
         Bar diameter [m]
     condition : str
         Bond condition: "good" (unconfined) or "poor" (all other)
+    f_y : float, optional
+        Steel yield stress [Pa] (for Ωy calculation)
+    E_s : float, optional
+        Steel Young's modulus [Pa] (for Ωy calculation)
+    use_secant_stiffness : bool
+        Use secant instead of tangent stiffness for stability (Part B7)
+    enable_yielding_reduction : bool
+        Apply steel yielding reduction factor Ωy (Part B3)
+    enable_crack_deterioration : bool
+        Apply crack deterioration factor Ωcrack (Part B4)
 
     Attributes
     ----------
@@ -79,6 +94,11 @@ class BondSlipModelCode2010:
     f_cm: float
     d_bar: float
     condition: str = "good"
+    f_y: float = 500e6  # Steel yield stress [Pa] (Part B3)
+    E_s: float = 200e9  # Steel Young's modulus [Pa] (Part B3)
+    use_secant_stiffness: bool = True  # Part B7: Use secant for stability
+    enable_yielding_reduction: bool = False  # Part B3: Steel yielding Ωy
+    enable_crack_deterioration: bool = False  # Part B4: Crack deterioration Ωcrack
 
     def __post_init__(self):
         """Initialize Model Code 2010 parameters."""
@@ -153,7 +173,101 @@ class BondSlipModelCode2010:
 
         return float(tau), float(dtau_ds)
 
-    def tau_and_tangent(self, s: float, s_max_history: float) -> Tuple[float, float]:
+    def compute_yielding_reduction(self, eps_s: float) -> float:
+        """Compute steel yielding reduction factor Ωy per Eq. 3.57-3.58.
+
+        Parameters
+        ----------
+        eps_s : float
+            Steel strain (axial, in bar direction) [-]
+
+        Returns
+        -------
+        omega_y : float
+            Reduction factor [0, 1] where 1 = no yielding, 0 = full yielding
+
+        Notes
+        -----
+        From dissertation Eq. 3.57-3.58:
+            eps_y = f_y / E_s
+            If eps_s <= eps_y: Ωy = 1
+            If eps_s > eps_y: Ωy = exp(-k_y * (eps_s - eps_y) / eps_y)
+        where k_y ≈ 10 (calibration parameter).
+        """
+        if not self.enable_yielding_reduction:
+            return 1.0
+
+        eps_y = self.f_y / self.E_s  # Yield strain
+        k_y = 10.0  # Calibration parameter (dissertation uses ~10)
+
+        if eps_s <= eps_y:
+            return 1.0
+        else:
+            # Exponential decay after yielding
+            delta_eps = (eps_s - eps_y) / eps_y
+            omega_y = math.exp(-k_y * delta_eps)
+            return max(0.0, min(1.0, omega_y))  # Clamp to [0, 1]
+
+    def compute_crack_deterioration(
+        self, dist_to_crack: float, w_max: float, t_n_cohesive_stress: float, f_t: float
+    ) -> float:
+        """Compute crack deterioration factor Ωcrack per Eq. 3.60-3.61 (modified).
+
+        Parameters
+        ----------
+        dist_to_crack : float
+            Distance from interface point to nearest transverse crack [m]
+        w_max : float
+            Maximum crack opening (historical) at interface level [m]
+        t_n_cohesive_stress : float
+            Normal cohesive stress t_n(w_max) from cohesive law [Pa]
+        f_t : float
+            Concrete tensile strength [Pa]
+
+        Returns
+        -------
+        omega_crack : float
+            Reduction factor [0, 1] where 1 = no deterioration, 0 = full deterioration
+
+        Notes
+        -----
+        From dissertation Eq. 3.60-3.61 (modified):
+            l_ch = characteristic length (e.g., 2*d_bar)
+            chi = t_n(w_max) / f_t  (FPZ state indicator)
+            Ωcrack = exp(-dist_to_crack / l_ch * (1 - chi))
+
+        When chi = 1 (no crack): Ωcrack = 1
+        When chi = 0 (fully open crack): Ωcrack = exp(-dist/l_ch)
+        """
+        if not self.enable_crack_deterioration:
+            return 1.0
+
+        l_ch = 2.0 * self.d_bar  # Characteristic length
+
+        # FPZ state indicator (Eq. 3.61)
+        if f_t > 1e-9:
+            chi = max(0.0, min(1.0, t_n_cohesive_stress / f_t))
+        else:
+            chi = 0.0
+
+        # Deterioration factor (Eq. 3.60 modified)
+        if dist_to_crack < 1e-12:
+            # At crack: maximum deterioration
+            omega_crack = chi  # Reduces to chi at crack
+        else:
+            # Exponential decay
+            omega_crack = math.exp(-dist_to_crack / l_ch * (1.0 - chi))
+            omega_crack = max(chi, min(1.0, omega_crack))  # Clamp [chi, 1]
+
+        return omega_crack
+
+    def tau_and_tangent(
+        self,
+        s: float,
+        s_max_history: float,
+        eps_s: float = 0.0,
+        omega_crack: float = 1.0,
+    ) -> Tuple[float, float]:
         """Compute bond stress and tangent stiffness with unloading/reloading.
 
         Parameters
@@ -162,18 +276,25 @@ class BondSlipModelCode2010:
             Current slip (signed) [m]
         s_max_history : float
             Maximum absolute slip reached in history [m]
+        eps_s : float, optional
+            Steel axial strain (for Ωy calculation, Part B3)
+        omega_crack : float, optional
+            Crack deterioration factor (for Ωcrack, Part B4)
 
         Returns
         -------
         tau : float
             Bond stress (signed) [Pa]
         dtau_ds : float
-            Tangent stiffness [Pa/m]
+            Tangent (or secant) stiffness [Pa/m]
 
         Notes
         -----
         - Loading: follows monotonic envelope
         - Unloading/reloading: secant stiffness to historical maximum
+        - Part B3: Multiplies by Ωy(eps_s) if enabled
+        - Part B4: Multiplies by Ωcrack if enabled
+        - Part B7: Returns secant stiffness if use_secant_stiffness=True
         """
         s_abs = abs(s)
         sign = 1.0 if s >= 0.0 else -1.0
@@ -194,7 +315,93 @@ class BondSlipModelCode2010:
                 tau_abs = 0.0
                 dtau_abs = 0.0
 
+        # Part B3: Apply steel yielding reduction
+        omega_y = self.compute_yielding_reduction(eps_s)
+
+        # Part B3+B4: Apply reduction factors
+        tau_abs *= omega_y * omega_crack
+        dtau_abs *= omega_y * omega_crack
+
+        # Part B7: Use secant stiffness for stability
+        if self.use_secant_stiffness and s_abs > 1e-14:
+            dtau_abs = tau_abs / s_abs  # Secant stiffness
+
         return sign * float(tau_abs), float(dtau_abs)
+
+
+# ------------------------------------------------------------------------------
+# Dowel Action Model (Part B5)
+# ------------------------------------------------------------------------------
+
+@dataclass
+class DowelActionModel:
+    """Dowel action model for transverse stress-opening relationship.
+
+    Based on Brenna et al. model (Eqs. 3.62-3.68 in dissertation).
+
+    Parameters
+    ----------
+    d_bar : float
+        Bar diameter [m]
+    f_c : float
+        Concrete compressive strength [Pa]
+    E_s : float
+        Steel Young's modulus [Pa]
+
+    Notes
+    -----
+    The radial stress-opening relationship is:
+        σ_r(w) = σ_r_max * (1 - exp(-k_d * w / d_bar))
+
+    where:
+        σ_r_max = k_c * sqrt(f_c)  (maximum radial stress)
+        k_c ≈ 0.8 (calibration constant)
+        k_d ≈ 50 (shape parameter)
+    """
+
+    d_bar: float
+    f_c: float
+    E_s: float = 200e9
+
+    def __post_init__(self):
+        """Initialize dowel parameters."""
+        # Calibration constants (from Brenna et al.)
+        self.k_c = 0.8  # Radial stress coefficient
+        self.k_d = 50.0  # Shape parameter for exponential
+
+        # Maximum radial stress
+        f_c_mpa = self.f_c / 1e6
+        self.sigma_r_max = self.k_c * math.sqrt(f_c_mpa) * 1e6  # Convert back to Pa
+
+    def sigma_r_and_tangent(self, w: float) -> Tuple[float, float]:
+        """Compute radial stress and tangent stiffness.
+
+        Parameters
+        ----------
+        w : float
+            Crack opening (normal to bar) [m]
+
+        Returns
+        -------
+        sigma_r : float
+            Radial stress [Pa]
+        dsigma_r_dw : float
+            Tangent stiffness [Pa/m]
+
+        Notes
+        -----
+        From Eq. 3.62-3.68:
+            σ_r = σ_r_max * (1 - exp(-k_d * w / d_bar))
+            dσ_r/dw = σ_r_max * (k_d / d_bar) * exp(-k_d * w / d_bar)
+        """
+        w_abs = abs(w)
+
+        # Exponential model
+        exp_term = math.exp(-self.k_d * w_abs / self.d_bar)
+        sigma_r = self.sigma_r_max * (1.0 - exp_term)
+        dsigma_r_dw = self.sigma_r_max * (self.k_d / self.d_bar) * exp_term
+
+        return float(sigma_r), float(dsigma_r_dw)
 
 
 # ------------------------------------------------------------------------------
