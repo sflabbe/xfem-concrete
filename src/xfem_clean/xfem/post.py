@@ -8,7 +8,7 @@ from typing import Dict, Optional, Tuple, Union
 import numpy as np
 
 from xfem_clean.xfem.dofs_single import XFEMDofs, build_xfem_dofs
-from xfem_clean.xfem.enrichment_single import build_B_enriched
+from xfem_clean.xfem.enrichment_single import build_B_enriched, TipEnrichmentType
 from xfem_clean.xfem.geometry import XFEMCrack
 from xfem_clean.xfem.material import plane_stress_C
 from xfem_clean.xfem.model import XFEMModel
@@ -113,6 +113,7 @@ def nodal_average_state_fields(
                 if mp is None:
                     # retrocompatible fallback: recompute stresses from q
                     heaviside_side = crack.H(x, y) if crack.active else -1.0
+                    tip_enr_type: TipEnrichmentType = getattr(model, "tip_enrichment_type", "non_singular_cohesive")
                     B, edofs = build_B_enriched(
                         x,
                         y,
@@ -128,6 +129,7 @@ def nodal_average_state_fields(
                         heaviside_side=heaviside_side,
                         tip_x=tip_x,
                         tip_y=tip_y,
+                        tip_enrichment_type=tip_enr_type,
                     )
                     qe = q[np.asarray(edofs, dtype=int)]
                     eps = B @ qe
