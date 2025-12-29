@@ -343,8 +343,9 @@ def _bond_slip_assembly_numba(
         sign = 1.0 if s >= 0.0 else -1.0
 
         # Simplified C1-continuous regularization for s -> 0 singularity (Priority #1)
-        # Use s_reg = 0.1 * s1 as threshold (increased from 0.01 to handle smaller slips)
-        s_reg = 0.1 * s1
+        # Use s_reg = 0.5 * s1 as threshold (increased from 0.1 to improve conditioning)
+        # At s_reg=500μm: k_bond≈6e6 N/m (10x smaller than steel, 1e5x smaller than concrete)
+        s_reg = 0.5 * s1
 
         # Simpler C1-continuous approach:
         # 1) For s <= s_reg: τ(s) = k0 * s (linear)
