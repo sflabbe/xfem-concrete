@@ -294,7 +294,7 @@ def run_analysis_xfem(
                 bond_law=bond_law,
                 bond_states_comm=bond_states,
                 enable_bond_slip=model.enable_bond_slip,
-                steel_EA=0.0,  # No explicit steel stiffness - rely on bond-slip coupling only
+                steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
             )
 
             # Perfect bond rebar contribution (legacy: only if bond-slip disabled)
@@ -352,12 +352,24 @@ def run_analysis_xfem(
 
                 return True, q, coh_trial, mp_trial, aux, float(P), bond_trial
 
-            try:
-                du_f = spla.spsolve(K_ff, rhs)
-            except Exception:
-                du_f = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)[0]
-            if not np.all(np.isfinite(du_f)):
-                du_f = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)[0]
+            # Diagonal equilibration for ill-conditioned systems (Priority #0 fix)
+            if model.enable_diagonal_scaling:
+                from xfem_clean.utils.scaling import diagonal_equilibration, unscale_solution
+                K_ff_scaled, rhs_scaled, D_inv = diagonal_equilibration(K_ff, rhs, eps=1e-12)
+                try:
+                    du_f_scaled = spla.spsolve(K_ff_scaled, rhs_scaled)
+                except Exception:
+                    du_f_scaled = spla.lsmr(K_ff_scaled, rhs_scaled, atol=1e-12, btol=1e-12, maxiter=2000)[0]
+                if not np.all(np.isfinite(du_f_scaled)):
+                    du_f_scaled = spla.lsmr(K_ff_scaled, rhs_scaled, atol=1e-12, btol=1e-12, maxiter=2000)[0]
+                du_f = unscale_solution(du_f_scaled, D_inv)
+            else:
+                try:
+                    du_f = spla.spsolve(K_ff, rhs)
+                except Exception:
+                    du_f = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)[0]
+                if not np.all(np.isfinite(du_f)):
+                    du_f = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)[0]
             norm_du = float(np.linalg.norm(du_f))
             if norm_du < float(model.newton_tol_du):
                 if model.debug_newton:
@@ -401,7 +413,7 @@ def run_analysis_xfem(
                         bond_law=bond_law,
                         bond_states_comm=bond_states,
                         enable_bond_slip=model.enable_bond_slip,
-                        steel_EA=0.0,  # No explicit steel stiffness - rely on bond-slip coupling only
+                        steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
                     )
                     # Perfect bond rebar (only if bond-slip disabled)
                     if not model.enable_bond_slip:
