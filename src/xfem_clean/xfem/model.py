@@ -104,6 +104,7 @@ class XFEMModel:
     line_search: bool = True
     enable_diagonal_scaling: bool = True  # Diagonal equilibration for ill-conditioned systems
     max_subdiv: int = 12
+    max_total_substeps: int = 50000  # Anti-hang: abort if total substeps exceeds this limit
 
     # Optional Numba acceleration (Phase 2/3)
     use_numba: bool = False

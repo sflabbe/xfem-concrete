@@ -118,7 +118,9 @@ def main():
 
     try:
         # Run analysis
-        results = run_analysis_xfem(
+        # NOTE: run_analysis_xfem returns (nodes, elems, q_n, results_array, crack)
+        # results_array has columns: step, u, P, M, kappa, R, tip_x, tip_y, angle, active, W_pl, W_dt, W_dc, W_coh, W_tot
+        nodes, elems, q_final, results_array, crack = run_analysis_xfem(
             model=model,
             nx=nx,
             ny=ny,
@@ -128,12 +130,13 @@ def main():
             return_states=False,
         )
 
-        print(f"\n✓ Analysis completed: {len(results)} load steps")
+        print(f"\n✓ Analysis completed: {results_array.shape[0]} load steps")
 
-        # Extract results
-        load_steps = [r["step"] for r in results]
-        displacements = [r["u_applied"] for r in results]
-        reactions = [r["reaction"] for r in results]
+        # Extract results from numpy array
+        # Columns: [step, u, P, M, kappa, R, tip_x, tip_y, angle, active, W_pl, W_dt, W_dc, W_coh, W_tot]
+        load_steps = results_array[:, 0]
+        displacements = results_array[:, 1]
+        reactions = results_array[:, 2]  # P column
 
         # Plot Load-Slip curve
         fig, ax = plt.subplots(figsize=(8, 6))
