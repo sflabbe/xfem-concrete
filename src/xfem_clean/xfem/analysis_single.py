@@ -246,9 +246,15 @@ def run_analysis_xfem(
         mp_committed,
         bond_committed=None,
     ):
+        nonlocal total_newton_solves
+        if model.debug_newton:
+            print(f"        [solve_step] ENTRY: u_target={u_target*1e3:.3f}mm, ndof={dofs_in.ndof}")
         q = u_guess.copy()
 
         for it in range(int(model.newton_maxit)):
+            total_newton_solves += 1  # Track each Newton iteration
+            if model.debug_newton and it == 0:
+                print(f"        [solve_step] Starting Newton loop...")
             fixed = dict(fixed_base)
             for a in range(nnode):
                 for comp in (0, 1):
@@ -270,6 +276,8 @@ def run_analysis_xfem(
             for dof, val in fixed.items():
                 q[int(dof)] = float(val)
 
+            if model.debug_newton:
+                print(f"        [newton] it={it:02d} calling assemble_xfem_system...")
             K, fint, coh_updates, mp_updates, aux, bond_updates = assemble_xfem_system(
                 nodes,
                 elems,
@@ -292,10 +300,12 @@ def run_analysis_xfem(
                 tip_enrichment_type=model.tip_enrichment_type,
                 rebar_segs=rebar_segs,
                 bond_law=bond_law,
-                bond_states_comm=bond_states,
+                bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
                 enable_bond_slip=model.enable_bond_slip,
                 steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
             )
+            if model.debug_newton:
+                print(f"        [newton] it={it:02d} assemble done, K.shape={K.shape}")
 
             # Perfect bond rebar contribution (legacy: only if bond-slip disabled)
             # When bond-slip is enabled, rebar forces are handled in assemble_bond_slip()
@@ -411,7 +421,7 @@ def run_analysis_xfem(
                         bulk_params=bulk_params,
                         rebar_segs=rebar_segs,
                         bond_law=bond_law,
-                        bond_states_comm=bond_states,
+                        bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
                         enable_bond_slip=model.enable_bond_slip,
                         steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
                     )
@@ -472,6 +482,11 @@ def run_analysis_xfem(
     q_n = u_std
     step_counter = 0
 
+    # Anti-hang instrumentation: track total substeps and Newton solves
+    total_substeps = 0
+    total_newton_solves = 0
+    substep_report_interval = 200  # Print diagnostic every N substeps
+
     for istep in range(1, nsteps + 1):
         u_target = (istep / nsteps) * umax
         du_total = u_target - u_n
@@ -480,6 +495,23 @@ def run_analysis_xfem(
         while stack:
             u0, du, level = stack.pop()
             u1 = u0 + du
+
+            # Anti-hang guardrail: abort if we exceed maximum total substeps
+            total_substeps += 1
+            if total_substeps > model.max_total_substeps:
+                raise RuntimeError(
+                    f"Anti-hang guardrail triggered: total_substeps={total_substeps} > max_total_substeps={model.max_total_substeps}.\n"
+                    f"Last state: step={istep}/{nsteps}, u0={u0:.6e}, u1={u1:.6e}, level={level}, "
+                    f"crack={'on' if crack.active else 'off'}, tip=({crack.tip_x:.4f},{crack.tip_y:.4f})m, "
+                    f"total_newton_solves={total_newton_solves}"
+                )
+
+            # Periodic diagnostic output (every N substeps)
+            if total_substeps % substep_report_interval == 0:
+                print(
+                    f"[DIAGNOSTIC] total_substeps={total_substeps}, total_newton={total_newton_solves}, "
+                    f"step={istep}/{nsteps}, u1={u1*1e3:.3f}mm, level={level}"
+                )
 
             if model.debug_substeps:
                 print(
@@ -500,6 +532,8 @@ def run_analysis_xfem(
             coh_backup = coh_states.copy() if hasattr(coh_states, "copy") else copy.deepcopy(coh_states)
             mp_backup = mp_states.copy() if hasattr(mp_states, "copy") else {k: v.copy_shallow() for k, v in mp_states.items()}
             dofs_backup = dofs
+            # FIX 1: Backup bond_states to enable rollback in case of substep failure
+            bond_backup = bond_states.copy() if (bond_states is not None and hasattr(bond_states, "copy")) else bond_states
 
             inner_updates = 0
             q_guess = None
@@ -507,6 +541,8 @@ def run_analysis_xfem(
             split_reason = ""
 
             while True:
+                if model.debug_substeps:
+                    print(f"    [inner] inner_updates={inner_updates}, crack_active={crack.active}, need_split={need_split}")
                 force_accept = False
 
                 if not crack.active:
@@ -532,6 +568,8 @@ def run_analysis_xfem(
                 else:
                     q_guess_loc = transfer_q_between_dofs(base, base_dofs, dofs_local)
 
+                if model.debug_substeps:
+                    print(f"    [inner] calling solve_step with u1={u1*1e3:.3f}mm")
                 ok, q_sol, coh_trial, mp_trial, aux, P, bond_trial = solve_step(
                     u1,
                     q_guess_loc,
@@ -541,6 +579,8 @@ def run_analysis_xfem(
                     mp_states,
                     bond_states,
                 )
+                if model.debug_substeps:
+                    print(f"    [inner] solve_step returned ok={ok}")
                 if not ok:
                     need_split = True
                     split_reason = "newton"
@@ -696,6 +736,8 @@ def run_analysis_xfem(
                 coh_states = coh_backup
                 mp_states = mp_backup
                 dofs = dofs_backup
+                # FIX 1: Restore bond_states to previous state when substep fails
+                bond_states = bond_backup
                 if level >= int(model.max_subdiv):
                     raise RuntimeError(
                         f"Substepping exceeded max_subdiv={model.max_subdiv} (reason={split_reason}) at u={u1} m"
