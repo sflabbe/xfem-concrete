@@ -143,6 +143,9 @@ def run_analysis_xfem(
             condition=model.bond_condition,
         )
 
+    # Subdomain manager (Phase C - thesis cases)
+    subdomain_mgr = getattr(model, 'subdomain_mgr', None)
+
     def _compute_global_dissipation(
         aux: Dict,
         mp: Union[Dict[Tuple[int, int], MaterialPoint], BulkStateArrays],
@@ -278,7 +281,7 @@ def run_analysis_xfem(
 
             if model.debug_newton:
                 print(f"        [newton] it={it:02d} calling assemble_xfem_system...")
-            K, fint, coh_updates, mp_updates, aux, bond_updates = assemble_xfem_system(
+            K, fint, coh_updates, mp_updates, aux, bond_updates, reinforcement_updates, contact_updates = assemble_xfem_system(
                 nodes,
                 elems,
                 dofs_in,
@@ -303,6 +306,7 @@ def run_analysis_xfem(
                 bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
                 enable_bond_slip=model.enable_bond_slip,
                 steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
+                subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
             )
             if model.debug_newton:
                 print(f"        [newton] it={it:02d} assemble done, K.shape={K.shape}")
@@ -400,7 +404,7 @@ def run_analysis_xfem(
                     for dof, val in fixed.items():
                         q_try[int(dof)] = float(val)
 
-                    _, fint_t, _coh_upd_t, _mp_upd_t, _aux_t, _bond_upd_t = assemble_xfem_system(
+                    _, fint_t, _coh_upd_t, _mp_upd_t, _aux_t, _bond_upd_t, _reinf_upd_t, _contact_upd_t = assemble_xfem_system(
                         nodes,
                         elems,
                         dofs_in,
@@ -424,6 +428,7 @@ def run_analysis_xfem(
                         bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
                         enable_bond_slip=model.enable_bond_slip,
                         steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
+                        subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
                     )
                     # Perfect bond rebar (only if bond-slip disabled)
                     if not model.enable_bond_slip:

@@ -100,21 +100,48 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False):
     t0 = time.time()
 
     try:
-        # TODO: Call actual solver
-        # result = run_xfem_solver(case_config)
-        raise NotImplementedError(
-            "Solver integration not yet complete. "
-            "Need to implement:\n"
-            "  1. Bond-slip laws (CEB-FIP, bilinear, Banholzer)\n"
-            "  2. Subdomain support (void elements, rigid regions)\n"
-            "  3. FRP sheet reinforcement\n"
-            "  4. Fibre reinforcement\n"
-            "  5. Cyclic loading\n"
-            "  6. Post-processing utilities\n"
-        )
+        from examples.gutierrez_thesis.solver_interface import run_case_solver
+
+        results = run_case_solver(case_config, mesh_factor=mesh_factor)
+
+        # Save results
+        print("\nSaving results...")
+        # TODO: Implement post-processing and output saving (FASE G)
+        # For now, just save basic CSV
+        import csv
+        history_file = output_dir / "load_displacement.csv"
+        with open(history_file, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['step', 'u_mm', 'P_kN', 'M_kNm', 'kappa', 'R',
+                             'crack_tip_x', 'crack_tip_y', 'angle_deg', 'crack_active',
+                             'W_plastic', 'W_damage_t', 'W_damage_c', 'W_cohesive', 'W_total'])
+            for row in results['history']:
+                # Convert units: m → mm, N → kN, J → J
+                row_out = [
+                    int(row[0]),        # step
+                    row[1] * 1e3,       # u [mm]
+                    row[2] / 1e3,       # P [kN]
+                    row[3] / 1e3,       # M [kN·m]
+                    row[4],             # kappa
+                    row[5],             # R
+                    row[6],             # crack_tip_x [m]
+                    row[7],             # crack_tip_y [m]
+                    row[8],             # angle [deg]
+                    int(row[9]),        # crack_active
+                    row[10],            # W_plastic [J]
+                    row[11],            # W_damage_t [J]
+                    row[12],            # W_damage_c [J]
+                    row[13],            # W_cohesive [J]
+                    row[14],            # W_total [J]
+                ]
+                writer.writerow(row_out)
+        print(f"  → {history_file}")
 
     except Exception as e:
+        import traceback
         print(f"\n❌ ERROR: {e}\n")
+        print("Traceback:")
+        traceback.print_exc()
         sys.exit(1)
 
     t_elapsed = time.time() - t0
