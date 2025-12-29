@@ -47,14 +47,40 @@ model = XFEMModel(..., tip_enrichment_type="lefm_branch")
 
 ---
 
-## 📋 Phase 2: Bond-Slip Integration (PLANNED)
+## 🚧 Phase 2: Bond-Slip Integration (IN PROGRESS - 90% complete)
 
-### Current Status
-- **bond_slip.py**: Fully implemented but STANDALONE
-- **Issue**: Not integrated into main assembly/solver loop
-- **Impact**: Cannot model local pullout, debonding near cracks
+### Current Status ✅
+- **bond_slip.py**: ✅ Fully implemented (fib Model Code 2010)
+- **dofs_single.py**: ✅ Extended XFEMDofs with steel DOF fields
+- **model.py**: ✅ Added bond-slip parameters (enable_bond_slip, rebar_diameter, bond_condition)
+- **assembly_single.py**: ✅ Integrated assemble_bond_slip() into solver
+- **analysis_single.py**: ✅ State management (initialization + updates)
+- **validation example**: ✅ Created validation_bond_slip_pullout.py
 
-### Required Changes
+### Issue 🐛: Steel DOF Indexing Bug
+**Symptom**: `ValueError: axis 0 index 1393 exceeds matrix dimension 984`
+
+**Root cause**: Steel DOF mapping mismatch between:
+- `build_xfem_dofs()`: assigns `dofs.steel[n, 0] = idx++` (correct sparse mapping)
+- `bond_slip.py`: assumes `dof_s1x = steel_dof_offset + 2*n1` (dense mapping)
+
+**Fix needed**: Update `_bond_slip_assembly_numba()` to use actual DOF mapping:
+```python
+# Current (wrong - assumes contiguous steel DOFs):
+dof_s1x = steel_dof_offset + 2 * n1
+
+# Should be (requires passing steel DOF map):
+dof_s1x = steel_dof_map[n1, 0]  # Look up actual index
+```
+
+**Options**:
+1. Pass `dofs.steel` array to `assemble_bond_slip()` and extract steel indices
+2. Rewrite steel DOF allocation to use contiguous block (simpler but wastes DOFs)
+3. Pre-build a mapping array `node_to_steel_dof[n] → (dof_x, dof_y)`
+
+**Recommendation**: Option 1 - keep sparse DOF structure, fix indexing in bond_slip.py
+
+### Completed Implementation
 
 #### 2.1 Extend DOF Structure
 **File**: `src/xfem_clean/xfem/dofs_single.py`
