@@ -47,14 +47,71 @@ model = XFEMModel(..., tip_enrichment_type="lefm_branch")
 
 ---
 
-## 📋 Phase 2: Bond-Slip Integration (PLANNED)
+## ✅ Phase 2: Bond-Slip Integration (INTEGRATED - Known convergence issue)
 
-### Current Status
-- **bond_slip.py**: Fully implemented but STANDALONE
-- **Issue**: Not integrated into main assembly/solver loop
-- **Impact**: Cannot model local pullout, debonding near cracks
+### Implementation Status
+- **bond_slip.py**: ✅ Fully implemented (fib Model Code 2010 + stiffness regularization)
+- **dofs_single.py**: ✅ Extended XFEMDofs with steel DOF fields
+- **model.py**: ✅ Added bond-slip parameters (enable_bond_slip, rebar_diameter, bond_condition)
+- **assembly_single.py**: ✅ Integrated assemble_bond_slip() into solver
+- **analysis_single.py**: ✅ State management (initialization + updates)
+- **Steel DOF indexing**: ✅ FIXED - sparse DOF mapping implemented
+- **Bond stiffness regularization**: ✅ ADDED - linear elastic branch at small slip
+- **validation example**: ⚠️  Newton convergence issue remains (ill-conditioned system)
 
-### Required Changes
+### Steel DOF Indexing Bug - ✅ RESOLVED
+**Symptom**: `ValueError: axis 0 index 1393 exceeds matrix dimension 984`
+
+**Root cause**: Mismatch between sparse DOF allocation and dense indexing assumption
+
+**Solution implemented** (commit 4d4dbef):
+- Modified `assemble_bond_slip()` to accept `steel_dof_map` parameter
+- Updated `_bond_slip_assembly_numba()` to use `steel_dof_map[n, 0]` instead of `steel_dof_offset + 2*n`
+- Updated `assembly_single.py` to pass `dofs.steel` as `steel_dof_map`
+- Added backward compatibility: if `steel_dof_map=None`, generates dense mapping
+
+**Files modified**:
+- `src/xfem_clean/bond_slip.py`: Updated assembly functions
+- `src/xfem_clean/xfem/assembly_single.py`: Pass dofs.steel
+- `src/xfem_clean/xfem/analysis_single.py`: Fix missing bond_committed return
+
+### Known Issue ⚠️: Newton Convergence at Small Displacement
+**Symptom**: `RuntimeError: Substepping exceeded max_subdiv at u≈78nm`
+
+**Root cause identified**: Bond-slip tangent stiffness singularity at s=0
+- Model Code 2010 bond law has τ(s) = τ_max·(s/s1)^0.4
+- Derivative: dτ/ds ∝ s^(-0.6) → ∞ as s → 0
+- At s=1e-16 m, bond stiffness was 2.6e+14 N/m (230,000× steel stiffness!)
+- System condition number: 4.8e+17 (extreme ill-conditioning)
+
+**Solutions attempted**:
+1. ✅ **Regularized bond-slip tangent stiffness** (lines 344-361 in bond_slip.py)
+   - Added linear elastic branch for s < s_reg = 0.01·s1
+   - Reduced max bond stiffness from 2.6e+14 to 1.6e+8 N/m
+   - Improved condition number from 4.8e+17 to 1.8e+16 (26× better, still high)
+
+2. ⚠️ **Removed explicit steel axial stiffness** (analysis_single.py:300, 407)
+   - Set steel_EA=0 to avoid double-counting with bond coupling
+   - Issue persists: condition number still 1.8e+16
+
+3. ⚠️ **Steel DOF boundary conditions**
+   - Tried fixing steel DOFs with concrete (over-constrains)
+   - Tried leaving steel DOFs free (current approach)
+   - Newton still fails at tiny displacements
+
+**Diagnosis**: System is fundamentally ill-conditioned due to:
+- Concrete element stiffness ~6 N/m (min diagonal)
+- Bond interface stiffness ~1e8 N/m (even after regularization)
+- 7 orders of magnitude difference in scales
+
+**Next steps for future work**:
+1. Investigate why concrete diagonal is so small (check element formulation)
+2. Consider using penalty method for bond-slip instead of direct coupling
+3. Try iterative solvers (CG/GMRES) with preconditioners instead of direct factorization
+4. Simplify test case to single element with prescribed slip
+5. Consult literature on numerical stability of bond-slip models
+
+### Completed Implementation
 
 #### 2.1 Extend DOF Structure
 **File**: `src/xfem_clean/xfem/dofs_single.py`

@@ -129,6 +129,20 @@ def run_analysis_xfem(
     )
     dofs: Optional[XFEMDofs] = None
 
+    # Bond-slip state initialization (Phase 2)
+    bond_states = None
+    bond_law = None
+    if model.enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
+        from xfem_clean.bond_slip import BondSlipStateArrays, BondSlipModelCode2010
+
+        n_seg = rebar_segs.shape[0]
+        bond_states = BondSlipStateArrays.zeros(n_seg)
+        bond_law = BondSlipModelCode2010(
+            f_cm=model.fc,
+            d_bar=model.rebar_diameter,
+            condition=model.bond_condition,
+        )
+
     def _compute_global_dissipation(
         aux: Dict,
         mp: Union[Dict[Tuple[int, int], MaterialPoint], BulkStateArrays],
@@ -174,16 +188,47 @@ def run_analysis_xfem(
         )
 
     def _std_only_dofs() -> XFEMDofs:
+        """Create DOF mapping with only standard DOFs (and optionally steel DOFs for bond-slip)."""
         std = np.arange(2 * nnode, dtype=int).reshape(nnode, 2)
         H = -np.ones((nnode, 2), dtype=int)
         tipd = -np.ones((nnode, 4, 2), dtype=int)
+
+        # Bond-slip: allocate steel DOFs even when crack is inactive
+        steel = None
+        steel_dof_offset = -1
+        steel_nodes = None
+        ndof = 2 * nnode
+
+        if model.enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
+            steel_dof_offset = ndof  # Steel DOFs start after standard DOFs
+            steel_nodes = np.zeros(nnode, dtype=bool)
+            steel = -np.ones((nnode, 2), dtype=int)
+
+            # Identify nodes used by rebar segments
+            for seg in rebar_segs:
+                n1 = int(seg[0])
+                n2 = int(seg[1])
+                steel_nodes[n1] = True
+                steel_nodes[n2] = True
+
+            # Allocate steel DOFs for rebar nodes
+            idx = ndof
+            for n in np.where(steel_nodes)[0]:
+                steel[n, 0] = idx
+                steel[n, 1] = idx + 1
+                idx += 2
+            ndof = idx
+
         return XFEMDofs(
             std=std,
             H=H,
             tip=tipd,
-            ndof=2 * nnode,
+            ndof=ndof,
             H_nodes=np.zeros(nnode, dtype=bool),
             tip_nodes=np.zeros(nnode, dtype=bool),
+            steel=steel,
+            steel_dof_offset=steel_dof_offset,
+            steel_nodes=steel_nodes,
         )
 
     def _tip_patch() -> Tuple[float, float, float, float]:
@@ -199,6 +244,7 @@ def run_analysis_xfem(
         dofs_in: XFEMDofs,
         coh_committed,
         mp_committed,
+        bond_committed=None,
     ):
         q = u_guess.copy()
 
@@ -215,6 +261,8 @@ def run_analysis_xfem(
                             dt = int(dofs_in.tip[a, k, comp])
                             if dt >= 0:
                                 fixed[dt] = 0.0
+                        # Bond-slip: DO NOT fix steel DOFs - they should be free to slip!
+                        # Steel is coupled to concrete through bond-slip interface only
 
             for dof in load_dofs:
                 fixed[int(dof)] = -float(u_target)
@@ -222,7 +270,7 @@ def run_analysis_xfem(
             for dof, val in fixed.items():
                 q[int(dof)] = float(val)
 
-            K, fint, coh_updates, mp_updates, aux = assemble_xfem_system(
+            K, fint, coh_updates, mp_updates, aux, bond_updates = assemble_xfem_system(
                 nodes,
                 elems,
                 dofs_in,
@@ -242,20 +290,28 @@ def run_analysis_xfem(
                 bulk_kind=int(bulk_kind),
                 bulk_params=bulk_params,
                 tip_enrichment_type=model.tip_enrichment_type,
+                rebar_segs=rebar_segs,
+                bond_law=bond_law,
+                bond_states_comm=bond_states,
+                enable_bond_slip=model.enable_bond_slip,
+                steel_EA=0.0,  # No explicit steel stiffness - rely on bond-slip coupling only
             )
 
-            f_rb, K_rb = rebar_contrib(
-                nodes,
-                rebar_segs,
-                q,
-                model.steel_A_total,
-                model.steel_E,
-                model.steel_fy,
-                model.steel_fu,
-                model.steel_Eh,
-            )
-            fint = fint + f_rb
-            K = K + K_rb
+            # Perfect bond rebar contribution (legacy: only if bond-slip disabled)
+            # When bond-slip is enabled, rebar forces are handled in assemble_bond_slip()
+            if not model.enable_bond_slip:
+                f_rb, K_rb = rebar_contrib(
+                    nodes,
+                    rebar_segs,
+                    q,
+                    model.steel_A_total,
+                    model.steel_E,
+                    model.steel_fy,
+                    model.steel_fu,
+                    model.steel_Eh,
+                )
+                fint = fint + f_rb
+                K = K + K_rb
 
             r = fint.copy()
             free, K_ff, r_f, _ = apply_dirichlet(K, r, fixed, q)
@@ -289,7 +345,12 @@ def run_analysis_xfem(
                     mp_trial = dict(mp_committed)
                     mp_trial.update(mp_updates)
 
-                return True, q, coh_trial, mp_trial, aux, float(P)
+                # Bond-slip state update (Phase 2)
+                bond_trial = None
+                if bond_updates is not None:
+                    bond_trial = bond_updates  # Already a fresh copy from assemble_bond_slip
+
+                return True, q, coh_trial, mp_trial, aux, float(P), bond_trial
 
             try:
                 du_f = spla.spsolve(K_ff, rhs)
@@ -303,7 +364,7 @@ def run_analysis_xfem(
                     print(
                         f"    [newton] stagnated      it={it+1:02d} ||du||={norm_du:.3e} ||rhs||={norm_r:.3e} u={u_target*1e3:.3f}mm"
                     )
-                return False, q, coh_committed, mp_committed, aux, 0.0
+                return False, q, coh_committed, mp_committed, aux, 0.0, bond_states
 
             if model.line_search:
                 q0 = q.copy()
@@ -317,7 +378,7 @@ def run_analysis_xfem(
                     for dof, val in fixed.items():
                         q_try[int(dof)] = float(val)
 
-                    _, fint_t, _coh_upd_t, _mp_upd_t, _aux_t = assemble_xfem_system(
+                    _, fint_t, _coh_upd_t, _mp_upd_t, _aux_t, _bond_upd_t = assemble_xfem_system(
                         nodes,
                         elems,
                         dofs_in,
@@ -336,18 +397,25 @@ def run_analysis_xfem(
                         coh_params=coh_params,
                         bulk_kind=int(bulk_kind),
                         bulk_params=bulk_params,
+                        rebar_segs=rebar_segs,
+                        bond_law=bond_law,
+                        bond_states_comm=bond_states,
+                        enable_bond_slip=model.enable_bond_slip,
+                        steel_EA=0.0,  # No explicit steel stiffness - rely on bond-slip coupling only
                     )
-                    f_rb_t, _Krb_t = rebar_contrib(
-                        nodes,
-                        rebar_segs,
-                        q_try,
-                        model.steel_A_total,
-                        model.steel_E,
-                        model.steel_fy,
-                        model.steel_fu,
-                        model.steel_Eh,
-                    )
-                    fint_t = fint_t + f_rb_t
+                    # Perfect bond rebar (only if bond-slip disabled)
+                    if not model.enable_bond_slip:
+                        f_rb_t, _Krb_t = rebar_contrib(
+                            nodes,
+                            rebar_segs,
+                            q_try,
+                            model.steel_A_total,
+                            model.steel_E,
+                            model.steel_fy,
+                            model.steel_fu,
+                            model.steel_Eh,
+                        )
+                        fint_t = fint_t + f_rb_t
                     r_try = fint_t
                     _, _, r_f_try, _ = apply_dirichlet(K, r_try, fixed, q_try)
                     n_try = float(np.linalg.norm(r_f_try))
@@ -372,7 +440,7 @@ def run_analysis_xfem(
 
         if model.debug_substeps:
             print(f"    [newton] failed(maxit) u={u_target*1e3:.3f}mm")
-        return False, q, coh_committed, mp_committed, aux, 0.0
+        return False, q, coh_committed, mp_committed, aux, 0.0, bond_committed
 
     def curvature_mid(q_full: np.ndarray) -> float:
         y0 = float(np.min(nodes[:, 1]))
@@ -434,7 +502,10 @@ def run_analysis_xfem(
                 else:
                     if dofs is None:
                         yH = float(min(crack.tip_y, crack.stop_y))
-                        dofs = build_xfem_dofs(nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch())
+                        dofs = build_xfem_dofs(
+                            nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch(),
+                            rebar_segs=rebar_segs, enable_bond_slip=model.enable_bond_slip
+                        )
                     dofs_local = dofs
 
                 if q_guess is None:
@@ -449,13 +520,14 @@ def run_analysis_xfem(
                 else:
                     q_guess_loc = transfer_q_between_dofs(base, base_dofs, dofs_local)
 
-                ok, q_sol, coh_trial, mp_trial, aux, P = solve_step(
+                ok, q_sol, coh_trial, mp_trial, aux, P, bond_trial = solve_step(
                     u1,
                     q_guess_loc,
                     crack,
                     dofs_local,
                     coh_states,
                     mp_states,
+                    bond_states,
                 )
                 if not ok:
                     need_split = True
@@ -518,7 +590,10 @@ def run_analysis_xfem(
                             crack.tip_y = float(tip[1])
 
                             yH = float(min(crack.tip_y, crack.stop_y))
-                            dofs_new = build_xfem_dofs(nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch())
+                            dofs_new = build_xfem_dofs(
+                                nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch(),
+                                rebar_segs=rebar_segs, enable_bond_slip=model.enable_bond_slip
+                            )
                             q_sol = transfer_q_between_dofs(q_sol, dofs_local, dofs_new)
                             dofs = dofs_new
                             did_initiate = True
@@ -562,7 +637,10 @@ def run_analysis_xfem(
                                 crack.tip_y = float(tip[1])
 
                                 yH = float(min(crack.tip_y, crack.stop_y))
-                                dofs_new = build_xfem_dofs(nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch())
+                                dofs_new = build_xfem_dofs(
+                                    nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch(),
+                                    rebar_segs=rebar_segs, enable_bond_slip=model.enable_bond_slip
+                                )
                                 q_sol = transfer_q_between_dofs(q_sol, dofs_local, dofs_new)
                                 dofs = dofs_new
                                 changed = True
@@ -576,11 +654,15 @@ def run_analysis_xfem(
                 if force_accept:
                     coh_states = coh_trial
                     mp_states = mp_trial
+                    if bond_trial is not None:
+                        bond_states = bond_trial
                     break
 
                 if not changed:
                     coh_states = coh_trial
                     mp_states = mp_trial
+                    if bond_trial is not None:
+                        bond_states = bond_trial
                     break
 
                 inner_updates += 1
@@ -591,6 +673,8 @@ def run_analysis_xfem(
 
                 coh_states = coh_trial
                 mp_states = mp_trial
+                if bond_trial is not None:
+                    bond_states = bond_trial
                 q_guess = q_sol.copy()
                 continue
 

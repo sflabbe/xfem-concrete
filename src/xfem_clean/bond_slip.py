@@ -250,13 +250,14 @@ class BondSlipStateArrays:
 # Bond-Slip Assembly (Numba-accelerated)
 # ------------------------------------------------------------------------------
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=False)  # TODO: Fix parallel loop (entry_idx conflict)
 def _bond_slip_assembly_numba(
     u_total: np.ndarray,        # [ndof_total] displacement vector
     segs: np.ndarray,           # [n_seg, 5]: [n1, n2, L0, cx, cy]
-    steel_dof_offset: int,      # First steel DOF index
+    steel_dof_map: np.ndarray,  # [nnode, 2]: node → steel DOF indices
     bond_params: np.ndarray,    # [tau_max, s1, s2, s3, tau_f, alpha, perimeter]
     s_max_hist: np.ndarray,     # [n_seg] history
+    steel_EA: float = 0.0,      # E * A for steel (if > 0, adds axial stiffness)
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Assemble bond-slip interface contribution (Numba kernel).
 
@@ -273,7 +274,7 @@ def _bond_slip_assembly_numba(
     n_seg = segs.shape[0]
 
     f = np.zeros(ndof, dtype=np.float64)
-    max_entries = n_seg * 16  # Conservative estimate: 4 DOFs per segment, 4x4 stiffness
+    max_entries = n_seg * 32  # 8 (bond interface) + 16 (steel axial) + margin
     rows = np.empty(max_entries, dtype=np.int64)
     cols = np.empty(max_entries, dtype=np.int64)
     data = np.empty(max_entries, dtype=np.float64)
@@ -290,7 +291,7 @@ def _bond_slip_assembly_numba(
 
     entry_idx = 0
 
-    for i in prange(n_seg):
+    for i in range(n_seg):  # Changed from prange due to entry_idx conflict
         # Node IDs
         n1 = int(segs[i, 0])
         n2 = int(segs[i, 1])
@@ -304,11 +305,11 @@ def _bond_slip_assembly_numba(
         dof_c2x = 2 * n2
         dof_c2y = 2 * n2 + 1
 
-        # Steel DOFs (duplicated nodes)
-        dof_s1x = steel_dof_offset + 2 * n1
-        dof_s1y = steel_dof_offset + 2 * n1 + 1
-        dof_s2x = steel_dof_offset + 2 * n2
-        dof_s2y = steel_dof_offset + 2 * n2 + 1
+        # Steel DOFs (sparse mapping via steel_dof_map)
+        dof_s1x = int(steel_dof_map[n1, 0])
+        dof_s1y = int(steel_dof_map[n1, 1])
+        dof_s2x = int(steel_dof_map[n2, 0])
+        dof_s2y = int(steel_dof_map[n2, 1])
 
         # Displacements
         u_c1x = u_total[dof_c1x]
@@ -340,13 +341,20 @@ def _bond_slip_assembly_numba(
         s_max = max(s_max_hist[i], s_abs)
         sign = 1.0 if s >= 0.0 else -1.0
 
+        # Regularization: linear elastic branch for very small slip to avoid singularity
+        # Use s_reg = 0.01 * s1 as threshold
+        s_reg = 0.01 * s1
+        tau_reg = tau_max * (s_reg / s1) ** alpha
+        K_reg = tau_reg / s_reg  # Secant stiffness at regularization point
+
         # Envelope evaluation (inline for Numba)
         if s_abs >= s_max - 1e-14:
             # Loading envelope
             if s_abs <= s1:
-                if s_abs < 1e-16:
-                    tau_abs = 0.0
-                    dtau_abs = tau_max * alpha / s1 * (1e-16 / s1) ** (alpha - 1.0)
+                if s_abs < s_reg:
+                    # Regularized linear branch
+                    tau_abs = K_reg * s_abs
+                    dtau_abs = K_reg
                 else:
                     ratio = s_abs / s1
                     tau_abs = tau_max * (ratio ** alpha)
@@ -433,6 +441,38 @@ def _bond_slip_assembly_numba(
             rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c2x; data[entry_idx] = 0.25 * Kxx; entry_idx += 1
             rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c2y; data[entry_idx] = 0.25 * Kyy; entry_idx += 1
 
+        # Steel axial stiffness (if steel_EA > 0)
+        if steel_EA > 0.0 and entry_idx + 16 < max_entries:
+            K_steel = steel_EA / L0
+            Kxx_s = K_steel * cx * cx
+            Kxy_s = K_steel * cx * cy
+            Kyy_s = K_steel * cy * cy
+
+            # Steel bar stiffness: K = (EA/L) * [c⊗c, -c⊗c; -c⊗c, c⊗c]
+            # Node 1 - Node 1 (positive)
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1x; data[entry_idx] = Kxx_s; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1y; data[entry_idx] = Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1x; data[entry_idx] = Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1y; data[entry_idx] = Kyy_s; entry_idx += 1
+
+            # Node 2 - Node 2 (positive)
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2x; data[entry_idx] = Kxx_s; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2y; data[entry_idx] = Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2x; data[entry_idx] = Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2y; data[entry_idx] = Kyy_s; entry_idx += 1
+
+            # Node 1 - Node 2 (negative)
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2x; data[entry_idx] = -Kxx_s; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2y; data[entry_idx] = -Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2x; data[entry_idx] = -Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2y; data[entry_idx] = -Kyy_s; entry_idx += 1
+
+            # Node 2 - Node 1 (negative)
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1x; data[entry_idx] = -Kxx_s; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1y; data[entry_idx] = -Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1x; data[entry_idx] = -Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1y; data[entry_idx] = -Kyy_s; entry_idx += 1
+
     # Trim arrays
     rows_out = rows[:entry_idx]
     cols_out = cols[:entry_idx]
@@ -447,6 +487,8 @@ def assemble_bond_slip(
     steel_dof_offset: int,
     bond_law: BondSlipModelCode2010,
     bond_states: BondSlipStateArrays,
+    steel_dof_map: np.ndarray = None,
+    steel_EA: float = 0.0,
     use_numba: bool = True,
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Assemble bond-slip interface forces and stiffness.
@@ -458,11 +500,14 @@ def assemble_bond_slip(
     steel_segments : np.ndarray
         [n_seg, 5] array: [n1, n2, L0, cx, cy]
     steel_dof_offset : int
-        Index where steel DOFs begin
+        Index where steel DOFs begin (for backward compat, not used if steel_dof_map provided)
     bond_law : BondSlipModelCode2010
         Bond-slip constitutive model
     bond_states : BondSlipStateArrays
         Current bond-slip states
+    steel_dof_map : np.ndarray, optional
+        [nnode, 2] array mapping node → steel DOF indices (or -1 if no steel)
+        If None, assumes dense contiguous steel DOFs (legacy behavior)
     use_numba : bool
         Use Numba acceleration if available
 
@@ -491,10 +536,19 @@ def assemble_bond_slip(
     ], dtype=float)
 
     if use_numba and NUMBA_AVAILABLE:
+        # Use sparse DOF mapping if provided, else legacy dense mapping
+        if steel_dof_map is None:
+            # Legacy: assume dense contiguous steel DOFs
+            nnode = int(ndof_total - steel_dof_offset) // 2
+            steel_dof_map = -np.ones((nnode, 2), dtype=np.int64)
+            for n in range(nnode):
+                steel_dof_map[n, 0] = steel_dof_offset + 2 * n
+                steel_dof_map[n, 1] = steel_dof_offset + 2 * n + 1
+
         f_bond, rows, cols, data, s_curr = _bond_slip_assembly_numba(
             u_total,
             steel_segments,
-            steel_dof_offset,
+            steel_dof_map,
             bond_params,
             bond_states.s_max,
         )
