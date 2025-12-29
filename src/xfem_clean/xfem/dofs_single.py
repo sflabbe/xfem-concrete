@@ -30,6 +30,12 @@ class XFEMDofs:
         Boolean mask of nodes carrying Heaviside dofs.
     tip_nodes:
         Boolean mask of nodes carrying tip dofs.
+    steel:
+        Steel dofs (nnode,2) or -1. For bond-slip modeling.
+    steel_dof_offset:
+        First steel DOF index in global vector. For bond-slip modeling.
+    steel_nodes:
+        Boolean mask of nodes carrying steel dofs. For bond-slip modeling.
     """
 
     std: np.ndarray
@@ -38,6 +44,9 @@ class XFEMDofs:
     ndof: int
     H_nodes: np.ndarray
     tip_nodes: np.ndarray
+    steel: np.ndarray = None  # Optional: for bond-slip
+    steel_dof_offset: int = -1  # Optional: for bond-slip
+    steel_nodes: np.ndarray = None  # Optional: for bond-slip
 
 
 def build_xfem_dofs(
@@ -46,8 +55,33 @@ def build_xfem_dofs(
     crack: XFEMCrack,
     H_region_ymax: float,
     tip_patch: Tuple[float, float, float, float],
+    rebar_segs: np.ndarray = None,
+    enable_bond_slip: bool = False,
 ) -> XFEMDofs:
-    """Build XFEM dof layout for the current crack configuration."""
+    """Build XFEM dof layout for the current crack configuration.
+
+    Parameters
+    ----------
+    nodes : np.ndarray
+        Node coordinates (nnode, 2)
+    elems : np.ndarray
+        Element connectivity (nelem, 4)
+    crack : XFEMCrack
+        Current crack geometry
+    H_region_ymax : float
+        Maximum y for Heaviside enrichment
+    tip_patch : tuple
+        (xmin, xmax, ymin, ymax) for tip enrichment region
+    rebar_segs : np.ndarray, optional
+        Rebar segments array [n_seg, 5]: [n1, n2, L0, cx, cy]
+    enable_bond_slip : bool, optional
+        If True, allocate steel DOFs for bond-slip modeling
+
+    Returns
+    -------
+    XFEMDofs
+        DOF mapping with optional steel DOFs
+    """
 
     nnode = nodes.shape[0]
     std = np.arange(2 * nnode, dtype=int).reshape(nnode, 2)
@@ -93,15 +127,53 @@ def build_xfem_dofs(
             tip[n, k, 1] = idx + 1
             idx += 2
 
-    return XFEMDofs(std=std, H=H, tip=tip, ndof=int(idx), H_nodes=H_nodes, tip_nodes=tip_nodes)
+    # Bond-slip: allocate steel DOFs
+    steel = None
+    steel_dof_offset = -1
+    steel_nodes = None
+
+    if enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
+        steel_dof_offset = idx  # Steel DOFs start after enrichment DOFs
+        steel_nodes = np.zeros(nnode, dtype=bool)
+        steel = -np.ones((nnode, 2), dtype=int)
+
+        # Identify nodes used by rebar segments
+        for seg in rebar_segs:
+            n1 = int(seg[0])
+            n2 = int(seg[1])
+            steel_nodes[n1] = True
+            steel_nodes[n2] = True
+
+        # Allocate steel DOFs for rebar nodes
+        for n in np.where(steel_nodes)[0]:
+            steel[n, 0] = idx
+            steel[n, 1] = idx + 1
+            idx += 2
+
+    return XFEMDofs(
+        std=std,
+        H=H,
+        tip=tip,
+        ndof=int(idx),
+        H_nodes=H_nodes,
+        tip_nodes=tip_nodes,
+        steel=steel,
+        steel_dof_offset=steel_dof_offset,
+        steel_nodes=steel_nodes,
+    )
 
 
 def transfer_q_between_dofs(q_old: np.ndarray, dofs_old: XFEMDofs, dofs_new: XFEMDofs) -> np.ndarray:
-    """Map a solution vector between two XFEM dof layouts."""
+    """Map a solution vector between two XFEM dof layouts.
+
+    Transfers standard, Heaviside, tip, and (optionally) steel DOFs
+    from old to new DOF structure.
+    """
 
     q_new = np.zeros(dofs_new.ndof, dtype=float)
     nnode = dofs_new.std.shape[0]
 
+    # Transfer standard DOFs
     for a in range(nnode):
         for d in range(2):
             io = int(dofs_old.std[a, d])
@@ -109,6 +181,7 @@ def transfer_q_between_dofs(q_old: np.ndarray, dofs_old: XFEMDofs, dofs_new: XFE
             if io >= 0 and inew >= 0 and io < len(q_old):
                 q_new[inew] = float(q_old[io])
 
+    # Transfer Heaviside DOFs
     for a in range(nnode):
         for d in range(2):
             io = int(dofs_old.H[a, d])
@@ -116,11 +189,21 @@ def transfer_q_between_dofs(q_old: np.ndarray, dofs_old: XFEMDofs, dofs_new: XFE
             if io >= 0 and inew >= 0 and io < len(q_old):
                 q_new[inew] = float(q_old[io])
 
+    # Transfer tip DOFs
     for a in range(nnode):
         for k in range(4):
             for d in range(2):
                 io = int(dofs_old.tip[a, k, d])
                 inew = int(dofs_new.tip[a, k, d])
+                if io >= 0 and inew >= 0 and io < len(q_old):
+                    q_new[inew] = float(q_old[io])
+
+    # Transfer steel DOFs (if present in both old and new)
+    if (dofs_old.steel is not None and dofs_new.steel is not None):
+        for a in range(nnode):
+            for d in range(2):
+                io = int(dofs_old.steel[a, d])
+                inew = int(dofs_new.steel[a, d])
                 if io >= 0 and inew >= 0 and io < len(q_old):
                     q_new[inew] = float(q_old[io])
 

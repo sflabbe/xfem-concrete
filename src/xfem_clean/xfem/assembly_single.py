@@ -50,14 +50,30 @@ def assemble_xfem_system(
     bulk_kind: int = 0,
     bulk_params: Optional[np.ndarray] = None,
     tip_enrichment_type: TipEnrichmentType = "non_singular_cohesive",
+    rebar_segs: Optional[np.ndarray] = None,
+    bond_law: Optional[object] = None,
+    bond_states_comm: Optional[object] = None,
+    enable_bond_slip: bool = False,
 ) -> Tuple[
     sp.csr_matrix,
     np.ndarray,
     Union[Dict[Tuple[int, int], CohesiveState], CohesiveStatePatch],
     Union[Dict[Tuple[int, int], MaterialPoint], BulkStatePatch],
     Dict[str, np.ndarray],
+    Optional[object],
 ]:
     """Assemble global tangent and internal force vector.
+
+    Parameters
+    ----------
+    rebar_segs : np.ndarray, optional
+        Rebar segments [n_seg, 5]: [n1, n2, L0, cx, cy]
+    bond_law : BondSlipModelCode2010, optional
+        Bond-slip constitutive law
+    bond_states_comm : BondSlipStateArrays, optional
+        Committed bond-slip states
+    enable_bond_slip : bool
+        If True, integrate bond-slip contribution
 
     Returns
     -------
@@ -69,6 +85,8 @@ def assemble_xfem_system(
         Trial material-point states for this iterate (do not mutate committed history).
     aux : dict
         Gauss-point data for postprocessing / nonlocal crack criteria.
+    bond_updates : BondSlipStateArrays or None
+        Trial bond-slip states (if bond-slip enabled)
     """
 
     ndof = int(dofs.ndof)
@@ -585,6 +603,27 @@ def assemble_xfem_system(
         stab[2 * nnode :] = k_stab_eff
         K = K + sp.diags(stab, 0, shape=(ndof, ndof), format="csr")
 
+    # Bond-slip contribution (Phase 2: Bond-Slip Integration)
+    bond_updates = None
+    if enable_bond_slip and rebar_segs is not None and bond_law is not None and bond_states_comm is not None:
+        if dofs.steel_dof_offset < 0:
+            raise ValueError("Bond-slip enabled but steel DOFs not allocated. Check build_xfem_dofs().")
+
+        from xfem_clean.bond_slip import assemble_bond_slip
+
+        f_bond, K_bond, bond_updates = assemble_bond_slip(
+            u_total=q,
+            steel_segments=rebar_segs,
+            steel_dof_offset=dofs.steel_dof_offset,
+            bond_law=bond_law,
+            bond_states=bond_states_comm,
+            use_numba=use_numba,
+        )
+
+        # Add bond-slip contribution to global system
+        fint += f_bond
+        K = K + K_bond
+
     aux = {
         "gp_pos": np.asarray(gp_pos, dtype=float),
         "gp_sig": np.asarray(gp_sig, dtype=float),
@@ -595,4 +634,4 @@ def assemble_xfem_system(
         "coh_weight": np.asarray(coh_wgt, dtype=float),
         "coh_delta_max": np.asarray(coh_delta_max, dtype=float),
     }
-    return K, fint, coh_updates, mp_updates, aux
+    return K, fint, coh_updates, mp_updates, aux, bond_updates

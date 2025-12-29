@@ -81,6 +81,15 @@ class XFEMModel:
 
     cover: float = 0.05
 
+    # Bond-slip interface modeling (Phase 2)
+    enable_bond_slip: bool = False
+    rebar_diameter: float = 0.016  # meters (default: 16mm)
+    bond_condition: str = "good"   # "good" | "poor" (Model Code 2010)
+
+    # Dowel action at crack-rebar intersections (Phase 5)
+    enable_dowel: bool = False
+    dowel_penalty_factor: float = 1.0
+
     # Small hysteresis factor for crack initiation to avoid chatter.
     ft_initiation_factor: float = 1.001
 
