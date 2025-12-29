@@ -436,7 +436,7 @@ def run_analysis_xfem(
 
         if model.debug_substeps:
             print(f"    [newton] failed(maxit) u={u_target*1e3:.3f}mm")
-        return False, q, coh_committed, mp_committed, aux, 0.0
+        return False, q, coh_committed, mp_committed, aux, 0.0, bond_committed
 
     def curvature_mid(q_full: np.ndarray) -> float:
         y0 = float(np.min(nodes[:, 1]))

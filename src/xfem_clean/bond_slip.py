@@ -254,7 +254,7 @@ class BondSlipStateArrays:
 def _bond_slip_assembly_numba(
     u_total: np.ndarray,        # [ndof_total] displacement vector
     segs: np.ndarray,           # [n_seg, 5]: [n1, n2, L0, cx, cy]
-    steel_dof_offset: int,      # First steel DOF index
+    steel_dof_map: np.ndarray,  # [nnode, 2]: node → steel DOF indices
     bond_params: np.ndarray,    # [tau_max, s1, s2, s3, tau_f, alpha, perimeter]
     s_max_hist: np.ndarray,     # [n_seg] history
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -304,11 +304,11 @@ def _bond_slip_assembly_numba(
         dof_c2x = 2 * n2
         dof_c2y = 2 * n2 + 1
 
-        # Steel DOFs (duplicated nodes)
-        dof_s1x = steel_dof_offset + 2 * n1
-        dof_s1y = steel_dof_offset + 2 * n1 + 1
-        dof_s2x = steel_dof_offset + 2 * n2
-        dof_s2y = steel_dof_offset + 2 * n2 + 1
+        # Steel DOFs (sparse mapping via steel_dof_map)
+        dof_s1x = int(steel_dof_map[n1, 0])
+        dof_s1y = int(steel_dof_map[n1, 1])
+        dof_s2x = int(steel_dof_map[n2, 0])
+        dof_s2y = int(steel_dof_map[n2, 1])
 
         # Displacements
         u_c1x = u_total[dof_c1x]
@@ -447,6 +447,7 @@ def assemble_bond_slip(
     steel_dof_offset: int,
     bond_law: BondSlipModelCode2010,
     bond_states: BondSlipStateArrays,
+    steel_dof_map: np.ndarray = None,
     use_numba: bool = True,
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Assemble bond-slip interface forces and stiffness.
@@ -458,11 +459,14 @@ def assemble_bond_slip(
     steel_segments : np.ndarray
         [n_seg, 5] array: [n1, n2, L0, cx, cy]
     steel_dof_offset : int
-        Index where steel DOFs begin
+        Index where steel DOFs begin (for backward compat, not used if steel_dof_map provided)
     bond_law : BondSlipModelCode2010
         Bond-slip constitutive model
     bond_states : BondSlipStateArrays
         Current bond-slip states
+    steel_dof_map : np.ndarray, optional
+        [nnode, 2] array mapping node → steel DOF indices (or -1 if no steel)
+        If None, assumes dense contiguous steel DOFs (legacy behavior)
     use_numba : bool
         Use Numba acceleration if available
 
@@ -491,10 +495,19 @@ def assemble_bond_slip(
     ], dtype=float)
 
     if use_numba and NUMBA_AVAILABLE:
+        # Use sparse DOF mapping if provided, else legacy dense mapping
+        if steel_dof_map is None:
+            # Legacy: assume dense contiguous steel DOFs
+            nnode = int(ndof_total - steel_dof_offset) // 2
+            steel_dof_map = -np.ones((nnode, 2), dtype=np.int64)
+            for n in range(nnode):
+                steel_dof_map[n, 0] = steel_dof_offset + 2 * n
+                steel_dof_map[n, 1] = steel_dof_offset + 2 * n + 1
+
         f_bond, rows, cols, data, s_curr = _bond_slip_assembly_numba(
             u_total,
             steel_segments,
-            steel_dof_offset,
+            steel_dof_map,
             bond_params,
             bond_states.s_max,
         )

@@ -617,6 +617,7 @@ def assemble_xfem_system(
             steel_dof_offset=dofs.steel_dof_offset,
             bond_law=bond_law,
             bond_states=bond_states_comm,
+            steel_dof_map=dofs.steel,  # Pass sparse DOF mapping
             use_numba=use_numba,
         )
 
