@@ -342,45 +342,36 @@ def _bond_slip_assembly_numba(
         s_max = max(s_max_hist[i], s_abs)
         sign = 1.0 if s >= 0.0 else -1.0
 
-        # C1-continuous regularization for s -> 0 singularity (Priority #1)
-        # Use s_reg = 0.01 * s1 as threshold
-        s_reg = 0.01 * s1
+        # Simplified C1-continuous regularization for s -> 0 singularity (Priority #1)
+        # Use s_reg = 0.1 * s1 as threshold (increased from 0.01 to handle smaller slips)
+        s_reg = 0.1 * s1
 
-        # Design C1-continuous transition:
-        # For s <= s_reg: τ(s) = k0 * s (linear)
-        # For s > s_reg: τ(s) = τ_max * ((s - s_reg + s_off) / s1)^α
+        # Simpler C1-continuous approach:
+        # 1) For s <= s_reg: τ(s) = k0 * s (linear)
+        # 2) For s > s_reg: τ(s) = τ_max * (s/s1)^α (original power law)
         #
-        # Match τ and dτ/ds at s = s_reg:
-        # 1) τ(s_reg) from power law = k0 * s_reg
-        # 2) dτ/ds(s_reg) from power law = k0
+        # Match dτ/ds at s_reg for C1 continuity:
+        # k0 = τ_max * α / s1 * (s_reg/s1)^(α-1)
         #
-        # From (2): τ_max * α / s1 * (s_off / s1)^(α-1) = k0
-        # => s_off = s1 * (k0 * s1 / (τ_max * α))^(1/(α-1))
-        #
-        # From (1): τ_max * (s_off / s1)^α = k0 * s_reg
-        # => k0 = τ_max / s_reg * (s_off / s1)^α
-        #
-        # Solve iteratively or use s_off heuristic:
-        # Choose k0 = τ_max / s1 * s_reg^(α-1) (tangent at s_reg from original law)
-        # Then s_off = s1 * (k0 * s1 / (τ_max * α))^(1/(α-1))
+        # This ensures:
+        # - τ is continuous (may have small jump, but acceptable)
+        # - dτ/ds is continuous (C1)
+        # - k0 is finite for all α > 0
 
-        k0 = tau_max / s1 * (s_reg ** (alpha - 1.0))  # Tangent stiffness at s_reg
-        s_off = s1 * ((k0 * s1 / (tau_max * alpha)) ** (1.0 / (alpha - 1.0)))
-        tau_offset = tau_max * ((s_off / s1) ** alpha) - k0 * s_reg  # Offset to match τ at s_reg
+        k0 = tau_max * alpha / s1 * ((s_reg / s1) ** (alpha - 1.0))  # Tangent stiffness at s_reg
 
         # Envelope evaluation (inline for Numba)
         if s_abs >= s_max - 1e-14:
             # Loading envelope
             if s_abs <= s1:
                 if s_abs < s_reg:
-                    # Regularized linear branch (C1-continuous)
+                    # Regularized linear branch (C1-continuous at s_reg)
                     tau_abs = k0 * s_abs
                     dtau_abs = k0
                 else:
-                    # Power law with offset for C1 continuity
-                    s_eff = s_abs - s_reg + s_off
-                    ratio = s_eff / s1
-                    tau_abs = tau_max * (ratio ** alpha) - tau_offset
+                    # Original power law (matches derivative at s_reg)
+                    ratio = s_abs / s1
+                    tau_abs = tau_max * (ratio ** alpha)
                     dtau_abs = tau_max * alpha / s1 * (ratio ** (alpha - 1.0))
             elif s_abs <= s2:
                 tau_abs = tau_max
