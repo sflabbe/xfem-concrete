@@ -11,6 +11,8 @@ src/cdp_generator/strain_rate.py
 src/cdp_generator/temperature.py
 src/cdp_generator/tension.py
 src/xfem_clean/__init__.py
+src/xfem_clean/arc_length.py
+src/xfem_clean/bond_slip.py
 src/xfem_clean/cohesive_laws.py
 src/xfem_clean/constitutive.py
 src/xfem_clean/convergence.py
@@ -29,6 +31,9 @@ src/xfem_clean/numba/kernels_bulk.py
 src/xfem_clean/numba/kernels_cohesive.py
 src/xfem_clean/numba/kernels_q4.py
 src/xfem_clean/numba/utils.py
+src/xfem_clean/output/__init__.py
+src/xfem_clean/output/energy.py
+src/xfem_clean/output/vtk_export.py
 src/xfem_clean/solvers/__init__.py
 src/xfem_clean/utils/__init__.py
 src/xfem_clean/utils/run_info.py

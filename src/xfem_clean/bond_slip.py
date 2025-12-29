@@ -250,7 +250,7 @@ class BondSlipStateArrays:
 # Bond-Slip Assembly (Numba-accelerated)
 # ------------------------------------------------------------------------------
 
-@njit(cache=True, parallel=True)
+@njit(cache=True, parallel=False)  # TODO: Fix parallel loop (entry_idx conflict)
 def _bond_slip_assembly_numba(
     u_total: np.ndarray,        # [ndof_total] displacement vector
     segs: np.ndarray,           # [n_seg, 5]: [n1, n2, L0, cx, cy]
@@ -290,7 +290,7 @@ def _bond_slip_assembly_numba(
 
     entry_idx = 0
 
-    for i in prange(n_seg):
+    for i in range(n_seg):  # Changed from prange due to entry_idx conflict
         # Node IDs
         n1 = int(segs[i, 0])
         n2 = int(segs[i, 1])

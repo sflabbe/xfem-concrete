@@ -188,16 +188,47 @@ def run_analysis_xfem(
         )
 
     def _std_only_dofs() -> XFEMDofs:
+        """Create DOF mapping with only standard DOFs (and optionally steel DOFs for bond-slip)."""
         std = np.arange(2 * nnode, dtype=int).reshape(nnode, 2)
         H = -np.ones((nnode, 2), dtype=int)
         tipd = -np.ones((nnode, 4, 2), dtype=int)
+
+        # Bond-slip: allocate steel DOFs even when crack is inactive
+        steel = None
+        steel_dof_offset = -1
+        steel_nodes = None
+        ndof = 2 * nnode
+
+        if model.enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
+            steel_dof_offset = ndof  # Steel DOFs start after standard DOFs
+            steel_nodes = np.zeros(nnode, dtype=bool)
+            steel = -np.ones((nnode, 2), dtype=int)
+
+            # Identify nodes used by rebar segments
+            for seg in rebar_segs:
+                n1 = int(seg[0])
+                n2 = int(seg[1])
+                steel_nodes[n1] = True
+                steel_nodes[n2] = True
+
+            # Allocate steel DOFs for rebar nodes
+            idx = ndof
+            for n in np.where(steel_nodes)[0]:
+                steel[n, 0] = idx
+                steel[n, 1] = idx + 1
+                idx += 2
+            ndof = idx
+
         return XFEMDofs(
             std=std,
             H=H,
             tip=tipd,
-            ndof=2 * nnode,
+            ndof=ndof,
             H_nodes=np.zeros(nnode, dtype=bool),
             tip_nodes=np.zeros(nnode, dtype=bool),
+            steel=steel,
+            steel_dof_offset=steel_dof_offset,
+            steel_nodes=steel_nodes,
         )
 
     def _tip_patch() -> Tuple[float, float, float, float]:
