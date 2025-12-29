@@ -62,6 +62,8 @@ def assemble_xfem_system(
     reinforcement_states_comm: Optional[list] = None,
     rebar_contact_points: Optional[list] = None,
     enable_rebar_contact: bool = False,
+    # Subdomain support (FASE C)
+    subdomain_mgr: Optional[object] = None,  # SubdomainManager
 ) -> Tuple[
     sp.csr_matrix,
     np.ndarray,
@@ -145,6 +147,21 @@ def assemble_xfem_system(
         xe = nodes[conn, :]
         xmin, xmax, ymin, ymax = element_bounds(xe)
 
+        # Check if element is void (skip bulk assembly)
+        if subdomain_mgr is not None and subdomain_mgr.is_void(e):
+            # Void elements: no bulk contribution
+            # Still integrate canonical Gauss points for post-processing
+            continue
+
+        # Get effective material properties (for rigid or overridden elements)
+        thickness_eff = thickness
+        if subdomain_mgr is not None:
+            thickness_eff = subdomain_mgr.get_effective_thickness(e, thickness)
+
+        # If thickness is effectively zero, skip this element
+        if thickness_eff < 1e-12:
+            continue
+
         is_cut = False
         if crack_active:
             seg = clip_segment_to_bbox(p0, pt, xmin, xmax, ymin, ymax)
@@ -177,7 +194,7 @@ def assemble_xfem_system(
 
                     x, y, N, dN_dxi, dN_deta = element_x_y(xi, eta, xe)
                     dN_dx, dN_dy, detJ = element_dN_dxdy(dN_dxi, dN_deta, xe)
-                    weight = wx * wy * detJ * float(thickness)
+                    weight = wx * wy * detJ * float(thickness_eff)
 
                     Hgp = crack.H(x, y) if crack_active else -1.0
                     B, edofs = build_B_enriched(
