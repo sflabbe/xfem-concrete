@@ -693,7 +693,33 @@ def run_analysis_xfem(
                                     nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch(),
                                     rebar_segs=rebar_segs, enable_bond_slip=model.enable_bond_slip
                                 )
-                                q_sol = transfer_q_between_dofs(q_sol, dofs_local, dofs_new)
+
+                                # Junction detection (Dissertation Eq. 4.64-4.66)
+                                # NOTE: Full junction enrichment requires multi-crack support.
+                                # For future multi-crack solver, detect coalescence here:
+                                # if model.enable_junction_enrichment:
+                                #     from xfem_clean.junction import detect_crack_coalescence
+                                #     junctions = detect_crack_coalescence(
+                                #         cracks=[crack], nodes=nodes, elems=elems,
+                                #         tol_merge=model.junction_merge_tolerance
+                                #     )
+
+                                # L2 DOF projection (Dissertation Eq. 4.60-4.63)
+                                if model.enable_dof_projection and dofs_new.ndof != dofs_local.ndof:
+                                    from xfem_clean.dof_mapping import project_dofs_l2
+                                    q_sol = project_dofs_l2(
+                                        q_old=q_sol,
+                                        nodes_old=nodes,
+                                        elems=elems,
+                                        dofs_old=dofs_local,
+                                        dofs_new=dofs_new,
+                                        patch_elements=None,  # Auto-detect affected elements
+                                        use_standard_part=True,
+                                    )
+                                else:
+                                    # Standard transfer (current implementation)
+                                    q_sol = transfer_q_between_dofs(q_sol, dofs_local, dofs_new)
+
                                 dofs = dofs_new
                                 changed = True
 

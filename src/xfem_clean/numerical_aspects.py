@@ -11,6 +11,7 @@ Reference: Dissertation 10.5445/IR/1000124842, Chapter 4
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Tuple, List, Optional
 
 import numpy as np
@@ -459,6 +460,3 @@ class StabilizationParams:
     use_kinked_tips: bool = True
     use_blending: bool = False
     blend_radius: float = 0.05
-
-
-from dataclasses import dataclass
