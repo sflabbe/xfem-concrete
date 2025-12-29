@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import math
-from typing import Tuple
+from typing import Tuple, Literal
 
 import numpy as np
 
-from xfem_clean.xfem.geometry import XFEMCrack, branch_F_and_grad
+from xfem_clean.xfem.geometry import XFEMCrack, branch_F_and_grad, non_singular_cohesive_F_and_grad
 from xfem_clean.xfem.dofs_single import XFEMDofs
+
+# Type alias for tip enrichment mode
+TipEnrichmentType = Literal["lefm_branch", "non_singular_cohesive"]
 
 
 def build_B_enriched(
@@ -26,20 +29,36 @@ def build_B_enriched(
     heaviside_side: float,
     tip_x: float,
     tip_y: float,
+    tip_enrichment_type: TipEnrichmentType = "non_singular_cohesive",
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Build enriched B and the corresponding global dof list."""
+    """Build enriched B and the corresponding global dof list.
+
+    Parameters
+    ----------
+    tip_enrichment_type : {"lefm_branch", "non_singular_cohesive"}
+        Type of near-tip enrichment:
+        - "lefm_branch": Classical LEFM branch functions (√r basis) for singular fields
+        - "non_singular_cohesive": Non-singular enrichment (r*sin(θ/2)) for cohesive cracks
+        Default is "non_singular_cohesive" per Gutierrez (2020).
+    """
 
     edofs = []
     B_cols = []
 
     H_i = np.array([crack.H(float(xe[a, 0]), float(xe[a, 1])) for a in range(4)], dtype=float)
 
+    # Select enrichment function based on type
+    if tip_enrichment_type == "lefm_branch":
+        enrich_func = branch_F_and_grad
+    else:  # "non_singular_cohesive"
+        enrich_func = non_singular_cohesive_F_and_grad
+
     F_i = np.zeros((4, 4), dtype=float)
     for a in range(4):
-        Fi, _, _ = branch_F_and_grad(float(xe[a, 0]), float(xe[a, 1]), tip_x, tip_y)
+        Fi, _, _ = enrich_func(float(xe[a, 0]), float(xe[a, 1]), tip_x, tip_y)
         F_i[a, :] = Fi
 
-    Fg, dFdx_g, dFdy_g = branch_F_and_grad(float(x), float(y), tip_x, tip_y)
+    Fg, dFdx_g, dFdy_g = enrich_func(float(x), float(y), tip_x, tip_y)
 
     G_y = crack.behind_tip(float(x), float(y)) if crack_active else 0.0
     r_tip = math.sqrt((float(x) - tip_x) ** 2 + (float(y) - tip_y) ** 2)

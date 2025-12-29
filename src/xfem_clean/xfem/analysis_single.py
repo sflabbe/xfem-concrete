@@ -241,6 +241,7 @@ def run_analysis_xfem(
                 coh_params=coh_params,
                 bulk_kind=int(bulk_kind),
                 bulk_params=bulk_params,
+                tip_enrichment_type=model.tip_enrichment_type,
             )
 
             f_rb, K_rb = rebar_contrib(

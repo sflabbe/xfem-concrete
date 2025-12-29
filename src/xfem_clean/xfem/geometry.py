@@ -92,11 +92,15 @@ def tip_polar(x: float, y: float, xt: float, yt: float, r_eps: float = 1e-12):
 
 
 def branch_F_and_grad(x: float, y: float, xt: float, yt: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Moës tip branch functions and their gradients.
+    """Moës tip branch functions and their gradients (LEFM singular enrichment).
+
+    These functions are suitable for linear elastic fracture mechanics (LEFM) with
+    singular crack-tip fields. For cohesive cracks, use non_singular_cohesive_F_and_grad.
 
     Returns
     -------
     F : (4,) ndarray
+        Branch functions: [√r sin(θ/2), √r cos(θ/2), √r sin(θ/2)sin(θ), √r cos(θ/2)sin(θ)]
     dFdx : (4,) ndarray
     dFdy : (4,) ndarray
     """
@@ -133,6 +137,64 @@ def branch_F_and_grad(x: float, y: float, xt: float, yt: float) -> Tuple[np.ndar
 
     dFdx = dFdr * drdx + dFdth * dthdx
     dFdy = dFdr * drdy + dFdth * dthdy
+    return F, dFdx, dFdy
+
+
+def non_singular_cohesive_F_and_grad(x: float, y: float, xt: float, yt: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Non-singular near-tip enrichment for cohesive cracks (Gutierrez 2020).
+
+    For cohesive cracks with finite stresses at the tip, the displacement field is
+    NOT singular. The enrichment function F(r,θ) = r*sin(θ/2) provides a smooth
+    approximation suitable for process zones with cohesive laws.
+
+    This replaces the 4 LEFM branch functions with a single non-singular function.
+    To maintain compatibility with the existing DOF structure, we return it in the
+    first position and set the remaining 3 to zero.
+
+    Mathematical form:
+        F₀(r,θ) = r * sin(θ/2)
+        F₁,₂,₃ = 0  (unused, for compatibility)
+
+    Gradients:
+        ∂F₀/∂r = sin(θ/2)
+        ∂F₀/∂θ = (r/2) * cos(θ/2)
+
+    Reference: Gutierrez (2020), KIT dissertation, Section 3.3.2
+
+    Returns
+    -------
+    F : (4,) ndarray
+        [r*sin(θ/2), 0, 0, 0]
+    dFdx : (4,) ndarray
+    dFdy : (4,) ndarray
+    """
+
+    r, th, dx, dy = tip_polar(x, y, xt, yt)
+
+    sh = math.sin(th / 2.0)
+    ch = math.cos(th / 2.0)
+
+    # Only first function is active: F = r * sin(θ/2)
+    F = np.zeros(4, dtype=float)
+    F[0] = r * sh
+
+    # Polar derivatives
+    drdx = dx / r
+    drdy = dy / r
+    dthdx = -dy / (r * r)
+    dthdy = dx / (r * r)
+
+    # ∂F/∂r and ∂F/∂θ
+    dFdr = np.zeros(4, dtype=float)
+    dFdth = np.zeros(4, dtype=float)
+
+    dFdr[0] = sh              # ∂(r*sin(θ/2))/∂r = sin(θ/2)
+    dFdth[0] = 0.5 * r * ch   # ∂(r*sin(θ/2))/∂θ = (r/2)*cos(θ/2)
+
+    # Chain rule: ∂F/∂x = (∂F/∂r)(∂r/∂x) + (∂F/∂θ)(∂θ/∂x)
+    dFdx = dFdr * drdx + dFdth * dthdx
+    dFdy = dFdr * drdy + dFdth * dthdy
+
     return F, dFdx, dFdy
 
 

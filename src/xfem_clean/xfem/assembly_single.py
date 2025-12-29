@@ -25,7 +25,7 @@ from xfem_clean.xfem.state_arrays import (
 from xfem_clean.xfem.geometry import XFEMCrack, clip_segment_to_bbox, branch_F_and_grad
 from xfem_clean.xfem.dofs_single import XFEMDofs
 from xfem_clean.xfem.q4_utils import element_bounds, element_x_y, element_dN_dxdy, element_local_xi_at_x, element_local_eta_at_y
-from xfem_clean.xfem.enrichment_single import build_B_enriched
+from xfem_clean.xfem.enrichment_single import build_B_enriched, TipEnrichmentType
 from xfem_clean.fem.q4 import q4_shape
 from xfem_clean.crack_criteria import principal_max_2d
 
@@ -49,6 +49,7 @@ def assemble_xfem_system(
     coh_params: Optional[np.ndarray] = None,
     bulk_kind: int = 0,
     bulk_params: Optional[np.ndarray] = None,
+    tip_enrichment_type: TipEnrichmentType = "non_singular_cohesive",
 ) -> Tuple[
     sp.csr_matrix,
     np.ndarray,
@@ -166,6 +167,7 @@ def assemble_xfem_system(
                         Hgp,
                         tip_x,
                         tip_y,
+                        tip_enrichment_type,
                     )
                     qe = q[edofs]
                     eps = B @ qe
@@ -371,6 +373,7 @@ def assemble_xfem_system(
                         Hgp,
                         tip_x,
                         tip_y,
+                        tip_enrichment_type,
                     )
                     qe = q[np.asarray(edofs, dtype=int)]
                     eps = B @ qe

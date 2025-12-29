@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Literal
+
+# Type alias for tip enrichment mode
+TipEnrichmentType = Literal["lefm_branch", "non_singular_cohesive"]
 
 
 @dataclass
@@ -116,6 +119,9 @@ class XFEMModel:
     crack_dt_tip: float = 0.6
     tip_enr_radius: float = 0.20
     k_stab: float = 1e-6
+
+    # Tip enrichment type: non-singular for cohesive cracks (Gutierrez 2020) or classical LEFM
+    tip_enrichment_type: TipEnrichmentType = "non_singular_cohesive"
 
     # cohesive penalty scaling
     Kn_factor: float = 0.1
