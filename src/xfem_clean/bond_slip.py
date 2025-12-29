@@ -13,7 +13,7 @@ The implementation includes:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Optional
 import math
 
 import numpy as np
@@ -325,6 +325,339 @@ class BondSlipModelCode2010:
         # Part B7: Use secant stiffness for stability
         if self.use_secant_stiffness and s_abs > 1e-14:
             dtau_abs = tau_abs / s_abs  # Secant stiffness
+
+        return sign * float(tau_abs), float(dtau_abs)
+
+
+# ------------------------------------------------------------------------------
+# Custom Bond Laws for Thesis Cases
+# ------------------------------------------------------------------------------
+
+@dataclass
+class CustomBondSlipLaw:
+    """Custom CEB-FIP bond-slip law with direct parameter specification.
+
+    This variant allows direct specification of all bond-slip parameters,
+    which is needed for thesis validation cases that use calibrated values
+    rather than Model Code 2010 formulas.
+
+    The bond stress-slip relationship follows the same 4-branch form as
+    BondSlipModelCode2010, but with user-specified parameters.
+
+    Parameters
+    ----------
+    s1 : float
+        End of rising branch [m] or [mm] depending on use
+    s2 : float
+        End of plateau [m] or [mm]
+    s3 : float
+        End of softening [m] or [mm]
+    tau_max : float
+        Maximum bond stress [Pa] or [MPa] depending on use
+    tau_f : float
+        Residual bond stress [Pa] or [MPa]
+    alpha : float
+        Exponent in rising branch (typically 0.4)
+    use_secant_stiffness : bool
+        Use secant instead of tangent stiffness for stability
+    """
+
+    s1: float
+    s2: float
+    s3: float
+    tau_max: float
+    tau_f: float
+    alpha: float = 0.4
+    use_secant_stiffness: bool = True
+
+    def __post_init__(self):
+        """Validate parameters."""
+        if self.s1 <= 0 or self.s2 <= self.s1 or self.s3 <= self.s2:
+            raise ValueError("Bond-slip parameters must satisfy: 0 < s1 < s2 < s3")
+        if self.tau_max <= 0 or self.tau_f < 0:
+            raise ValueError("Bond stresses must be non-negative (tau_max > 0)")
+        if self.alpha <= 0:
+            raise ValueError("Alpha exponent must be positive")
+
+    def tau_envelope(self, s_abs: float) -> Tuple[float, float]:
+        """Compute bond stress and tangent on the monotonic envelope.
+
+        Parameters
+        ----------
+        s_abs : float
+            Absolute value of slip (same units as s1, s2, s3)
+
+        Returns
+        -------
+        tau : float
+            Bond stress (same units as tau_max)
+        dtau_ds : float
+            Tangent stiffness (units: tau_max / s1)
+        """
+        s_abs = float(s_abs)
+
+        if s_abs <= self.s1:
+            # Rising branch: τ = τ_max * (s/s1)^α
+            if s_abs < 1e-16:
+                tau = 0.0
+                dtau_ds = self.tau_max * self.alpha / self.s1
+            else:
+                ratio = s_abs / self.s1
+                tau = self.tau_max * (ratio ** self.alpha)
+                dtau_ds = self.tau_max * self.alpha / self.s1 * (ratio ** (self.alpha - 1.0))
+
+        elif s_abs <= self.s2:
+            # Plateau: τ = τ_max
+            tau = self.tau_max
+            dtau_ds = 0.0
+
+        elif s_abs <= self.s3:
+            # Softening: linear decay
+            tau = self.tau_max - (self.tau_max - self.tau_f) * (s_abs - self.s2) / (self.s3 - self.s2)
+            dtau_ds = -(self.tau_max - self.tau_f) / (self.s3 - self.s2)
+
+        else:
+            # Residual: τ = τ_f
+            tau = self.tau_f
+            dtau_ds = 0.0
+
+        return float(tau), float(dtau_ds)
+
+    def tau_and_tangent(
+        self, s: float, s_max_history: float
+    ) -> Tuple[float, float]:
+        """Compute bond stress and tangent with unloading/reloading.
+
+        Parameters
+        ----------
+        s : float
+            Current slip (signed)
+        s_max_history : float
+            Maximum absolute slip in history
+
+        Returns
+        -------
+        tau : float
+            Bond stress (signed)
+        dtau_ds : float
+            Tangent or secant stiffness
+        """
+        s_abs = abs(s)
+        sign = 1.0 if s >= 0 else -1.0
+
+        # Update historical maximum
+        s_max = max(s_max_history, s_abs)
+
+        # Compute envelope at current and max slips
+        tau_env, dtau_env = self.tau_envelope(s_abs)
+        tau_max_env, _ = self.tau_envelope(s_max)
+
+        # Unloading/reloading: secant to historical max
+        if s_abs < s_max:
+            # Reloading path
+            if s_max > 1e-14:
+                dtau_abs = tau_max_env / s_max  # Secant to historical max
+            else:
+                dtau_abs = dtau_env
+            tau_abs = dtau_abs * s_abs
+        else:
+            # Loading on envelope
+            tau_abs = tau_env
+            dtau_abs = dtau_env
+
+        # Secant stiffness option for stability
+        if self.use_secant_stiffness and s_abs > 1e-14:
+            dtau_abs = tau_abs / s_abs
+
+        return sign * float(tau_abs), float(dtau_abs)
+
+
+@dataclass
+class BilinearBondLaw:
+    """Bilinear bond-slip law for externally bonded FRP sheets.
+
+    Simplified law with linear hardening followed by linear softening to zero.
+    Used for FRP sheet debonding.
+
+    tau(s) =
+      (tau1/s1)*s                      if 0 <= s <= s1
+      tau1*(1 - (s-s1)/(s2-s1))        if s1 < s <= s2
+      0                                if s > s2
+
+    Parameters
+    ----------
+    s1 : float
+        End of hardening branch
+    s2 : float
+        End of softening (complete debonding)
+    tau1 : float
+        Peak bond stress
+    use_secant_stiffness : bool
+        Use secant stiffness for stability
+    """
+
+    s1: float
+    s2: float
+    tau1: float
+    use_secant_stiffness: bool = True
+
+    def __post_init__(self):
+        """Validate parameters."""
+        if self.s1 <= 0 or self.s2 <= self.s1:
+            raise ValueError("Must have 0 < s1 < s2")
+        if self.tau1 <= 0:
+            raise ValueError("Peak stress tau1 must be positive")
+
+    def tau_envelope(self, s_abs: float) -> Tuple[float, float]:
+        """Compute bond stress and tangent on monotonic envelope."""
+        s_abs = float(s_abs)
+
+        if s_abs <= self.s1:
+            # Hardening: τ = (tau1/s1)*s
+            if s_abs < 1e-16:
+                tau = 0.0
+                dtau_ds = self.tau1 / self.s1
+            else:
+                tau = (self.tau1 / self.s1) * s_abs
+                dtau_ds = self.tau1 / self.s1
+
+        elif s_abs <= self.s2:
+            # Softening: τ = tau1 * (1 - (s-s1)/(s2-s1))
+            tau = self.tau1 * (1.0 - (s_abs - self.s1) / (self.s2 - self.s1))
+            dtau_ds = -self.tau1 / (self.s2 - self.s1)
+
+        else:
+            # Debonded: τ = 0
+            tau = 0.0
+            dtau_ds = 0.0
+
+        return float(tau), float(dtau_ds)
+
+    def tau_and_tangent(
+        self, s: float, s_max_history: float
+    ) -> Tuple[float, float]:
+        """Compute bond stress and tangent with unloading/reloading."""
+        s_abs = abs(s)
+        sign = 1.0 if s >= 0 else -1.0
+
+        s_max = max(s_max_history, s_abs)
+
+        tau_env, dtau_env = self.tau_envelope(s_abs)
+        tau_max_env, _ = self.tau_envelope(s_max)
+
+        # Unloading/reloading
+        if s_abs < s_max:
+            if s_max > 1e-14:
+                dtau_abs = tau_max_env / s_max
+            else:
+                dtau_abs = dtau_env
+            tau_abs = dtau_abs * s_abs
+        else:
+            tau_abs = tau_env
+            dtau_abs = dtau_env
+
+        # Secant stiffness
+        if self.use_secant_stiffness and s_abs > 1e-14:
+            dtau_abs = tau_abs / s_abs
+
+        return sign * float(tau_abs), float(dtau_abs)
+
+
+@dataclass
+class BanholzerBondLaw:
+    """Banholzer bond-slip law for fibres (5-parameter model).
+
+    Used for fibre reinforcement pull-out behavior.
+
+    tau(s) =
+      (tau1/s0)*s                                   if 0 <= s <= s0
+      tau2 - (tau2-tau_f)*(s-s0)/((a-1)*s0)         if s0 < s <= a*s0
+      tau_f                                         if s > a*s0
+
+    Parameters
+    ----------
+    s0 : float
+        End of rising branch
+    a : float
+        Softening end multiplier (slip at end of softening = a*s0)
+    tau1 : float
+        Peak stress in rising branch
+    tau2 : float
+        Stress at start of softening
+    tau_f : float
+        Residual stress
+    use_secant_stiffness : bool
+        Use secant stiffness for stability
+    """
+
+    s0: float
+    a: float
+    tau1: float
+    tau2: float
+    tau_f: float
+    use_secant_stiffness: bool = True
+
+    def __post_init__(self):
+        """Validate parameters."""
+        if self.s0 <= 0:
+            raise ValueError("s0 must be positive")
+        if self.a <= 1.0:
+            raise ValueError("a must be > 1 (defines softening length)")
+        if self.tau1 <= 0 or self.tau2 < 0 or self.tau_f < 0:
+            raise ValueError("Bond stresses must be non-negative")
+
+    def tau_envelope(self, s_abs: float) -> Tuple[float, float]:
+        """Compute bond stress and tangent on monotonic envelope."""
+        s_abs = float(s_abs)
+
+        if s_abs <= self.s0:
+            # Rising: τ = (tau1/s0)*s
+            if s_abs < 1e-16:
+                tau = 0.0
+                dtau_ds = self.tau1 / self.s0
+            else:
+                tau = (self.tau1 / self.s0) * s_abs
+                dtau_ds = self.tau1 / self.s0
+
+        elif s_abs <= self.a * self.s0:
+            # Softening: τ = tau2 - (tau2-tau_f)*(s-s0)/((a-1)*s0)
+            s_soft_length = (self.a - 1.0) * self.s0
+            tau = self.tau2 - (self.tau2 - self.tau_f) * (s_abs - self.s0) / s_soft_length
+            dtau_ds = -(self.tau2 - self.tau_f) / s_soft_length
+
+        else:
+            # Residual: τ = tau_f
+            tau = self.tau_f
+            dtau_ds = 0.0
+
+        return float(tau), float(dtau_ds)
+
+    def tau_and_tangent(
+        self, s: float, s_max_history: float
+    ) -> Tuple[float, float]:
+        """Compute bond stress and tangent with unloading/reloading."""
+        s_abs = abs(s)
+        sign = 1.0 if s >= 0 else -1.0
+
+        s_max = max(s_max_history, s_abs)
+
+        tau_env, dtau_env = self.tau_envelope(s_abs)
+        tau_max_env, _ = self.tau_envelope(s_max)
+
+        # Unloading/reloading
+        if s_abs < s_max:
+            if s_max > 1e-14:
+                dtau_abs = tau_max_env / s_max
+            else:
+                dtau_abs = dtau_env
+            tau_abs = dtau_abs * s_abs
+        else:
+            tau_abs = tau_env
+            dtau_abs = dtau_env
+
+        # Secant stiffness
+        if self.use_secant_stiffness and s_abs > 1e-14:
+            dtau_abs = tau_abs / s_abs
 
         return sign * float(tau_abs), float(dtau_abs)
 
