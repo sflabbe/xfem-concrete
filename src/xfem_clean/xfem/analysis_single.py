@@ -70,6 +70,7 @@ def run_analysis_xfem(
     bc_spec: Optional[BCSpec] = None,
     bond_law: Optional[Any] = None,
     return_bundle: bool = False,
+    u_targets: Optional[np.ndarray] = None,
 ):
     """Run the single-crack XFEM prototype (stable linear version + cohesive).
 
@@ -83,6 +84,10 @@ def run_analysis_xfem(
         If True, return dict with comprehensive results:
         {nodes, elems, u, history, crack, mp_states, bond_states, rebar_segs, dofs}
         If False (default), return tuple (backward compatible)
+    u_targets : np.ndarray, optional
+        Custom displacement trajectory [m]. If provided, overrides nsteps/umax.
+        Enables cyclic loading: displacement control follows this exact sequence.
+        If None (default), uses monotonic linspace(0, umax, nsteps).
     """
 
     # Use mesh from model if provided (avoids re-meshing in solver_interface)
@@ -608,8 +613,18 @@ def run_analysis_xfem(
     total_newton_solves = 0
     substep_report_interval = 200  # Print diagnostic every N substeps
 
-    for istep in range(1, nsteps + 1):
-        u_target = (istep / nsteps) * umax
+    # BLOQUE 3: Support custom u_targets for cyclic loading
+    if u_targets is not None:
+        # Use provided trajectory (cyclic or custom)
+        u_sequence = u_targets
+        nsteps_actual = len(u_sequence)
+    else:
+        # Default: monotonic linspace
+        u_sequence = np.linspace(0.0, umax, nsteps + 1)[1:]  # Exclude initial 0
+        nsteps_actual = nsteps
+
+    for istep in range(1, nsteps_actual + 1):
+        u_target = float(u_sequence[istep - 1])
         du_total = u_target - u_n
 
         stack = [(u_n, du_total, 0)]
@@ -622,7 +637,7 @@ def run_analysis_xfem(
             if total_substeps > model.max_total_substeps:
                 raise RuntimeError(
                     f"Anti-hang guardrail triggered: total_substeps={total_substeps} > max_total_substeps={model.max_total_substeps}.\n"
-                    f"Last state: step={istep}/{nsteps}, u0={u0:.6e}, u1={u1:.6e}, level={level}, "
+                    f"Last state: step={istep}/{nsteps_actual}, u0={u0:.6e}, u1={u1:.6e}, level={level}, "
                     f"crack={'on' if crack.active else 'off'}, tip=({crack.tip_x:.4f},{crack.tip_y:.4f})m, "
                     f"total_newton_solves={total_newton_solves}"
                 )
@@ -631,7 +646,7 @@ def run_analysis_xfem(
             if total_substeps % substep_report_interval == 0:
                 print(
                     f"[DIAGNOSTIC] total_substeps={total_substeps}, total_newton={total_newton_solves}, "
-                    f"step={istep}/{nsteps}, u1={u1*1e3:.3f}mm, level={level}"
+                    f"step={istep}/{nsteps_actual}, u1={u1*1e3:.3f}mm, level={level}"
                 )
 
             if model.debug_substeps:

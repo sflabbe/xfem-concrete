@@ -586,9 +586,19 @@ def run_case_solver(
 
     elif is_cyclic:
         print("  Using CYCLIC driver with single-crack (custom u_targets)")
-        # For now, use single-crack with u_targets
-        # TODO: Implement u_targets support in run_analysis_xfem (FASE F)
-        raise NotImplementedError("Cyclic u_targets for single-crack not yet supported (FASE F)")
+        # BLOQUE 3: Use single-crack with u_targets
+        bundle = run_analysis_xfem(
+            model=model,
+            nx=nx,
+            ny=ny,
+            nsteps=nsteps,  # Will be overridden by u_targets
+            umax=umax,  # Ignored when u_targets is provided
+            law=law,
+            return_bundle=True,
+            bc_spec=bc_spec,
+            bond_law=bond_law,
+            u_targets=u_targets,  # BLOQUE 3: Cyclic trajectory
+        )
     else:
         print("  Using SINGLE-CRACK solver (monotonic)")
         # Use return_bundle to get comprehensive results (FASE G)
