@@ -426,13 +426,13 @@ def assemble_xfem_system_multi(
                 for j in range(nsub_cut):
                     subdomains.append((float(xis[i]), float(xis[i+1]), float(etas[j]), float(etas[j+1])))
     
-        for (xi_a, xi_b, eta_a, eta_b) in subdomains:
-            for i, xi_hat in enumerate(gp):
+        for sidx, (xi_a, xi_b, eta_a, eta_b) in enumerate(subdomains):
+            for ixi, xi_hat in enumerate(gp):
                 xi = 0.5*(xi_b - xi_a)*xi_hat + 0.5*(xi_b + xi_a)
-                wx = gw[i] * 0.5*(xi_b - xi_a)
-                for j, eta_hat in enumerate(gp):
+                wx = gw[ixi] * 0.5*(xi_b - xi_a)
+                for ieta, eta_hat in enumerate(gp):
                     eta = 0.5*(eta_b - eta_a)*eta_hat + 0.5*(eta_b + eta_a)
-                    wy = gw[j] * 0.5*(eta_b - eta_a)
+                    wy = gw[ieta] * 0.5*(eta_b - eta_a)
                     w = float(wx * wy)
     
                     N, dN_dxi_s, dN_deta_s = q4_shape(xi, eta)
@@ -1478,7 +1478,11 @@ def run_analysis_xfem_multicrack(
                         break
 
                     # Rebuild DOFs and transfer equilibrium guess, then re-solve at same ub
-                    dofs_new = build_xfem_dofs_multi(nodes, elems, cracks, ny)
+                    dofs_new = build_xfem_dofs_multi(
+                        nodes, elems, cracks, ny,
+                        rebar_segs=rebar_segs,
+                        enable_bond_slip=enable_bond_slip,
+                    )
                     q_loc = transfer_q_between_dofs_multi(q_loc, dofs, dofs_new)
                     dofs = dofs_new
 
