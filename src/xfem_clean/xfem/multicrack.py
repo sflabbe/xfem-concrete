@@ -426,13 +426,13 @@ def assemble_xfem_system_multi(
                 for j in range(nsub_cut):
                     subdomains.append((float(xis[i]), float(xis[i+1]), float(etas[j]), float(etas[j+1])))
     
-        for (xi_a, xi_b, eta_a, eta_b) in subdomains:
-            for i, xi_hat in enumerate(gp):
+        for sidx, (xi_a, xi_b, eta_a, eta_b) in enumerate(subdomains):
+            for ixi, xi_hat in enumerate(gp):
                 xi = 0.5*(xi_b - xi_a)*xi_hat + 0.5*(xi_b + xi_a)
-                wx = gw[i] * 0.5*(xi_b - xi_a)
-                for j, eta_hat in enumerate(gp):
+                wx = gw[ixi] * 0.5*(xi_b - xi_a)
+                for ieta, eta_hat in enumerate(gp):
                     eta = 0.5*(eta_b - eta_a)*eta_hat + 0.5*(eta_b + eta_a)
-                    wy = gw[j] * 0.5*(eta_b - eta_a)
+                    wy = gw[ieta] * 0.5*(eta_b - eta_a)
                     w = float(wx * wy)
     
                     N, dN_dxi_s, dN_deta_s = q4_shape(xi, eta)
@@ -882,6 +882,7 @@ def run_analysis_xfem_multicrack(
     u_targets: Optional[np.ndarray] = None,
     bc_spec: Optional["BCSpec"] = None,
     bond_law: Optional[object] = None,
+    return_bundle: bool = False,
 ):
     """Run displacement-controlled analysis with multiple cracks.
 
@@ -897,6 +898,10 @@ def run_analysis_xfem_multicrack(
         Displacement trajectory (m). If None, uses linspace(0, umax, nsteps).
     bc_spec : BCSpec, optional
         Boundary condition specification. If None, defaults to 3PB beam BCs.
+    return_bundle : bool, optional
+        If True, return dict with comprehensive results for postprocessing:
+        {nodes, elems, u, history, cracks, bond_states, rebar_segs, dofs, coh_states, bulk_states}
+        If False (default), return tuple (backward compatible)
 
     crack_mode:
         - "option1": multiple flexural (mostly vertical) cracks only.
@@ -904,7 +909,9 @@ def run_analysis_xfem_multicrack(
 
     Returns
     -------
-    nodes, elems, q, results, cracks
+    nodes, elems, q, results, cracks (if return_bundle=False)
+    OR
+    dict (if return_bundle=True)
     """
     # Phase 2: CDP support enabled for multi-crack!
 
@@ -1478,7 +1485,11 @@ def run_analysis_xfem_multicrack(
                         break
 
                     # Rebuild DOFs and transfer equilibrium guess, then re-solve at same ub
-                    dofs_new = build_xfem_dofs_multi(nodes, elems, cracks, ny)
+                    dofs_new = build_xfem_dofs_multi(
+                        nodes, elems, cracks, ny,
+                        rebar_segs=rebar_segs,
+                        enable_bond_slip=enable_bond_slip,
+                    )
                     q_loc = transfer_q_between_dofs_multi(q_loc, dofs, dofs_new)
                     dofs = dofs_new
 
@@ -1507,9 +1518,8 @@ def run_analysis_xfem_multicrack(
                     q_n = q_loc
                     coh_states = coh_loc
                     bulk_states = bulk_loc
-                    # Bond-slip commit (FASE D): bond_updates is set during last assembly
-                    if bond_updates is not None and bond_states is not None:
-                        bond_states = bond_updates
+                    # Bond-slip commit (FASE D): bond_states are already committed via bond_comm in stack
+                    # (bond_updates is set during assembly but not available in this scope)
 
                     # Extract reaction force (FASE D: bc_spec support)
                     if bc_spec is not None and bc_spec.reaction_dofs:
@@ -1545,4 +1555,21 @@ def run_analysis_xfem_multicrack(
             stack.append((lvl+1, um, ub, q_start.copy(), coh_comm.copy(), bulk_comm.copy(), bond_copy))
             stack.append((lvl+1, ua, um, q_start.copy(), coh_comm.copy(), bulk_comm.copy(), bond_copy))
 
-    return nodes, elems, q_n, results, cracks
+    # Return format selection (BLOQUE 2: ResultBundle)
+    if return_bundle:
+        # Comprehensive bundle for postprocessing (compatible with postprocess_comprehensive.py)
+        return {
+            'nodes': nodes,
+            'elems': elems,
+            'u': q_n,
+            'history': np.array(results),  # List of dicts, keep as object array
+            'cracks': cracks,
+            'bond_states': bond_states,
+            'rebar_segs': rebar_segs,
+            'dofs': dofs,
+            'coh_states': coh_states,
+            'bulk_states': bulk_states,
+        }
+    else:
+        # Backward compatible tuple return
+        return nodes, elems, q_n, results, cracks

@@ -181,6 +181,56 @@ def build_bcs_from_case(
         # Positive scale for pullout (pull in +x direction)
         prescribed_scale = 1.0
 
+    elif "wall" in case_name:
+        # WALL TEST (RC wall under cyclic lateral loading):
+        # - Fix base (y=0): uy=0 for all nodes, ux=0 for one corner node (prevent rigid body)
+        # - Prescribe top displacement: ux=u_target for nodes in rigid beam zone
+        # - Axial load: TODO - implement as constant fext term
+
+        # Find base nodes (y ≈ 0)
+        y_tol = 1e-6
+        base_nodes = np.where(np.isclose(nodes[:, 1], 0.0, atol=y_tol))[0]
+
+        # Fix uy=0 for all base nodes
+        for n in base_nodes:
+            fixed_dofs[2 * n + 1] = 0.0  # uy = 0
+
+        # Fix ux=0 for leftmost base node to prevent rigid body motion
+        if len(base_nodes) > 0:
+            left_base = base_nodes[np.argmin(nodes[base_nodes, 0])]
+            fixed_dofs[2 * left_base] = 0.0  # ux = 0
+
+        # Prescribe horizontal displacement at top (in rigid beam zone)
+        # Rigid beam: y in [y_rigid_start, H]
+        H = model.H
+
+        # Check if rigid beam subdomain is defined in case
+        if hasattr(case, 'subdomains') and case.subdomains is not None:
+            # Find rigid beam subdomain
+            rigid_y_min = None
+            for subdomain in case.subdomains:
+                if subdomain.material_type == "rigid" and subdomain.y_range is not None:
+                    rigid_y_min = subdomain.y_range[0] * 1e-3  # mm → m
+                    break
+
+            if rigid_y_min is None:
+                # Default: top 10% of height
+                rigid_y_min = 0.9 * H
+        else:
+            # Default: top 10% of height
+            rigid_y_min = 0.9 * H
+
+        # Find nodes in rigid beam zone
+        rigid_nodes = np.where(nodes[:, 1] >= rigid_y_min - y_tol)[0]
+
+        # Prescribe ux for rigid beam nodes
+        for n in rigid_nodes:
+            prescribed_dofs.append(2 * n)  # ux
+            reaction_dofs.append(2 * n)
+
+        # Positive scale for wall (push in +x direction)
+        prescribed_scale = 1.0
+
     else:
         # DEFAULT: 3-point bending beam
         # - Fix left bottom (ux=0, uy=0) and right bottom (uy=0)
@@ -559,8 +609,8 @@ def run_case_solver(
 
     if use_multicrack:
         print("  Using MULTICRACK solver (distributed cracking)")
-        # Call multicrack solver with full integration (FASE D)
-        nodes_out, elems_out, u, history, cracks_out = run_analysis_xfem_multicrack(
+        # Call multicrack solver with full integration (FASE D + BLOQUE 2)
+        bundle = run_analysis_xfem_multicrack(
             model=model,
             nx=nx,
             ny=ny,
@@ -572,29 +622,33 @@ def run_case_solver(
             u_targets=u_targets if is_cyclic else None,
             bc_spec=bc_spec,
             bond_law=bond_law,
+            return_bundle=True,  # BLOQUE 2: Get comprehensive bundle
         )
 
-        # Package results in bundle format (multicrack doesn't return bundle yet)
-        # TODO: Update multicrack to return bundle (similar to analysis_single)
-        bundle = {
-            'nodes': nodes_out,
-            'elems': elems_out,
-            'u': u,
-            'history': history,
-            'crack': cracks_out[0] if len(cracks_out) > 0 else None,  # Return first crack for compatibility
-            'cracks': cracks_out,  # Full crack list
-            'mp_states': None,  # Not returned by multicrack yet
-            'bond_states': None,  # Not returned by multicrack yet
-            'rebar_segs': rebar_segs,
-            'dofs': None,  # Not returned by multicrack yet
-            'coh_states': None,  # Not returned by multicrack yet
-        }
+        # Add compatibility fields for postprocessing
+        # Multicrack returns 'cracks' (list), but postprocess expects 'crack' (single)
+        if 'crack' not in bundle and 'cracks' in bundle and len(bundle['cracks']) > 0:
+            bundle['crack'] = bundle['cracks'][0]  # First crack for compatibility
+
+        # Multicrack returns 'bulk_states' but postprocess may expect 'mp_states'
+        if 'mp_states' not in bundle and 'bulk_states' in bundle:
+            bundle['mp_states'] = bundle['bulk_states']
 
     elif is_cyclic:
         print("  Using CYCLIC driver with single-crack (custom u_targets)")
-        # For now, use single-crack with u_targets
-        # TODO: Implement u_targets support in run_analysis_xfem (FASE F)
-        raise NotImplementedError("Cyclic u_targets for single-crack not yet supported (FASE F)")
+        # BLOQUE 3: Use single-crack with u_targets
+        bundle = run_analysis_xfem(
+            model=model,
+            nx=nx,
+            ny=ny,
+            nsteps=nsteps,  # Will be overridden by u_targets
+            umax=umax,  # Ignored when u_targets is provided
+            law=law,
+            return_bundle=True,
+            bc_spec=bc_spec,
+            bond_law=bond_law,
+            u_targets=u_targets,  # BLOQUE 3: Cyclic trajectory
+        )
     else:
         print("  Using SINGLE-CRACK solver (monotonic)")
         # Use return_bundle to get comprehensive results (FASE G)
