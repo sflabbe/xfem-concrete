@@ -53,11 +53,17 @@ class MultiXFEMDofs:
     -----
     * Tip enrichment is intentionally disabled for robustness.
     * Dofs are rebuilt whenever a crack is initiated or propagated.
+    * Bond-slip support: steel DOFs allocated for rebar nodes (FASE D)
     """
     std: np.ndarray  # (nnode, 2)
     H: list          # list of (nnode, 2) arrays
     H_nodes: list    # list of (nnode,) bool arrays
     ndof: int
+
+    # Bond-slip DOFs (FASE D)
+    steel: Optional[np.ndarray] = None  # (nnode, 2) steel DOF map (-1 if no steel)
+    steel_dof_offset: int = -1  # Offset where steel DOFs start
+    steel_nodes: Optional[np.ndarray] = None  # (nnode,) bool: node has steel
 
 
 def _node_xy(nodes, idx: int) -> tuple[float, float]:
@@ -91,7 +97,36 @@ def _nodes_y(nodes) -> np.ndarray:
     return np.asarray(nodes, dtype=float)[:, 1]
 
 
-def build_xfem_dofs_multi(nodes, elems, cracks: list[XFEMCrack], ny: int) -> MultiXFEMDofs:
+def build_xfem_dofs_multi(
+    nodes,
+    elems,
+    cracks: list[XFEMCrack],
+    ny: int,
+    rebar_segs: Optional[np.ndarray] = None,
+    enable_bond_slip: bool = False,
+) -> MultiXFEMDofs:
+    """Build DOF mapping for multicrack XFEM with optional bond-slip.
+
+    Parameters
+    ----------
+    nodes : array-like
+        Node coordinates
+    elems : np.ndarray
+        Element connectivity
+    cracks : list[XFEMCrack]
+        Active cracks
+    ny : int
+        Number of elements in y-direction (for enrichment gating)
+    rebar_segs : np.ndarray, optional
+        Rebar segments [n_seg, 5]: [n1, n2, L0, cx, cy]
+    enable_bond_slip : bool
+        Enable bond-slip DOFs (steel nodes)
+
+    Returns
+    -------
+    dofs : MultiXFEMDofs
+        DOF mapping with concrete + crack + steel DOFs
+    """
     nnode = len(nodes)
 
     # Standard dofs
@@ -134,11 +169,44 @@ def build_xfem_dofs_multi(nodes, elems, cracks: list[XFEMCrack], ny: int) -> Mul
         H_list.append(H)
         Hn_list.append(H_nodes)
 
-    return MultiXFEMDofs(std=std, H=H_list, H_nodes=Hn_list, ndof=dof)
+    # Bond-slip: allocate steel DOFs (FASE D)
+    steel = None
+    steel_dof_offset = -1
+    steel_nodes = None
+
+    if enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
+        steel_dof_offset = dof  # Steel DOFs start after concrete + crack DOFs
+        steel_nodes = np.zeros(nnode, dtype=bool)
+        steel = -np.ones((nnode, 2), dtype=int)
+
+        # Identify nodes used by rebar segments
+        for seg in rebar_segs:
+            n1 = int(seg[0])
+            n2 = int(seg[1])
+            steel_nodes[n1] = True
+            steel_nodes[n2] = True
+
+        # Allocate steel DOFs for rebar nodes
+        for a in np.where(steel_nodes)[0]:
+            steel[a, 0] = dof; dof += 1
+            steel[a, 1] = dof; dof += 1
+
+    return MultiXFEMDofs(
+        std=std,
+        H=H_list,
+        H_nodes=Hn_list,
+        ndof=dof,
+        steel=steel,
+        steel_dof_offset=steel_dof_offset,
+        steel_nodes=steel_nodes,
+    )
 
 
 def transfer_q_between_dofs_multi(q_old: np.ndarray, dofs_old: MultiXFEMDofs, dofs_new: MultiXFEMDofs) -> np.ndarray:
-    """Transfer solution vector to new DOF numbering after crack updates."""
+    """Transfer solution vector to new DOF numbering after crack updates.
+
+    Also transfers steel DOFs if bond-slip is enabled (FASE D).
+    """
     q_new = np.zeros(dofs_new.ndof, dtype=float)
 
     # Standard dofs always present
@@ -161,6 +229,15 @@ def transfer_q_between_dofs_multi(q_old: np.ndarray, dofs_old: MultiXFEMDofs, do
             for comp in (0, 1):
                 d_old = int(Hold[a, comp])
                 d_new = int(Hnew[a, comp])
+                if d_old >= 0 and d_new >= 0 and d_old < len(q_old):
+                    q_new[d_new] = q_old[d_old]
+
+    # Bond-slip DOFs: transfer steel displacements (FASE D)
+    if (dofs_old.steel is not None and dofs_new.steel is not None):
+        for a in range(nnode):
+            for comp in (0, 1):
+                d_old = int(dofs_old.steel[a, comp])
+                d_new = int(dofs_new.steel[a, comp])
                 if d_old >= 0 and d_new >= 0 and d_old < len(q_old):
                     q_new[d_new] = q_old[d_old]
 
@@ -265,6 +342,13 @@ def assemble_xfem_system_multi(
     bulk_kind: int = 0,
     bulk_params: Optional[np.ndarray] = None,
     material: Optional["ConstitutiveModel"] = None,
+    # Bond-slip parameters (FASE D)
+    bond_law: Optional[object] = None,
+    bond_states_comm: Optional[object] = None,
+    enable_bond_slip: bool = False,
+    steel_EA: float = 0.0,
+    # Subdomain support (FASE D)
+    subdomain_mgr: Optional[object] = None,
 ):
     """Assemble global stiffness and residual with multiple Heaviside cracks.
 
@@ -311,13 +395,26 @@ def assemble_xfem_system_multi(
     
     for e, conn in enumerate(elems):
         xe = np.array([_node_xy(nodes, i) for i in conn], dtype=float)
-    
+
+        # Skip void elements (FASE D: subdomain support)
+        if subdomain_mgr is not None and subdomain_mgr.is_void(e):
+            continue
+
+        # Get effective thickness (for rigid or void elements)
+        thickness_eff = thickness
+        if subdomain_mgr is not None:
+            thickness_eff = subdomain_mgr.get_effective_thickness(e, thickness)
+
+        # Skip if thickness is effectively zero
+        if thickness_eff < 1e-12:
+            continue
+
         is_cut = False
         for crack in cracks:
             if crack.active and crack.cuts_element(xe):
                 is_cut = True
                 break
-    
+
         if not is_cut:
             subdomains = [(-1.0, 1.0, -1.0, 1.0)]
         else:
@@ -467,7 +564,7 @@ def assemble_xfem_system_multi(
                     aux_gp_pos.append((x_gp, y_gp))
                     aux_gp_sig.append((float(sig[0]), float(sig[1]), float(sig[2])))
 
-                    w_bulk = detJ * w * thickness
+                    w_bulk = detJ * w * thickness_eff
                     Ke = (B.T @ Ct @ B) * w_bulk
                     fe_int = (B.T @ sig) * w_bulk
     
@@ -629,11 +726,33 @@ def assemble_xfem_system_multi(
         stab[2*nnode:] = k_stab_eff
         K = K + sp.diags(stab, 0, shape=(ndof, ndof), format="csr")
 
-    # --- Rebar (global 1D segments) ---
-    # We add rebar contribution *after* the 2D bulk+cohesive assembly.
-    # This keeps the multi-crack assembly simple and reuses the existing
-    # `rebar_contrib` routine (defined in xfem_beam.py).
-    if rebar_segs is not None:
+    # --- Bond-slip or perfect-bond rebar (FASE D) ---
+    bond_updates = None
+
+    if enable_bond_slip and rebar_segs is not None and bond_law is not None and bond_states_comm is not None:
+        # FASE D: Bond-slip integration
+        if dofs.steel_dof_offset < 0:
+            raise ValueError("Bond-slip enabled but steel DOFs not allocated. Check build_xfem_dofs_multi().")
+
+        from xfem_clean.bond_slip import assemble_bond_slip
+
+        f_bond, K_bond, bond_updates = assemble_bond_slip(
+            u_total=q,
+            steel_segments=rebar_segs,
+            steel_dof_offset=dofs.steel_dof_offset,
+            bond_law=bond_law,
+            bond_states=bond_states_comm,
+            steel_dof_map=dofs.steel,
+            steel_EA=steel_EA,
+            use_numba=use_numba,
+        )
+
+        # Add bond-slip contribution to global system
+        fint += f_bond
+        K = K + K_bond
+
+    elif rebar_segs is not None and not enable_bond_slip:
+        # Legacy: perfect-bond rebar (no slip)
         f_rb, K_rb = rebar_contrib(
             nodes,
             rebar_segs,
@@ -645,15 +764,13 @@ def assemble_xfem_system_multi(
             model.steel_Eh,
         )
 
-        # Embed into XFEM global system if the rebar routine returns only the
-        # standard (2*nnode) block.
+        # Embed into XFEM global system if needed
         if f_rb.shape[0] != dofs.ndof:
             f_full = np.zeros(dofs.ndof, dtype=float)
             f_full[: f_rb.shape[0]] = f_rb
             f_rb = f_full
 
         if getattr(K_rb, "shape", None) is not None and K_rb.shape != (dofs.ndof, dofs.ndof):
-            # top-left embedding (standard dofs first by construction)
             K_full = sp.lil_matrix((dofs.ndof, dofs.ndof), dtype=float)
             K_full[: K_rb.shape[0], : K_rb.shape[1]] = K_rb
             K_rb = K_full.tocsr()
@@ -666,7 +783,7 @@ def assemble_xfem_system_multi(
     aux_gp_pos = np.array(aux_gp_pos, dtype=float)
     aux_gp_sig = np.array(aux_gp_sig, dtype=float)
 
-    return K, fint, fext, coh_updates, bulk_updates, aux_gp_pos, aux_gp_sig
+    return K, fint, fext, coh_updates, bulk_updates, aux_gp_pos, aux_gp_sig, bond_updates
 
 
 def _candidate_points_zone(model: XFEMModel, zone: str, nx: int) -> list[tuple[float, float]]:
@@ -797,8 +914,33 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
     # displacement control
     u_targets = np.linspace(0.0, umax, nsteps+1)[1:]
 
+    # Bond-slip configuration (FASE D)
+    enable_bond_slip = bool(getattr(model, "enable_bond_slip", False))
+    bond_law = None
+    bond_states = None
+    steel_EA = 0.0
+
+    if enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
+        from xfem_clean.bond_slip import BondSlipStateArrays, BondSlipModelCode2010
+
+        n_seg = rebar_segs.shape[0]
+        bond_states = BondSlipStateArrays.zeros(n_seg)
+        bond_law = BondSlipModelCode2010(
+            f_cm=model.fc,
+            d_bar=model.rebar_diameter,
+            condition=getattr(model, "bond_condition", "good"),
+        )
+        steel_EA = getattr(model, "steel_EA_min", model.steel_E * model.steel_A_total) if model.steel_A_total > 0 else 1e3
+
+    # Subdomain manager (FASE D)
+    subdomain_mgr = getattr(model, 'subdomain_mgr', None)
+
     cracks: list[XFEMCrack] = []
-    dofs = build_xfem_dofs_multi(nodes, elems, cracks, ny)
+    dofs = build_xfem_dofs_multi(
+        nodes, elems, cracks, ny,
+        rebar_segs=rebar_segs,
+        enable_bond_slip=enable_bond_slip,
+    )
     q_n = np.zeros(dofs.ndof, dtype=float)
 
     # Phase-1: cohesive history in flat arrays (Numba-friendly).
@@ -890,7 +1032,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
         res0 = None  # reference residual for relative tolerance (set at first Newton iteration)
 
         for it in range(model.newton_maxit):
-            K, fint, fext, coh_updates, bulk_updates, aux_pos, aux_sig = assemble_xfem_system_multi(
+            K, fint, fext, coh_updates, bulk_updates, aux_pos, aux_sig, bond_updates = assemble_xfem_system_multi(
                 nodes,
                 elems,
                 q,
@@ -910,6 +1052,13 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                 bulk_kind=bulk_kind,
                 bulk_params=bulk_params,
                 material=material,
+                # Bond-slip (FASE D)
+                bond_law=bond_law,
+                bond_states_comm=bond_states,
+                enable_bond_slip=enable_bond_slip,
+                steel_EA=steel_EA,
+                # Subdomain support (FASE D)
+                subdomain_mgr=subdomain_mgr,
             )
             R = fint - fext
             free, K_ff, r_f, _ = apply_dirichlet(K, R, fixed_step, q)
@@ -968,7 +1117,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                     for dof, val in fixed_step.items():
                         q_try[dof] = val
 
-                    _, fint_t, fext_t, _coh_upd_t, _bulk_upd_t, aux_pos_t, aux_sig_t = assemble_xfem_system_multi(
+                    _, fint_t, fext_t, _coh_upd_t, _bulk_upd_t, aux_pos_t, aux_sig_t, _ = assemble_xfem_system_multi(
                         nodes,
                         elems,
                         q_try,
@@ -988,6 +1137,13 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                         bulk_kind=bulk_kind,
                         bulk_params=bulk_params,
                         material=material,
+                        # Bond-slip (FASE D)
+                        bond_law=bond_law,
+                        bond_states_comm=bond_states,
+                        enable_bond_slip=enable_bond_slip,
+                        steel_EA=steel_EA,
+                        # Subdomain support (FASE D)
+                        subdomain_mgr=subdomain_mgr,
                     )
                     r_try = (fint_t - fext_t)[free]
                     r1 = float(np.linalg.norm(r_try))
@@ -1061,10 +1217,14 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
     # adaptive substepping stack (same logic as single)
     for istep, u1 in enumerate(u_targets, start=1):
         u0 = results[-1]["u"] if results else 0.0
-        stack = [(0, u0, u1, q_n.copy(), coh_states.copy(), bulk_states.copy())]
+        bond_comm_init = bond_states.copy() if bond_states is not None else None
+        stack = [(0, u0, u1, q_n.copy(), coh_states.copy(), bulk_states.copy(), bond_comm_init)]
 
         while stack:
-            lvl, ua, ub, q_start, coh_comm, bulk_comm = stack.pop()
+            lvl, ua, ub, q_start, coh_comm, bulk_comm, bond_comm = stack.pop()
+            # Restore bond_states for this substep
+            if bond_comm is not None:
+                bond_states = bond_comm
             du = ub - ua
             print(f"[substep] lvl={lvl:02d} u0={ua*1e3:5.3f}mm -> u1={ub*1e3:5.3f}mm  du={du*1e3:5.3f}mm  ncr={len([c for c in cracks if c.active])}")
 
@@ -1212,6 +1372,9 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                     q_n = q_loc
                     coh_states = coh_loc
                     bulk_states = bulk_loc
+                    # Bond-slip commit (FASE D): bond_updates is set during last assembly
+                    if bond_updates is not None and bond_states is not None:
+                        bond_states = bond_updates
 
                     dof_load = int(dofs.std[load_node, 1])
                     P = -float(fint_loc[dof_load])
@@ -1226,9 +1389,10 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                     # When the first half converges, the next substep on the stack (if any)
                     # starts at this accepted `ub`. Update its initial state accordingly.
                     if stack:
-                        lvl_n, ua_n, ub_n, _q_s, _coh_s, _bulk_s = stack[-1]
+                        lvl_n, ua_n, ub_n, _q_s, _coh_s, _bulk_s, _bond_s = stack[-1]
                         if abs(float(ua_n) - float(ub)) < 1e-14:
-                            stack[-1] = (lvl_n, ua_n, ub_n, q_n.copy(), coh_states.copy(), bulk_states.copy())
+                            bond_copy = bond_states.copy() if bond_states is not None else None
+                            stack[-1] = (lvl_n, ua_n, ub_n, q_n.copy(), coh_states.copy(), bulk_states.copy(), bond_copy)
 
                     continue
 
@@ -1238,7 +1402,8 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                 raise RuntimeError(f"Substepping exceeded max_subdiv={model.max_subdiv} at u={ub} m")
 
             um = 0.5*(ua + ub)
-            stack.append((lvl+1, um, ub, q_start.copy(), coh_comm.copy(), bulk_comm.copy()))
-            stack.append((lvl+1, ua, um, q_start.copy(), coh_comm.copy(), bulk_comm.copy()))
+            bond_copy = bond_comm.copy() if bond_comm is not None else None
+            stack.append((lvl+1, um, ub, q_start.copy(), coh_comm.copy(), bulk_comm.copy(), bond_copy))
+            stack.append((lvl+1, ua, um, q_start.copy(), coh_comm.copy(), bulk_comm.copy(), bond_copy))
 
     return nodes, elems, q_n, results, cracks
