@@ -5,9 +5,10 @@ Verifica que las BCs de muro (base fija, desplazamiento horizontal en tope) func
 """
 
 import sys
-import numpy as np
+import pytest
 
 try:
+    import numpy as np
     from xfem_clean.xfem.multicrack import run_analysis_xfem_multicrack
     from xfem_clean.xfem.model import XFEMModel
     from xfem_clean.cohesive_laws import CohesiveLaw
@@ -25,8 +26,7 @@ try:
         build_bcs_from_case, case_config_to_xfem_model
     )
 except ImportError as e:
-    print(f"⚠️  Import error: {e}")
-    sys.exit(0)
+    pytest.skip(f"Import error: {e}", allow_module_level=True)
 
 
 def test_wall_bcs_structure():

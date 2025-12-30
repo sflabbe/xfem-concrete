@@ -9,13 +9,13 @@ Verifica que:
 """
 
 import sys
+import pytest
 
 # Check numpy availability first
 try:
     import numpy as np
 except ImportError:
-    print("⚠️  NumPy not available - skipping Fase D tests")
-    sys.exit(0)
+    pytest.skip("NumPy not available", allow_module_level=True)
 
 def test_multicrack_dof_mapping():
     """Test que build_xfem_dofs_multi crea steel DOFs correctamente."""

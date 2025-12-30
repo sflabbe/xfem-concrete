@@ -5,9 +5,10 @@ Verifica que run_analysis_xfem acepta u_targets y produce curvas P-u con inversi
 """
 
 import sys
-import numpy as np
+import pytest
 
 try:
+    import numpy as np
     from xfem_clean.xfem.analysis_single import run_analysis_xfem
     from xfem_clean.xfem.model import XFEMModel
     from xfem_clean.cohesive_laws import CohesiveLaw
@@ -17,8 +18,7 @@ try:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
     from examples.gutierrez_thesis.solver_interface import generate_cyclic_u_targets
 except ImportError as e:
-    print(f"⚠️  Import error: {e}")
-    sys.exit(0)
+    pytest.skip(f"Import error: {e}", allow_module_level=True)
 
 
 def test_cyclic_u_targets_single_crack():
