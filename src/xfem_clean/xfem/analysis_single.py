@@ -99,6 +99,10 @@ def run_analysis_xfem(
 
     nnode = nodes.shape[0]
 
+    # Calculate element dimensions (needed for crack spacing, load width, etc.)
+    dx = model.L / nx
+    dy = model.H / ny
+
     # Default BCs: 3-point bending (for backward compatibility)
     if bc_spec is None:
         left = int(np.argmin(nodes[:, 0]))
@@ -107,8 +111,6 @@ def run_analysis_xfem(
 
         y_top = model.H
         top_nodes = np.where(np.isclose(nodes[:, 1], y_top))[0]
-        dx = model.L / nx
-        dy = model.H / ny
         load_halfwidth = model.load_halfwidth if (model.load_halfwidth and model.load_halfwidth > 0.0) else 2.0 * dx
         load_nodes = top_nodes[np.where(np.abs(nodes[top_nodes, 0] - model.L / 2) <= load_halfwidth)[0]]
         if len(load_nodes) == 0:
