@@ -181,6 +181,56 @@ def build_bcs_from_case(
         # Positive scale for pullout (pull in +x direction)
         prescribed_scale = 1.0
 
+    elif "wall" in case_name:
+        # WALL TEST (RC wall under cyclic lateral loading):
+        # - Fix base (y=0): uy=0 for all nodes, ux=0 for one corner node (prevent rigid body)
+        # - Prescribe top displacement: ux=u_target for nodes in rigid beam zone
+        # - Axial load: TODO - implement as constant fext term
+
+        # Find base nodes (y ≈ 0)
+        y_tol = 1e-6
+        base_nodes = np.where(np.isclose(nodes[:, 1], 0.0, atol=y_tol))[0]
+
+        # Fix uy=0 for all base nodes
+        for n in base_nodes:
+            fixed_dofs[2 * n + 1] = 0.0  # uy = 0
+
+        # Fix ux=0 for leftmost base node to prevent rigid body motion
+        if len(base_nodes) > 0:
+            left_base = base_nodes[np.argmin(nodes[base_nodes, 0])]
+            fixed_dofs[2 * left_base] = 0.0  # ux = 0
+
+        # Prescribe horizontal displacement at top (in rigid beam zone)
+        # Rigid beam: y in [y_rigid_start, H]
+        H = model.H
+
+        # Check if rigid beam subdomain is defined in case
+        if hasattr(case, 'subdomains') and case.subdomains is not None:
+            # Find rigid beam subdomain
+            rigid_y_min = None
+            for subdomain in case.subdomains:
+                if subdomain.material_type == "rigid" and subdomain.y_range is not None:
+                    rigid_y_min = subdomain.y_range[0] * 1e-3  # mm → m
+                    break
+
+            if rigid_y_min is None:
+                # Default: top 10% of height
+                rigid_y_min = 0.9 * H
+        else:
+            # Default: top 10% of height
+            rigid_y_min = 0.9 * H
+
+        # Find nodes in rigid beam zone
+        rigid_nodes = np.where(nodes[:, 1] >= rigid_y_min - y_tol)[0]
+
+        # Prescribe ux for rigid beam nodes
+        for n in rigid_nodes:
+            prescribed_dofs.append(2 * n)  # ux
+            reaction_dofs.append(2 * n)
+
+        # Positive scale for wall (push in +x direction)
+        prescribed_scale = 1.0
+
     else:
         # DEFAULT: 3-point bending beam
         # - Fix left bottom (ux=0, uy=0) and right bottom (uy=0)
