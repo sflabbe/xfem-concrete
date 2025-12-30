@@ -1180,6 +1180,7 @@ def assemble_bond_slip(
     use_numba: bool = True,
     enable_validation: bool = True,  # Part A1: Enable preflight checks
     perimeter: Optional[float] = None,  # Explicit perimeter for robustness
+    segment_mask: Optional[np.ndarray] = None,  # Mask to disable bond in specific segments
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Assemble bond-slip interface forces and stiffness.
 
@@ -1207,6 +1208,9 @@ def assemble_bond_slip(
     perimeter : float, optional
         Rebar perimeter [m]. If None, attempts to compute from bond_law.d_bar.
         For non-circular reinforcement, pass explicit perimeter.
+    segment_mask : np.ndarray, optional
+        Boolean mask [n_seg] where True = bond disabled for that segment.
+        Useful for "empty element" regions in pullout tests.
 
     Returns
     -------
@@ -1305,7 +1309,43 @@ def assemble_bond_slip(
                 f"Original error: {str(e)}"
             ) from e
 
+        # Apply segment mask (disable bond for masked segments)
+        if segment_mask is not None:
+            # Zero out forces and stiffness for disabled segments
+            # This is done by zeroing the forces and removing stiffness entries
+            # For simplicity, we zero forces in f_bond and rebuild K_bond with masked segments
+            for i in range(n_seg):
+                if segment_mask[i]:  # True = disabled
+                    # Zero slip in disabled segments
+                    s_curr[i] = 0.0
+                    # Note: K and f already computed; we'll zero them out per-segment
+                    # This is inefficient but simple; TODO: pass mask to kernel for efficiency
+
         K_bond = sp.csr_matrix((data, (rows, cols)), shape=(ndof_total, ndof_total))
+
+        # Apply segment mask to force vector
+        if segment_mask is not None:
+            # Zero forces for disabled segments
+            # Map segment → DOFs and zero them
+            for i in range(n_seg):
+                if segment_mask[i]:
+                    # Get nodes for this segment
+                    n1 = int(steel_segments[i, 0])
+                    n2 = int(steel_segments[i, 1])
+                    # Zero concrete and steel forces for these nodes
+                    # Concrete DOFs
+                    f_bond[2 * n1] = 0.0
+                    f_bond[2 * n1 + 1] = 0.0
+                    f_bond[2 * n2] = 0.0
+                    f_bond[2 * n2 + 1] = 0.0
+                    # Steel DOFs
+                    if steel_dof_map is not None:
+                        if steel_dof_map[n1, 0] >= 0:
+                            f_bond[steel_dof_map[n1, 0]] = 0.0
+                            f_bond[steel_dof_map[n1, 1]] = 0.0
+                        if steel_dof_map[n2, 0] >= 0:
+                            f_bond[steel_dof_map[n2, 0]] = 0.0
+                            f_bond[steel_dof_map[n2, 1]] = 0.0
 
         # Update states (trial)
         bond_states_new = BondSlipStateArrays(

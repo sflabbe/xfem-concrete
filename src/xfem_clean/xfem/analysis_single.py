@@ -194,6 +194,9 @@ def run_analysis_xfem(
     # Subdomain manager (Phase C - thesis cases)
     subdomain_mgr = getattr(model, 'subdomain_mgr', None)
 
+    # Bond-disabled x-range (for pullout empty elements)
+    bond_disabled_x_range = getattr(model, 'bond_disabled_x_range', None)
+
     def _compute_global_dissipation(
         aux: Dict,
         mp: Union[Dict[Tuple[int, int], MaterialPoint], BulkStateArrays],
@@ -411,6 +414,7 @@ def run_analysis_xfem(
                 enable_bond_slip=model.enable_bond_slip,
                 steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
                 rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
+                bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
                 subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
             )
             if model.debug_newton:
@@ -534,6 +538,7 @@ def run_analysis_xfem(
                         enable_bond_slip=model.enable_bond_slip,
                         steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
                         rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
+                        bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
                         subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
                     )
                     # Perfect bond rebar (only if bond-slip disabled)

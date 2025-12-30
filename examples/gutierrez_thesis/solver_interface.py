@@ -433,6 +433,11 @@ def run_case_solver(
     if subdomain_mgr is not None:
         model.subdomain_mgr = subdomain_mgr
 
+    # Bond-disabled x-range (for pullout empty elements)
+    if case.rebar_layers and case.rebar_layers[0].bond_disabled_x_range is not None:
+        x_min, x_max = case.rebar_layers[0].bond_disabled_x_range
+        model.bond_disabled_x_range = (x_min * 1e-3, x_max * 1e-3)  # mm → m
+
     # Prepare rebar segments for BC mapping
     from xfem_clean.rebar import prepare_rebar_segments
     rebar_segs = prepare_rebar_segments(nodes, cover=model.cover) if case.rebar_layers else None
