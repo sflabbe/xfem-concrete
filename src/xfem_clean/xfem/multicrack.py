@@ -347,6 +347,7 @@ def assemble_xfem_system_multi(
     bond_states_comm: Optional[object] = None,
     enable_bond_slip: bool = False,
     steel_EA: float = 0.0,
+    perimeter_total: Optional[float] = None,  # Total perimeter for bond-slip
     # Subdomain support (FASE D)
     subdomain_mgr: Optional[object] = None,
 ):
@@ -736,6 +737,21 @@ def assemble_xfem_system_multi(
 
         from xfem_clean.bond_slip import assemble_bond_slip
 
+        # Generate segment_mask for bond-disabled regions (FASE D)
+        segment_mask = None
+        bond_disabled_x_range = getattr(model, 'bond_disabled_x_range', None)
+        if bond_disabled_x_range is not None and rebar_segs is not None:
+            # Mask segments in the disabled x-range
+            n_seg = rebar_segs.shape[0]
+            segment_mask = np.ones(n_seg, dtype=bool)
+            x_min, x_max = bond_disabled_x_range
+            for i in range(n_seg):
+                n1 = int(rebar_segs[i, 0])
+                n2 = int(rebar_segs[i, 1])
+                x_mid = 0.5 * (nodes[n1, 0] + nodes[n2, 0])
+                if x_min <= x_mid <= x_max:
+                    segment_mask[i] = False  # Disable bond in this segment
+
         f_bond, K_bond, bond_updates = assemble_bond_slip(
             u_total=q,
             steel_segments=rebar_segs,
@@ -745,6 +761,8 @@ def assemble_xfem_system_multi(
             steel_dof_map=dofs.steel,
             steel_EA=steel_EA,
             use_numba=use_numba,
+            perimeter=perimeter_total,  # Pass explicit perimeter (FASE D)
+            segment_mask=segment_mask,  # Pass segment mask (FASE D)
         )
 
         # Add bond-slip contribution to global system
@@ -848,13 +866,37 @@ def _init_crack_from_stress(x0: float, y0: float, sigbar: np.ndarray, model: XFE
     return crack
 
 
-def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, umax=0.01,
-                                max_cracks: int = 8,
-                                crack_mode: str = "option2",
-                                u_diag_mm: float = 2.0,
-                                min_crack_spacing_factor: float = 2.0,
-                                law: Optional[CohesiveLaw] = None):
+def run_analysis_xfem_multicrack(
+    model: XFEMModel,
+    nx=120,
+    ny=20,
+    nsteps=30,
+    umax=0.01,
+    max_cracks: int = 8,
+    crack_mode: str = "option2",
+    u_diag_mm: float = 2.0,
+    min_crack_spacing_factor: float = 2.0,
+    law: Optional[CohesiveLaw] = None,
+    nodes: Optional[np.ndarray] = None,
+    elems: Optional[np.ndarray] = None,
+    u_targets: Optional[np.ndarray] = None,
+    bc_spec: Optional["BCSpec"] = None,
+    bond_law: Optional[object] = None,
+):
     """Run displacement-controlled analysis with multiple cracks.
+
+    Parameters
+    ----------
+    model : XFEMModel
+        Model with geometry, material, and solver parameters
+    nodes : np.ndarray, optional
+        Node coordinates [nnode, 2] (m). If None, generates structured mesh.
+    elems : np.ndarray, optional
+        Element connectivity [nelem, 4]. If None, generates structured mesh.
+    u_targets : np.ndarray, optional
+        Displacement trajectory (m). If None, uses linspace(0, umax, nsteps).
+    bc_spec : BCSpec, optional
+        Boundary condition specification. If None, defaults to 3PB beam BCs.
 
     crack_mode:
         - "option1": multiple flexural (mostly vertical) cracks only.
@@ -867,7 +909,11 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
     # Phase 2: CDP support enabled for multi-crack!
 
     # Mesh (reuse the same generator used by the single-crack solver)
-    nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
+    if nodes is None or elems is None:
+        nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
+    else:
+        # Use provided mesh (from solver_interface)
+        pass
 
     # Infer mesh spacing (dx, dy) from unique coordinate grids
     xs = np.unique(nodes[:, 0]); ys = np.unique(nodes[:, 1])
@@ -900,37 +946,69 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
     # Rebar
     rebar_segs = prepare_rebar_segments(nodes, cover=model.cover)
 
-    # Boundary conditions
-    left_node = find_nearest_node(nodes, 0.0, 0.0)
-    right_node = find_nearest_node(nodes, model.L, 0.0)
-    load_node = find_nearest_node(nodes, model.L/2.0, model.H)
+    # Boundary conditions (FASE D: bc_spec support)
+    if bc_spec is not None:
+        # Use bc_spec from solver_interface (allows pullout, custom BCs, etc.)
+        # NOTE: bc_spec uses DOF indices, but multicrack uses (node, comp) tuples
+        # We'll need to resolve this after DOFs are built
+        fixed = None  # Will be resolved later
+        load_node = None  # Will be resolved from bc_spec.prescribed_dofs
+    else:
+        # Default: 3-point bending beam BCs
+        left_node = find_nearest_node(nodes, 0.0, 0.0)
+        right_node = find_nearest_node(nodes, model.L, 0.0)
+        load_node = find_nearest_node(nodes, model.L/2.0, model.H)
 
-    fixed = {
-        (left_node, 0): 0.0,
-        (left_node, 1): 0.0,
-        (right_node, 1): 0.0,
-    }
+        fixed = {
+            (left_node, 0): 0.0,
+            (left_node, 1): 0.0,
+            (right_node, 1): 0.0,
+        }
 
-    # displacement control
-    u_targets = np.linspace(0.0, umax, nsteps+1)[1:]
+    # displacement control (FASE D: u_targets support)
+    if u_targets is None:
+        u_targets = np.linspace(0.0, umax, nsteps+1)[1:]
+    else:
+        # Use provided u_targets (e.g., from cyclic loading)
+        pass
 
     # Bond-slip configuration (FASE D)
+    # Use external bond_law if provided, otherwise create default
     enable_bond_slip = bool(getattr(model, "enable_bond_slip", False))
-    bond_law = None
     bond_states = None
     steel_EA = 0.0
+    perimeter_total = None  # Perimeter for bond-slip (FASE D)
 
     if enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
-        from xfem_clean.bond_slip import BondSlipStateArrays, BondSlipModelCode2010
+        from xfem_clean.bond_slip import BondSlipStateArrays
 
         n_seg = rebar_segs.shape[0]
         bond_states = BondSlipStateArrays.zeros(n_seg)
-        bond_law = BondSlipModelCode2010(
-            f_cm=model.fc,
-            d_bar=model.rebar_diameter,
-            condition=getattr(model, "bond_condition", "good"),
-        )
+
+        # Use bond_law from parameter (passed from solver_interface)
+        if bond_law is None:
+            # Fallback: create default bond law (for backward compatibility)
+            from xfem_clean.bond_slip import BondSlipModelCode2010
+            bond_law = BondSlipModelCode2010(
+                f_cm=model.fc,
+                d_bar=model.rebar_diameter,
+                condition=getattr(model, "bond_condition", "good"),
+            )
+            print("WARNING: Using default BondSlipModelCode2010. Pass bond_law explicitly.")
+
         steel_EA = getattr(model, "steel_EA_min", model.steel_E * model.steel_A_total) if model.steel_A_total > 0 else 1e3
+
+        # Compute perimeter_total from rebar geometry (FASE D)
+        # perimeter = (n_bars * π * d_bar) for each layer, summed
+        d_bar = getattr(model, "rebar_diameter", 0.012)  # Default 12mm
+        # For simplicity, assume all bars have same diameter (can be refined)
+        # If model has steel_A_total, infer n_bars from A_total / (π*(d/2)^2)
+        A_bar = np.pi * (d_bar / 2.0) ** 2
+        if model.steel_A_total > 0 and A_bar > 0:
+            n_bars_total = model.steel_A_total / A_bar
+            perimeter_total = n_bars_total * np.pi * d_bar
+        else:
+            perimeter_total = np.pi * d_bar  # Default: 1 bar
 
     # Subdomain manager (FASE D)
     subdomain_mgr = getattr(model, 'subdomain_mgr', None)
@@ -982,6 +1060,51 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
     pts_flex = _candidate_points_zone(model, "flexure", nx)
     pts_shear = _candidate_points_zone(model, "shear_left", nx) + _candidate_points_zone(model, "shear_right", nx)
 
+    # Helper function to resolve bc_spec to fixed DOF dict (FASE D)
+    def _build_fixed_from_bc_spec(dofs_obj, u_target: float, nnode: int) -> Dict[int, float]:
+        """
+        Convert bc_spec to fixed DOF dict compatible with multicrack.
+
+        bc_spec uses global DOF indices, which we convert to multicrack fixed dict.
+        Handles negative markers for steel DOFs (same as analysis_single).
+        """
+        if bc_spec is None:
+            return {}
+
+        fixed_dict = {}
+
+        # Fixed DOFs from bc_spec
+        for dof, val in bc_spec.fixed_dofs.items():
+            fixed_dict[int(dof)] = float(val)
+
+        # Prescribed DOFs (load DOFs)
+        prescribed_scale = bc_spec.prescribed_scale if bc_spec is not None else -1.0
+        for dof_marker in bc_spec.prescribed_dofs:
+            if dof_marker < 0:
+                # Negative marker for steel DOF: -(2*nnode + node_id * 2)
+                node_id = -(dof_marker + 2 * nnode) // 2
+                component = 0  # ux for pullout
+
+                if dofs_obj.steel is not None and node_id >= 0 and node_id < nnode:
+                    steel_dof = dofs_obj.steel[node_id, component]
+                    if steel_dof >= 0:
+                        fixed_dict[int(steel_dof)] = prescribed_scale * float(u_target)
+            else:
+                # Positive: concrete DOF
+                fixed_dict[int(dof_marker)] = prescribed_scale * float(u_target)
+
+        # Enriched DOFs at constrained nodes must also be fixed
+        for a in range(nnode):
+            for comp in (0, 1):
+                d_std = int(dofs_obj.std[a, comp])
+                if d_std in fixed_dict:
+                    for Hk in dofs_obj.H:
+                        dH = int(Hk[a, comp])
+                        if dH >= 0:
+                            fixed_dict[dH] = 0.0
+
+        return fixed_dict
+
     def solve_step(u_bar, q_init, coh_states_committed, bulk_states_committed, *, enr_scale: float = 1.0):
         """Newton solve for one load/displacement level.
 
@@ -1003,24 +1126,29 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
 
         # Build a Dirichlet map in global DOF indices (supports + displacement control)
         def build_fixed(u_target: float) -> Dict[int, float]:
-            f = {
-                int(dofs.std[left_node, 0]): 0.0,
-                int(dofs.std[left_node, 1]): 0.0,
-                int(dofs.std[right_node, 1]): 0.0,
-                int(dofs.std[load_node, 1]): -u_target,
-            }
-            # Enriched DOFs at constrained nodes must also be fixed to avoid singular modes.
-            # Multi-crack implementation uses ONLY Heaviside enrichments (no tip DOFs).
-            nnode = int(dofs.std.shape[0])
-            for a in range(nnode):
-                for comp in (0, 1):
-                    d_std = int(dofs.std[a, comp])
-                    if d_std in f:
-                        for Hk in dofs.H:
-                            dH = int(Hk[a, comp])
-                            if dH >= 0:
-                                f[dH] = 0.0
-            return f
+            if bc_spec is not None:
+                # Use bc_spec (FASE D)
+                return _build_fixed_from_bc_spec(dofs, u_target, nodes.shape[0])
+            else:
+                # Default 3PB beam BCs
+                f = {
+                    int(dofs.std[left_node, 0]): 0.0,
+                    int(dofs.std[left_node, 1]): 0.0,
+                    int(dofs.std[right_node, 1]): 0.0,
+                    int(dofs.std[load_node, 1]): -u_target,
+                }
+                # Enriched DOFs at constrained nodes must also be fixed to avoid singular modes.
+                # Multi-crack implementation uses ONLY Heaviside enrichments (no tip DOFs).
+                nnode = int(dofs.std.shape[0])
+                for a in range(nnode):
+                    for comp in (0, 1):
+                        d_std = int(dofs.std[a, comp])
+                        if d_std in f:
+                            for Hk in dofs.H:
+                                dH = int(Hk[a, comp])
+                                if dH >= 0:
+                                    f[dH] = 0.0
+                return f
 
         fixed_step = build_fixed(u_bar)
         for dof, val in fixed_step.items():
@@ -1057,6 +1185,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                 bond_states_comm=bond_states,
                 enable_bond_slip=enable_bond_slip,
                 steel_EA=steel_EA,
+                perimeter_total=perimeter_total,  # FASE D
                 # Subdomain support (FASE D)
                 subdomain_mgr=subdomain_mgr,
             )
@@ -1073,7 +1202,12 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
 
             # Gutierrez (Eq. 4.59): ||R|| / ||F_ext|| <= beta.
             # With displacement control, use the current reaction at the loaded dofs as force scale.
-            load_dof = int(dofs.std[load_node, 1])
+            if bc_spec is not None and bc_spec.reaction_dofs:
+                # Use reaction_dofs from bc_spec (first one)
+                load_dof = int(bc_spec.reaction_dofs[0])
+            else:
+                # Default: top center node (3PB)
+                load_dof = int(dofs.std[load_node, 1])
             P_est = -float(R[load_dof])
             fscale = max(1.0, abs(P_est))
             tol = model.newton_tol_r + model.newton_beta * fscale
@@ -1142,6 +1276,7 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                         bond_states_comm=bond_states,
                         enable_bond_slip=enable_bond_slip,
                         steel_EA=steel_EA,
+                        perimeter_total=perimeter_total,  # FASE D
                         # Subdomain support (FASE D)
                         subdomain_mgr=subdomain_mgr,
                     )
@@ -1376,7 +1511,11 @@ def run_analysis_xfem_multicrack(model: XFEMModel, nx=120, ny=20, nsteps=30, uma
                     if bond_updates is not None and bond_states is not None:
                         bond_states = bond_updates
 
-                    dof_load = int(dofs.std[load_node, 1])
+                    # Extract reaction force (FASE D: bc_spec support)
+                    if bc_spec is not None and bc_spec.reaction_dofs:
+                        dof_load = int(bc_spec.reaction_dofs[0])
+                    else:
+                        dof_load = int(dofs.std[load_node, 1])
                     P = -float(fint_loc[dof_load])
 
                     results.append({

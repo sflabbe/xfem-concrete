@@ -4,7 +4,7 @@ Solver Interface for Gutiérrez Thesis Cases
 Provides adapters to convert CaseConfig to XFEM solver inputs and execute simulations.
 """
 
-from typing import Tuple, Optional, Any, Dict
+from typing import Tuple, Optional, Any, Dict, List
 import numpy as np
 
 from examples.gutierrez_thesis.case_config import (
@@ -19,6 +19,7 @@ from examples.gutierrez_thesis.case_config import (
 
 from xfem_clean.xfem.model import XFEMModel
 from xfem_clean.xfem.analysis_single import run_analysis_xfem, BCSpec
+from xfem_clean.xfem.multicrack import run_analysis_xfem_multicrack
 from xfem_clean.cohesive_laws import CohesiveLaw
 from xfem_clean.bond_slip import (
     CustomBondSlipLaw,
@@ -358,12 +359,94 @@ def case_config_to_xfem_model(case: CaseConfig) -> XFEMModel:
 
 
 # =============================================================================
+# CYCLIC LOADING TRAJECTORY GENERATOR
+# =============================================================================
+
+def generate_cyclic_u_targets(
+    targets_mm: List[float],
+    n_cycles_per_target: int = 1,
+) -> np.ndarray:
+    """
+    Generate cyclic displacement trajectory.
+
+    For each target displacement, repeats n_cycles_per_target of:
+      0 → +target → 0 → -target → 0
+
+    Parameters
+    ----------
+    targets_mm : list[float]
+        List of target displacements (mm)
+    n_cycles_per_target : int
+        Number of cycles per target
+
+    Returns
+    -------
+    u_targets_mm : np.ndarray
+        Full displacement trajectory (mm)
+    """
+    trajectory = [0.0]
+
+    for target in targets_mm:
+        for _ in range(n_cycles_per_target):
+            # Positive cycle: 0 → +t → 0
+            trajectory.append(target)
+            trajectory.append(0.0)
+
+            # Negative cycle: 0 → -t → 0
+            trajectory.append(-target)
+            trajectory.append(0.0)
+
+    # Remove duplicate consecutive zeros
+    u_targets_mm = []
+    prev = None
+    for val in trajectory:
+        if val != prev or val != 0.0:
+            u_targets_mm.append(val)
+        prev = val
+
+    return np.array(u_targets_mm)
+
+
+# =============================================================================
+# SOLVER DISPATCH
+# =============================================================================
+
+def _should_use_multicrack(case: CaseConfig) -> bool:
+    """
+    Determine if case requires multicrack solver.
+
+    Heuristics:
+    - Explicit case IDs known to need distributed cracking
+    - Non-elastic bulk material (CDP/DP)
+    """
+    multicrack_case_ids = {
+        "03_tensile_stn12",
+        "04_beam_3pb_t5a1",
+        "05_wall_c1_cyclic",
+        "06_fibre_tensile",
+    }
+
+    # Check case ID
+    if case.case_id in multicrack_case_ids:
+        return True
+
+    # Check material model (non-elastic likely needs multicrack)
+    if case.concrete.model_type not in {"elastic"}:
+        # For now, be conservative and use multicrack for cdp/dp
+        # (can be refined later)
+        pass
+
+    return False
+
+
+# =============================================================================
 # SOLVER EXECUTION
 # =============================================================================
 
 def run_case_solver(
     case: CaseConfig,
     mesh_factor: float = 1.0,
+    enable_postprocess: bool = True,
 ) -> Dict[str, Any]:
     """
     Run XFEM solver for a thesis case.
@@ -374,6 +457,8 @@ def run_case_solver(
         Thesis case configuration
     mesh_factor : float
         Mesh refinement factor (1.0 = default)
+    enable_postprocess : bool
+        Enable comprehensive postprocessing (CSV, PNG outputs)
 
     Returns
     -------
@@ -394,13 +479,28 @@ def run_case_solver(
     nx = int(case.geometry.n_elem_x * mesh_factor)
     ny = int(case.geometry.n_elem_y * mesh_factor)
 
+    # Dispatch: determine which solver to use
+    # FASE D: Dispatcher for single-crack vs multicrack vs cyclic
+    is_cyclic = hasattr(case.loading, 'loading_type') and case.loading.loading_type == "cyclic"
+    use_multicrack = _should_use_multicrack(case)
+
     # Extract loading parameters
-    if hasattr(case.loading, 'max_displacement'):
+    if is_cyclic:
+        # Cyclic loading: generate u_targets trajectory
+        targets_mm = case.loading.targets
+        n_cycles_per_target = getattr(case.loading, 'n_cycles_per_target', 1)
+        u_targets_mm = generate_cyclic_u_targets(targets_mm, n_cycles_per_target)
+        u_targets = u_targets_mm * 1e-3  # mm → m
+        nsteps = len(u_targets)
+        umax = float(np.max(np.abs(u_targets)))
+        print(f"Cyclic loading: {len(u_targets)} steps, max={umax*1e3:.2f} mm")
+    elif hasattr(case.loading, 'max_displacement'):
         # Monotonic loading
         umax = case.loading.max_displacement * 1e-3  # mm → m
         nsteps = case.loading.n_steps
+        u_targets = None  # Will use linspace in solver
     else:
-        raise NotImplementedError("Only monotonic loading supported for now")
+        raise NotImplementedError(f"Unsupported loading type: {type(case.loading)}")
 
     # Create cohesive law (if using cohesive cracks)
     # For pull-out tests without cracks, we still need a cohesive law object
@@ -447,9 +547,8 @@ def run_case_solver(
 
     # TODO: Handle FRP sheets (FASE E)
     # TODO: Handle fibres (FASE E)
-    # TODO: Handle cyclic loading (FASE F)
 
-    # Run solver
+    # Dispatch to appropriate solver
     print(f"Running solver: nx={nx}, ny={ny}, nsteps={nsteps}, umax={umax*1e3:.3f} mm")
 
     # Pass mesh and bc_spec to analysis
@@ -458,28 +557,80 @@ def run_case_solver(
     model._nodes = nodes  # Store in model to pass to analysis
     model._elems = elems
 
-    nodes_out, elems_out, u, history, crack = run_analysis_xfem(
-        model=model,
-        nx=nx,
-        ny=ny,
-        nsteps=nsteps,
-        umax=umax,
-        law=law,
-        return_states=False,
-        bc_spec=bc_spec,
-        bond_law=bond_law,  # Pass mapped bond law from case config
-    )
+    if use_multicrack:
+        print("  Using MULTICRACK solver (distributed cracking)")
+        # Call multicrack solver with full integration (FASE D)
+        nodes_out, elems_out, u, history, cracks_out = run_analysis_xfem_multicrack(
+            model=model,
+            nx=nx,
+            ny=ny,
+            nsteps=nsteps,
+            umax=umax,
+            law=law,
+            nodes=nodes,
+            elems=elems,
+            u_targets=u_targets if is_cyclic else None,
+            bc_spec=bc_spec,
+            bond_law=bond_law,
+        )
 
-    # Package results
+        # Package results in bundle format (multicrack doesn't return bundle yet)
+        # TODO: Update multicrack to return bundle (similar to analysis_single)
+        bundle = {
+            'nodes': nodes_out,
+            'elems': elems_out,
+            'u': u,
+            'history': history,
+            'crack': cracks_out[0] if len(cracks_out) > 0 else None,  # Return first crack for compatibility
+            'cracks': cracks_out,  # Full crack list
+            'mp_states': None,  # Not returned by multicrack yet
+            'bond_states': None,  # Not returned by multicrack yet
+            'rebar_segs': rebar_segs,
+            'dofs': None,  # Not returned by multicrack yet
+            'coh_states': None,  # Not returned by multicrack yet
+        }
+
+    elif is_cyclic:
+        print("  Using CYCLIC driver with single-crack (custom u_targets)")
+        # For now, use single-crack with u_targets
+        # TODO: Implement u_targets support in run_analysis_xfem (FASE F)
+        raise NotImplementedError("Cyclic u_targets for single-crack not yet supported (FASE F)")
+    else:
+        print("  Using SINGLE-CRACK solver (monotonic)")
+        # Use return_bundle to get comprehensive results (FASE G)
+        bundle = run_analysis_xfem(
+            model=model,
+            nx=nx,
+            ny=ny,
+            nsteps=nsteps,
+            umax=umax,
+            law=law,
+            return_bundle=True,  # Get full bundle
+            bc_spec=bc_spec,
+            bond_law=bond_law,  # Pass mapped bond law from case config
+        )
+
+    # Package results with all necessary data for postprocessing
     results = {
-        'nodes': nodes_out,
-        'elems': elems_out,
-        'u': u,
-        'history': history,
-        'crack': crack,
+        'nodes': bundle['nodes'],
+        'elems': bundle['elems'],
+        'u': bundle['u'],
+        'history': bundle['history'],
+        'crack': bundle.get('crack'),
+        'cracks': bundle.get('cracks', [bundle.get('crack')] if bundle.get('crack') is not None else []),
+        'mp_states': bundle.get('mp_states'),
+        'bond_states': bundle.get('bond_states'),
+        'rebar_segs': bundle.get('rebar_segs'),
+        'dofs': bundle.get('dofs'),
+        'coh_states': bundle.get('coh_states'),
         'model': model,
         'bond_law': bond_law,
         'subdomain_mgr': subdomain_mgr,
     }
+
+    # Postprocessing (FASE G)
+    if enable_postprocess:
+        from examples.gutierrez_thesis.postprocess_comprehensive import postprocess_case
+        postprocess_case(case, results)
 
     return results
