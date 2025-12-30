@@ -19,6 +19,7 @@ from examples.gutierrez_thesis.case_config import (
 
 from xfem_clean.xfem.model import XFEMModel
 from xfem_clean.xfem.analysis_single import run_analysis_xfem, BCSpec
+from xfem_clean.xfem.multicrack import run_analysis_xfem_multicrack
 from xfem_clean.cohesive_laws import CohesiveLaw
 from xfem_clean.bond_slip import (
     CustomBondSlipLaw,
@@ -546,17 +547,6 @@ def run_case_solver(
 
     # Dispatch to appropriate solver
     print(f"Running solver: nx={nx}, ny={ny}, nsteps={nsteps}, umax={umax*1e3:.3f} mm")
-    if use_multicrack:
-        print("  Using MULTICRACK solver (distributed cracking)")
-        # TODO: Call run_analysis_xfem_multicrack with bc_spec + u_targets (FASE D commits 3-4)
-        raise NotImplementedError("Multicrack integration not yet complete (FASE D commits 3-4)")
-    elif is_cyclic:
-        print("  Using CYCLIC driver (custom u_targets)")
-        # For now, use single-crack with u_targets
-        # TODO: Implement u_targets support in run_analysis_xfem (FASE F)
-        raise NotImplementedError("Cyclic u_targets not yet supported (FASE F)")
-    else:
-        print("  Using SINGLE-CRACK solver (monotonic)")
 
     # Pass mesh and bc_spec to analysis
     # NOTE: We pass nodes/elems manually to avoid re-creating mesh inside run_analysis_xfem
@@ -564,18 +554,58 @@ def run_case_solver(
     model._nodes = nodes  # Store in model to pass to analysis
     model._elems = elems
 
-    # Use return_bundle to get comprehensive results (FASE G)
-    bundle = run_analysis_xfem(
-        model=model,
-        nx=nx,
-        ny=ny,
-        nsteps=nsteps,
-        umax=umax,
-        law=law,
-        return_bundle=True,  # Get full bundle
-        bc_spec=bc_spec,
-        bond_law=bond_law,  # Pass mapped bond law from case config
-    )
+    if use_multicrack:
+        print("  Using MULTICRACK solver (distributed cracking)")
+        # Call multicrack solver with full integration (FASE D)
+        nodes_out, elems_out, u, history, cracks_out = run_analysis_xfem_multicrack(
+            model=model,
+            nx=nx,
+            ny=ny,
+            nsteps=nsteps,
+            umax=umax,
+            law=law,
+            nodes=nodes,
+            elems=elems,
+            u_targets=u_targets if is_cyclic else None,
+            bc_spec=bc_spec,
+            bond_law=bond_law,
+        )
+
+        # Package results in bundle format (multicrack doesn't return bundle yet)
+        # TODO: Update multicrack to return bundle (similar to analysis_single)
+        bundle = {
+            'nodes': nodes_out,
+            'elems': elems_out,
+            'u': u,
+            'history': history,
+            'crack': cracks_out[0] if len(cracks_out) > 0 else None,  # Return first crack for compatibility
+            'cracks': cracks_out,  # Full crack list
+            'mp_states': None,  # Not returned by multicrack yet
+            'bond_states': None,  # Not returned by multicrack yet
+            'rebar_segs': rebar_segs,
+            'dofs': None,  # Not returned by multicrack yet
+            'coh_states': None,  # Not returned by multicrack yet
+        }
+
+    elif is_cyclic:
+        print("  Using CYCLIC driver with single-crack (custom u_targets)")
+        # For now, use single-crack with u_targets
+        # TODO: Implement u_targets support in run_analysis_xfem (FASE F)
+        raise NotImplementedError("Cyclic u_targets for single-crack not yet supported (FASE F)")
+    else:
+        print("  Using SINGLE-CRACK solver (monotonic)")
+        # Use return_bundle to get comprehensive results (FASE G)
+        bundle = run_analysis_xfem(
+            model=model,
+            nx=nx,
+            ny=ny,
+            nsteps=nsteps,
+            umax=umax,
+            law=law,
+            return_bundle=True,  # Get full bundle
+            bc_spec=bc_spec,
+            bond_law=bond_law,  # Pass mapped bond law from case config
+        )
 
     # Package results with all necessary data for postprocessing
     results = {
