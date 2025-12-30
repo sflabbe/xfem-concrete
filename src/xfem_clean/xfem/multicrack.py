@@ -683,6 +683,27 @@ def assemble_xfem_system_multi(
                     else:
                         coh_updates[key] = st_new
 
+                # Fibre bridging contribution (BLOQUE 6)
+                if hasattr(model, 'fibre_bridging_cfg') and model.fibre_bridging_cfg is not None:
+                    # Import here to avoid circular dependency
+                    from xfem_clean.fibre_bridging import fibre_traction_tangent
+
+                    # Estimate delta_l (patch length represented by this cohesive point)
+                    # Approximate as segment length (could be refined)
+                    delta_l = seg_len
+
+                    # Compute fibre contribution (uses crack opening delta_n)
+                    t_fibre, k_fibre = fibre_traction_tangent(
+                        w_n=delta_n,  # Crack opening (m)
+                        delta_l=delta_l,  # Patch length (m)
+                        cfg=model.fibre_bridging_cfg,
+                        rng=None,  # Will use cfg.random_seed
+                    )
+
+                    # Add to cohesive traction and tangent
+                    t_n += t_fibre
+                    dtn_dd += k_fibre
+
                 # cohesive force vector in global dofs
                 # f = J^T * (t_n * n)
                 tr_vec = t_n * n

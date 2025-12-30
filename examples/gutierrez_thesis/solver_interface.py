@@ -738,7 +738,27 @@ def run_case_solver(
             print(f"  Bonded region: x ∈ [{x_bonded_min*1e3:.1f}, {x_bonded_max*1e3:.1f}] mm")
             print(f"  Disabled segments: {np.sum(frp_segment_mask)}/{len(frp_segs)}")
 
-    # TODO: Handle fibres (BLOQUE 6)
+    # Fibre bridging handling (BLOQUE 6)
+    fibre_bridging_cfg = None
+    if case.fibres:
+        from xfem_clean.fibre_bridging import fibre_config_from_case
+
+        # Convert case fibre config to bridging config
+        fibre_bridging_cfg = fibre_config_from_case(
+            fibre_reinf=case.fibres,
+            thickness_m=model.b,  # Specimen thickness in m
+        )
+
+        # Store in model for access during assembly
+        model.fibre_bridging_cfg = fibre_bridging_cfg
+
+        print(f"Fibre bridging: {fibre_bridging_cfg.density_m2:.1f} fibres/m², " +
+              f"d={fibre_bridging_cfg.d_fibre*1e3:.2f} mm, " +
+              f"L={fibre_bridging_cfg.L_fibre*1e3:.1f} mm")
+        print(f"  Orientation: {fibre_bridging_cfg.orientation_mean_deg:.1f}° " +
+              f"± {fibre_bridging_cfg.orientation_std_deg:.1f}°")
+        print(f"  Explicit fraction: {fibre_bridging_cfg.explicit_fraction*100:.0f}% " +
+              f"(forces scaled by {1/fibre_bridging_cfg.explicit_fraction:.0f}x)")
 
     # Dispatch to appropriate solver
     print(f"Running solver: nx={nx}, ny={ny}, nsteps={nsteps}, umax={umax*1e3:.3f} mm")
