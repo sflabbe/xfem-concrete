@@ -310,7 +310,7 @@ def export_vtk_step(
 # =============================================================================
 
 def plot_load_displacement(
-    history: List,
+    history,
     output_dir: Path,
     xlabel: str = "Displacement [mm]",
     ylabel: str = "Load [kN]",
@@ -320,16 +320,23 @@ def plot_load_displacement(
 
     Parameters
     ----------
-    history : list
-        History rows [step, u, P, ...]
+    history : list or np.ndarray
+        History rows [step, u, P, ...] (single-crack) or list of dicts (multicrack)
     output_dir : Path
         Output directory
     xlabel, ylabel : str
         Axis labels
     """
-    history_arr = np.array(history)
-    u_mm = history_arr[:, 1]
-    P_kN = history_arr[:, 2]
+    # Handle different history formats
+    if isinstance(history, list) and len(history) > 0 and isinstance(history[0], dict):
+        # Multicrack format: list of dicts with keys 'u', 'P'
+        u_mm = np.array([h['u'] for h in history]) * 1e3  # m → mm
+        P_kN = np.array([h['P'] for h in history]) / 1e3  # N → kN
+    else:
+        # Single-crack format: np.ndarray with columns [step, u, P, ...]
+        history_arr = np.array(history)
+        u_mm = history_arr[:, 1] * 1e3  # Assume m → mm
+        P_kN = history_arr[:, 2] / 1e3  # Assume N → kN
 
     plt.figure(figsize=(8, 6))
     plt.plot(u_mm, P_kN, 'b-', linewidth=2)
@@ -416,6 +423,22 @@ def plot_bond_stress_profile(
 # MAIN POSTPROCESS FUNCTION
 # =============================================================================
 
+def postprocess_case(case, results: Dict[str, Any]):
+    """
+    Unified postprocessing entry point for solver_interface.
+
+    Parameters
+    ----------
+    case : CaseConfig
+        Case configuration
+    results : dict
+        Solver results from run_case_solver
+    """
+    from pathlib import Path
+    output_dir = Path(case.outputs.output_dir) / case.outputs.case_name
+    postprocess_results(results, case, output_dir)
+
+
 def postprocess_results(
     results: Dict[str, Any],
     case_config,  # CaseConfig
@@ -450,13 +473,16 @@ def postprocess_results(
     subdomain_mgr = results.get('subdomain_mgr', None)
 
     # Load-displacement plot
-    if case_config.outputs.save_load_displacement:
+    if case_config.outputs.save_load_displacement and len(history) > 0:
         plot_load_displacement(history, output_dir)
 
-    # Crack pattern extraction
-    if crack is not None and crack.active and case_config.outputs.save_crack_data:
-        crack_data = extract_crack_pattern(crack, results.get('coh_states', None), nodes)
-        print(f"  Crack tip: ({crack_data['tip'][0]*1e3:.1f}, {crack_data['tip'][1]*1e3:.1f}) mm")
+    # Crack pattern extraction (handle both single crack and multicrack)
+    cracks_list = results.get('cracks', [crack] if crack is not None else [])
+    if cracks_list and case_config.outputs.save_crack_data:
+        for i, c in enumerate(cracks_list):
+            if c is not None and c.active:
+                crack_data = extract_crack_pattern(c, results.get('coh_states', None), nodes)
+                print(f"  Crack #{i+1} tip: ({crack_data['tip'][0]*1e3:.1f}, {crack_data['tip'][1]*1e3:.1f}) mm")
 
     # Bond-slip profiles (if applicable)
     if bond_states is not None and bond_law is not None:

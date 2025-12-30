@@ -446,6 +446,7 @@ def _should_use_multicrack(case: CaseConfig) -> bool:
 def run_case_solver(
     case: CaseConfig,
     mesh_factor: float = 1.0,
+    enable_postprocess: bool = True,
 ) -> Dict[str, Any]:
     """
     Run XFEM solver for a thesis case.
@@ -456,6 +457,8 @@ def run_case_solver(
         Thesis case configuration
     mesh_factor : float
         Mesh refinement factor (1.0 = default)
+    enable_postprocess : bool
+        Enable comprehensive postprocessing (CSV, PNG outputs)
 
     Returns
     -------
@@ -613,15 +616,21 @@ def run_case_solver(
         'elems': bundle['elems'],
         'u': bundle['u'],
         'history': bundle['history'],
-        'crack': bundle['crack'],
-        'mp_states': bundle['mp_states'],
-        'bond_states': bundle['bond_states'],
-        'rebar_segs': bundle['rebar_segs'],
-        'dofs': bundle['dofs'],
-        'coh_states': bundle['coh_states'],
+        'crack': bundle.get('crack'),
+        'cracks': bundle.get('cracks', [bundle.get('crack')] if bundle.get('crack') is not None else []),
+        'mp_states': bundle.get('mp_states'),
+        'bond_states': bundle.get('bond_states'),
+        'rebar_segs': bundle.get('rebar_segs'),
+        'dofs': bundle.get('dofs'),
+        'coh_states': bundle.get('coh_states'),
         'model': model,
         'bond_law': bond_law,
         'subdomain_mgr': subdomain_mgr,
     }
+
+    # Postprocessing (FASE G)
+    if enable_postprocess:
+        from examples.gutierrez_thesis.postprocess_comprehensive import postprocess_case
+        postprocess_case(case, results)
 
     return results
