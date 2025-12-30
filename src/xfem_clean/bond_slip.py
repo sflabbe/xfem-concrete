@@ -1179,6 +1179,7 @@ def assemble_bond_slip(
     steel_EA: float = 0.0,
     use_numba: bool = True,
     enable_validation: bool = True,  # Part A1: Enable preflight checks
+    perimeter: Optional[float] = None,  # Explicit perimeter for robustness
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Assemble bond-slip interface forces and stiffness.
 
@@ -1203,6 +1204,9 @@ def assemble_bond_slip(
         Use Numba acceleration if available
     enable_validation : bool
         Run preflight validation checks (Part A1)
+    perimeter : float, optional
+        Rebar perimeter [m]. If None, attempts to compute from bond_law.d_bar.
+        For non-circular reinforcement, pass explicit perimeter.
 
     Returns
     -------
@@ -1216,8 +1220,17 @@ def assemble_bond_slip(
     n_seg = steel_segments.shape[0]
     ndof_total = u_total.shape[0]
 
-    # Pack bond parameters for Numba
-    perimeter = math.pi * float(bond_law.d_bar)
+    # Compute perimeter (explicit parameter takes precedence)
+    if perimeter is None:
+        # Fallback: try to get from bond_law.d_bar (backward compatibility)
+        if hasattr(bond_law, 'd_bar'):
+            perimeter = math.pi * float(bond_law.d_bar)
+        else:
+            raise ValueError(
+                "Bond-slip assembly requires perimeter. Either:\n"
+                "  1. Pass perimeter explicitly as parameter, or\n"
+                "  2. Use a bond_law with d_bar attribute (e.g., BondSlipModelCode2010)"
+            )
 
     # Tangent capping for numerical stability (Priority #1)
     # dtau_max is typically set to bond_tangent_cap_factor * median(diag(K_bulk))

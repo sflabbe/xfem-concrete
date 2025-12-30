@@ -55,6 +55,7 @@ def assemble_xfem_system(
     bond_states_comm: Optional[object] = None,
     enable_bond_slip: bool = False,
     steel_EA: float = 0.0,
+    rebar_diameter: Optional[float] = None,  # For perimeter calculation [m]
     # Dissertation parity features
     reinforcement_layers: Optional[list] = None,
     enable_reinforcement: bool = False,
@@ -638,6 +639,11 @@ def assemble_xfem_system(
 
         from xfem_clean.bond_slip import assemble_bond_slip
 
+        # Compute perimeter for circular rebar
+        perimeter = None
+        if rebar_diameter is not None:
+            perimeter = math.pi * float(rebar_diameter)
+
         f_bond, K_bond, bond_updates = assemble_bond_slip(
             u_total=q,
             steel_segments=rebar_segs,
@@ -647,6 +653,7 @@ def assemble_xfem_system(
             steel_dof_map=dofs.steel,  # Pass sparse DOF mapping
             steel_EA=steel_EA,  # Steel axial stiffness
             use_numba=use_numba,
+            perimeter=perimeter,  # Explicit perimeter (or None → fallback to bond_law.d_bar)
         )
 
         # Add bond-slip contribution to global system

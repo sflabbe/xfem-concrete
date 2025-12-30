@@ -410,6 +410,7 @@ def run_analysis_xfem(
                 bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
                 enable_bond_slip=model.enable_bond_slip,
                 steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
+                rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
                 subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
             )
             if model.debug_newton:
@@ -532,6 +533,7 @@ def run_analysis_xfem(
                         bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
                         enable_bond_slip=model.enable_bond_slip,
                         steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
+                        rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
                         subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
                     )
                     # Perfect bond rebar (only if bond-slip disabled)
