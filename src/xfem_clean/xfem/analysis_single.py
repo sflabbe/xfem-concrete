@@ -68,6 +68,7 @@ def run_analysis_xfem(
     law: Optional[CohesiveLaw] = None,
     return_states: bool = False,
     bc_spec: Optional[BCSpec] = None,
+    bond_law: Optional[Any] = None,
 ):
     """Run the single-crack XFEM prototype (stable linear version + cohesive).
 
@@ -176,17 +177,19 @@ def run_analysis_xfem(
 
     # Bond-slip state initialization (Phase 2)
     bond_states = None
-    bond_law = None
     if model.enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
         from xfem_clean.bond_slip import BondSlipStateArrays, BondSlipModelCode2010
 
         n_seg = rebar_segs.shape[0]
         bond_states = BondSlipStateArrays.zeros(n_seg)
-        bond_law = BondSlipModelCode2010(
-            f_cm=model.fc,
-            d_bar=model.rebar_diameter,
-            condition=model.bond_condition,
-        )
+
+        # Use bond_law from parameter if provided, otherwise create default
+        if bond_law is None:
+            bond_law = BondSlipModelCode2010(
+                f_cm=model.fc,
+                d_bar=model.rebar_diameter,
+                condition=model.bond_condition,
+            )
 
     # Subdomain manager (Phase C - thesis cases)
     subdomain_mgr = getattr(model, 'subdomain_mgr', None)

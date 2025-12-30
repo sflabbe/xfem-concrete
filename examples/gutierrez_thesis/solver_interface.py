@@ -462,6 +462,7 @@ def run_case_solver(
         law=law,
         return_states=False,
         bc_spec=bc_spec,
+        bond_law=bond_law,  # Pass mapped bond law from case config
     )
 
     # Package results
