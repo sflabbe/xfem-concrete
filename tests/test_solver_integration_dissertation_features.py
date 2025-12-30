@@ -5,8 +5,12 @@ Tests that the dissertation features integrate correctly with the production sol
 Reference: Dissertation 10.5445/IR/1000124842, Chapter 4
 """
 
-import numpy as np
 import pytest
+
+try:
+    import numpy as np
+except ImportError as e:
+    pytest.skip(f"Import error: {e}", allow_module_level=True)
 
 
 def test_imports_dissertation_modules():

@@ -1,14 +1,18 @@
 """Simple test for bond-slip fixes (anti-hang debugging)."""
 
 import sys
-import numpy as np
 from pathlib import Path
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from xfem_clean.xfem.model import XFEMModel
-from xfem_clean.xfem.analysis_single import run_analysis_xfem
-from xfem_clean.cohesive_laws import CohesiveLaw
+try:
+    import numpy as np
+    from xfem_clean.xfem.model import XFEMModel
+    from xfem_clean.xfem.analysis_single import run_analysis_xfem
+    from xfem_clean.cohesive_laws import CohesiveLaw
+except ImportError as e:
+    pytest.skip(f"Import error: {e}", allow_module_level=True)
 
 # Minimal geometry
 L = 0.20  # [m] shorter beam

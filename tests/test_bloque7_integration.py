@@ -9,10 +9,11 @@ Verifica:
 """
 
 import sys
-import numpy as np
-import os
+import pytest
 
 try:
+    import numpy as np
+    import os
     from xfem_clean.xfem.model import XFEMModel
 
     # Import case configurations and solver interface
@@ -26,8 +27,7 @@ try:
         run_case_solver, case_config_to_xfem_model
     )
 except ImportError as e:
-    print(f"⚠️  Import error: {e}")
-    sys.exit(0)
+    pytest.skip(f"Import error: {e}", allow_module_level=True)
 
 
 def test_case_01_pullout_coarse():
