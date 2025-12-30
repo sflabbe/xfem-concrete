@@ -666,24 +666,11 @@ def run_case_solver(
         Gf=model.Gf,
     )
 
-    # Map bond law (rebar or FRP)
+    # Initialize bond variables (will be set after segments are created)
     bond_law = None
     bond_perimeter = None
     bond_segment_mask = None
-    bond_segs = rebar_segs  # Default to rebar segments
-
-    if case.frp_sheets and hasattr(model, 'frp_segs'):
-        # FRP case: use FRP parameters
-        bond_law = model.frp_bond_law
-        bond_perimeter = model.frp_bond_perimeter
-        bond_segment_mask = model.frp_segment_mask
-        bond_segs = model.frp_segs
-    elif case.rebar_layers:
-        # Rebar case: use first rebar layer's bond law
-        bond_law = map_bond_law(case.rebar_layers[0].bond_law)
-        # perimeter will be computed from bond_law.d_bar (legacy)
-        bond_perimeter = None
-        # segment_mask from bond_disabled_x_range (handled inside solver)
+    bond_segs = None
 
     # Create mesh (needed for subdomain manager and BCs)
     nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
@@ -799,6 +786,22 @@ def run_case_solver(
               f"± {fibre_bridging_cfg.orientation_std_deg:.1f}°")
         print(f"  Explicit fraction: {fibre_bridging_cfg.explicit_fraction*100:.0f}% " +
               f"(forces scaled by {1/fibre_bridging_cfg.explicit_fraction:.0f}x)")
+
+    # Map bond law (rebar or FRP) - must happen AFTER segments are created
+    if case.frp_sheets and hasattr(model, 'frp_segs'):
+        # FRP case: use FRP parameters set during FRP setup
+        bond_law = model.frp_bond_law
+        bond_perimeter = model.frp_bond_perimeter
+        bond_segment_mask = model.frp_segment_mask
+        bond_segs = model.frp_segs
+    elif case.rebar_layers and rebar_segs is not None:
+        # Rebar case: use first rebar layer's bond law
+        bond_law = map_bond_law(case.rebar_layers[0].bond_law)
+        bond_segs = rebar_segs
+        # perimeter will be computed from bond_law.d_bar (legacy)
+        bond_perimeter = None
+        # segment_mask from bond_disabled_x_range (handled inside solver)
+        bond_segment_mask = None
 
     # Dispatch to appropriate solver
     print(f"Running solver: nx={nx}, ny={ny}, nsteps={nsteps}, umax={umax*1e3:.3f} mm")
