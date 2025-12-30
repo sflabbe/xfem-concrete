@@ -976,7 +976,7 @@ def run_analysis_static(model: Model, nx: int, ny: int, nsteps: int, umax: float
         # curvature proxy at midspan: use section curvature from epsilon_x across height (simple fit)
         kappa = curvature_midspan(nodes, elems, u, model.cdp, states_comm, x0=model.L/2, thickness=model.b)
 
-        R = float('inf') if abs(kappa) < 1e-16 else 1.0 / kappa
+        R = 1e20 if abs(kappa) < 1e-16 else 1.0 / kappa  # Use large value instead of inf
 
         results.append([step, u_imp, P, M, kappa, R])
 
@@ -1280,7 +1280,7 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
 
                 Mmid = (P_int * model.L / 4.0)
                 kappa = curvature_midspan(nodes, elems, u_n, model.cdp, states_comm, x0=model.L/2, thickness=model.b)
-                R = float('inf') if abs(kappa) < 1e-16 else 1.0 / kappa
+                R = 1e20 if abs(kappa) < 1e-16 else 1.0 / kappa  # Use large value instead of inf
 
                 results.append([accepted_count, t_n, u_imp_n, P_int, Mmid, kappa, R])
 

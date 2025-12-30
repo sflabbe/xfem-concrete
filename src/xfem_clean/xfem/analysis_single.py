@@ -925,7 +925,7 @@ def run_analysis_xfem(
             step_counter += 1
 
             kappa = curvature_mid(q_n)
-            R = float("inf") if abs(kappa) < 1e-16 else 1.0 / kappa
+            R = 1e20 if abs(kappa) < 1e-16 else 1.0 / kappa  # Use large value instead of inf
             M = P * model.L / 4.0
             ang = math.degrees(math.atan2(crack.tvec()[1], crack.tvec()[0])) if crack.active else 0.0
             ed = _compute_global_dissipation(aux, mp_states, coh_states)
