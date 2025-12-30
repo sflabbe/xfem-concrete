@@ -231,7 +231,7 @@ def build_bcs_from_case(
         # WALL TEST (RC wall under cyclic lateral loading):
         # - Fix base (y=0): uy=0 for all nodes, ux=0 for one corner node (prevent rigid body)
         # - Prescribe top displacement: ux=u_target for nodes in rigid beam zone
-        # - Axial load: TODO - implement as constant fext term
+        # - Axial load: constant compression on top edge
 
         # Find base nodes (y ≈ 0)
         y_tol = 1e-6
@@ -277,6 +277,42 @@ def build_bcs_from_case(
         # Positive scale for wall (push in +x direction)
         prescribed_scale = 1.0
 
+        # Axial load (constant compression on top edge)
+        nodal_forces = {}
+        if hasattr(case.loading, 'axial_load') and case.loading.axial_load is not None:
+            P_axial = case.loading.axial_load  # N (negative for compression)
+            L = model.L  # m
+
+            # Find top nodes (y ≈ H)
+            H = model.H
+            top_nodes = np.where(np.isclose(nodes[:, 1], H, atol=y_tol))[0]
+
+            if len(top_nodes) > 1:
+                # Sort by x
+                top_nodes_sorted = top_nodes[np.argsort(nodes[top_nodes, 0])]
+
+                # Compute spacing (assume uniform)
+                x_coords = nodes[top_nodes_sorted, 0]
+                dx_avg = np.mean(np.diff(x_coords))
+
+                # Distribute force: q = P_axial / L (force per unit length)
+                q = P_axial / L  # N/m
+
+                # Nodal forces: f_i = q * dx
+                for i, n in enumerate(top_nodes_sorted):
+                    if i == 0 or i == len(top_nodes_sorted) - 1:
+                        # End nodes: half contribution
+                        f_nodal = 0.5 * q * dx_avg
+                    else:
+                        # Interior nodes: full contribution
+                        f_nodal = q * dx_avg
+
+                    # Apply to uy DOF (compression is negative y direction)
+                    dof_uy = 2 * n + 1
+                    nodal_forces[dof_uy] = f_nodal
+
+                print(f"Axial load: P={P_axial:.2e} N distributed on {len(top_nodes)} top nodes")
+
     else:
         # DEFAULT: 3-point bending beam
         # - Fix left bottom (ux=0, uy=0) and right bottom (uy=0)
@@ -316,11 +352,15 @@ def build_bcs_from_case(
         # Negative scale for beam (load downward)
         prescribed_scale = -1.0
 
+    # Collect nodal_forces if defined (e.g., for axial load in wall case)
+    final_nodal_forces = locals().get('nodal_forces', None)
+
     return BCSpec(
         fixed_dofs=fixed_dofs,
         prescribed_dofs=prescribed_dofs,
         prescribed_scale=prescribed_scale,
         reaction_dofs=reaction_dofs,
+        nodal_forces=final_nodal_forces,
     )
 
 

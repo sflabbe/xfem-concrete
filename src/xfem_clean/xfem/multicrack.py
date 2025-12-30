@@ -1221,6 +1221,12 @@ def run_analysis_xfem_multicrack(
                 # Subdomain support (FASE D)
                 subdomain_mgr=subdomain_mgr,
             )
+
+            # Apply nodal forces from bc_spec (e.g., axial load for walls)
+            if bc_spec is not None and bc_spec.nodal_forces is not None:
+                for dof, force_val in bc_spec.nodal_forces.items():
+                    fext[dof] += force_val
+
             R = fint - fext
             free, K_ff, r_f, _ = apply_dirichlet(K, R, fixed_step, q)
             rhs = -r_f
