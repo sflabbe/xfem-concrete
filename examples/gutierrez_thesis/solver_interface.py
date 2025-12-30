@@ -458,25 +458,31 @@ def run_case_solver(
     model._nodes = nodes  # Store in model to pass to analysis
     model._elems = elems
 
-    nodes_out, elems_out, u, history, crack = run_analysis_xfem(
+    # Use return_bundle to get comprehensive results (FASE G)
+    bundle = run_analysis_xfem(
         model=model,
         nx=nx,
         ny=ny,
         nsteps=nsteps,
         umax=umax,
         law=law,
-        return_states=False,
+        return_bundle=True,  # Get full bundle
         bc_spec=bc_spec,
         bond_law=bond_law,  # Pass mapped bond law from case config
     )
 
-    # Package results
+    # Package results with all necessary data for postprocessing
     results = {
-        'nodes': nodes_out,
-        'elems': elems_out,
-        'u': u,
-        'history': history,
-        'crack': crack,
+        'nodes': bundle['nodes'],
+        'elems': bundle['elems'],
+        'u': bundle['u'],
+        'history': bundle['history'],
+        'crack': bundle['crack'],
+        'mp_states': bundle['mp_states'],
+        'bond_states': bundle['bond_states'],
+        'rebar_segs': bundle['rebar_segs'],
+        'dofs': bundle['dofs'],
+        'coh_states': bundle['coh_states'],
         'model': model,
         'bond_law': bond_law,
         'subdomain_mgr': subdomain_mgr,

@@ -69,6 +69,7 @@ def run_analysis_xfem(
     return_states: bool = False,
     bc_spec: Optional[BCSpec] = None,
     bond_law: Optional[Any] = None,
+    return_bundle: bool = False,
 ):
     """Run the single-crack XFEM prototype (stable linear version + cohesive).
 
@@ -78,6 +79,10 @@ def run_analysis_xfem(
         Boundary condition specification. If None, defaults to 3-point bending:
         - Fixed: left bottom (ux=0, uy=0) and right bottom (uy=0)
         - Prescribed: top center nodes (uy=-umax)
+    return_bundle : bool, optional
+        If True, return dict with comprehensive results:
+        {nodes, elems, u, history, crack, mp_states, bond_states, rebar_segs, dofs}
+        If False (default), return tuple (backward compatible)
     """
 
     # Use mesh from model if provided (avoids re-meshing in solver_interface)
@@ -933,8 +938,24 @@ def run_analysis_xfem(
                 f"total={ed['W_diss_total']:.3e}"
             )
 
-    if return_states:
+    # Return format selection
+    if return_bundle:
+        # Comprehensive bundle for postprocessing (FASE G)
+        return {
+            'nodes': nodes,
+            'elems': elems,
+            'u': q_n,
+            'history': np.asarray(results, dtype=float),
+            'crack': crack,
+            'mp_states': mp_states,
+            'bond_states': bond_states,
+            'rebar_segs': rebar_segs,
+            'dofs': dofs,
+            'coh_states': coh_states,
+        }
+    elif return_states:
         return nodes, elems, q_n, np.asarray(results, dtype=float), crack, mp_states
-    return nodes, elems, q_n, np.asarray(results, dtype=float), crack
+    else:
+        return nodes, elems, q_n, np.asarray(results, dtype=float), crack
 
 
