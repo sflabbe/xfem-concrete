@@ -559,8 +559,8 @@ def run_case_solver(
 
     if use_multicrack:
         print("  Using MULTICRACK solver (distributed cracking)")
-        # Call multicrack solver with full integration (FASE D)
-        nodes_out, elems_out, u, history, cracks_out = run_analysis_xfem_multicrack(
+        # Call multicrack solver with full integration (FASE D + BLOQUE 2)
+        bundle = run_analysis_xfem_multicrack(
             model=model,
             nx=nx,
             ny=ny,
@@ -572,23 +572,17 @@ def run_case_solver(
             u_targets=u_targets if is_cyclic else None,
             bc_spec=bc_spec,
             bond_law=bond_law,
+            return_bundle=True,  # BLOQUE 2: Get comprehensive bundle
         )
 
-        # Package results in bundle format (multicrack doesn't return bundle yet)
-        # TODO: Update multicrack to return bundle (similar to analysis_single)
-        bundle = {
-            'nodes': nodes_out,
-            'elems': elems_out,
-            'u': u,
-            'history': history,
-            'crack': cracks_out[0] if len(cracks_out) > 0 else None,  # Return first crack for compatibility
-            'cracks': cracks_out,  # Full crack list
-            'mp_states': None,  # Not returned by multicrack yet
-            'bond_states': None,  # Not returned by multicrack yet
-            'rebar_segs': rebar_segs,
-            'dofs': None,  # Not returned by multicrack yet
-            'coh_states': None,  # Not returned by multicrack yet
-        }
+        # Add compatibility fields for postprocessing
+        # Multicrack returns 'cracks' (list), but postprocess expects 'crack' (single)
+        if 'crack' not in bundle and 'cracks' in bundle and len(bundle['cracks']) > 0:
+            bundle['crack'] = bundle['cracks'][0]  # First crack for compatibility
+
+        # Multicrack returns 'bulk_states' but postprocess may expect 'mp_states'
+        if 'mp_states' not in bundle and 'bulk_states' in bundle:
+            bundle['mp_states'] = bundle['bulk_states']
 
     elif is_cyclic:
         print("  Using CYCLIC driver with single-crack (custom u_targets)")

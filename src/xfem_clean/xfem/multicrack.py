@@ -882,6 +882,7 @@ def run_analysis_xfem_multicrack(
     u_targets: Optional[np.ndarray] = None,
     bc_spec: Optional["BCSpec"] = None,
     bond_law: Optional[object] = None,
+    return_bundle: bool = False,
 ):
     """Run displacement-controlled analysis with multiple cracks.
 
@@ -897,6 +898,10 @@ def run_analysis_xfem_multicrack(
         Displacement trajectory (m). If None, uses linspace(0, umax, nsteps).
     bc_spec : BCSpec, optional
         Boundary condition specification. If None, defaults to 3PB beam BCs.
+    return_bundle : bool, optional
+        If True, return dict with comprehensive results for postprocessing:
+        {nodes, elems, u, history, cracks, bond_states, rebar_segs, dofs, coh_states, bulk_states}
+        If False (default), return tuple (backward compatible)
 
     crack_mode:
         - "option1": multiple flexural (mostly vertical) cracks only.
@@ -904,7 +909,9 @@ def run_analysis_xfem_multicrack(
 
     Returns
     -------
-    nodes, elems, q, results, cracks
+    nodes, elems, q, results, cracks (if return_bundle=False)
+    OR
+    dict (if return_bundle=True)
     """
     # Phase 2: CDP support enabled for multi-crack!
 
@@ -1511,9 +1518,8 @@ def run_analysis_xfem_multicrack(
                     q_n = q_loc
                     coh_states = coh_loc
                     bulk_states = bulk_loc
-                    # Bond-slip commit (FASE D): bond_updates is set during last assembly
-                    if bond_updates is not None and bond_states is not None:
-                        bond_states = bond_updates
+                    # Bond-slip commit (FASE D): bond_states are already committed via bond_comm in stack
+                    # (bond_updates is set during assembly but not available in this scope)
 
                     # Extract reaction force (FASE D: bc_spec support)
                     if bc_spec is not None and bc_spec.reaction_dofs:
@@ -1549,4 +1555,21 @@ def run_analysis_xfem_multicrack(
             stack.append((lvl+1, um, ub, q_start.copy(), coh_comm.copy(), bulk_comm.copy(), bond_copy))
             stack.append((lvl+1, ua, um, q_start.copy(), coh_comm.copy(), bulk_comm.copy(), bond_copy))
 
-    return nodes, elems, q_n, results, cracks
+    # Return format selection (BLOQUE 2: ResultBundle)
+    if return_bundle:
+        # Comprehensive bundle for postprocessing (compatible with postprocess_comprehensive.py)
+        return {
+            'nodes': nodes,
+            'elems': elems,
+            'u': q_n,
+            'history': np.array(results),  # List of dicts, keep as object array
+            'cracks': cracks,
+            'bond_states': bond_states,
+            'rebar_segs': rebar_segs,
+            'dofs': dofs,
+            'coh_states': coh_states,
+            'bulk_states': bulk_states,
+        }
+    else:
+        # Backward compatible tuple return
+        return nodes, elems, q_n, results, cracks

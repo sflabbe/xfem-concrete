@@ -1364,6 +1364,7 @@ def assemble_bond_slip(
             bond_law=bond_law,
             bond_states=bond_states,
             steel_EA=steel_EA,
+            perimeter=perimeter,  # Pass computed perimeter
         )
 
     return f_bond, K_bond, bond_states_new
@@ -1390,6 +1391,7 @@ def _bond_slip_assembly_python(
     bond_law: BondSlipModelCode2010,
     bond_states: BondSlipStateArrays,
     steel_EA: float = 0.0,
+    perimeter: float = None,
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Pure Python fallback for bond-slip assembly (for debugging).
 
@@ -1405,7 +1407,9 @@ def _bond_slip_assembly_python(
     data = []
     s_current = np.zeros(n_seg, dtype=float)
 
-    perimeter = math.pi * bond_law.d_bar
+    # Use provided perimeter or compute from bond_law.d_bar
+    if perimeter is None:
+        perimeter = math.pi * bond_law.d_bar
 
     for i in range(n_seg):
         # Extract segment data
