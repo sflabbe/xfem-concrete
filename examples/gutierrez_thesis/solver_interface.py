@@ -278,7 +278,10 @@ def run_case_solver(
     if case.subdomains:
         # Create mesh first (needed for subdomain assignment)
         nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
-        subdomain_mgr = build_subdomain_manager_from_config(nodes, elems, case.subdomains)
+        # Note: nodes are in m, subdomain ranges in case are in mm → convert with 1e-3
+        subdomain_mgr = build_subdomain_manager_from_config(
+            nodes, elems, case.subdomains, unit_conversion=1e-3
+        )
         print(f"Subdomain manager created: {len(case.subdomains)} subdomain(s)")
     else:
         nodes, elems = None, None

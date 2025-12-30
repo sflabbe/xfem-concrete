@@ -17,6 +17,11 @@ from typing import Optional, Dict, Callable
 
 # Import case factories
 from examples.gutierrez_thesis.cases.case_01_pullout_lettow import create_case_01
+from examples.gutierrez_thesis.cases.case_02_sspot_frp import create_case_02
+from examples.gutierrez_thesis.cases.case_03_tensile_stn12 import create_case_03
+from examples.gutierrez_thesis.cases.case_04_beam_3pb_t5a1 import create_case_04
+from examples.gutierrez_thesis.cases.case_05_wall_c1_cyclic import create_case_05
+from examples.gutierrez_thesis.cases.case_06_fibre_tensile import create_case_06
 
 
 # ============================================================================
@@ -25,18 +30,34 @@ from examples.gutierrez_thesis.cases.case_01_pullout_lettow import create_case_0
 
 CASE_REGISTRY: Dict[str, Callable] = {
     "01_pullout_lettow": create_case_01,
-    # Add more cases as implemented
-    # "02_sspot_frp": create_case_02,
-    # "03_tensile_stn12": create_case_03,
-    # etc.
+    "02_sspot_frp": create_case_02,
+    "03_tensile_stn12": create_case_03,
+    "04_beam_3pb_t5a1": create_case_04,
+    "05_wall_c1_cyclic": create_case_05,
+    "06_fibre_tensile": create_case_06,
 }
 
 CASE_ALIASES = {
+    # Pullout
     "pullout": "01_pullout_lettow",
     "lettow": "01_pullout_lettow",
-    # Add aliases for convenience
-    # "sspot": "02_sspot_frp",
-    # "stn12": "03_tensile_stn12",
+    # FRP
+    "sspot": "02_sspot_frp",
+    "frp": "02_sspot_frp",
+    # Tensile
+    "stn12": "03_tensile_stn12",
+    "tensile": "03_tensile_stn12",
+    # Beams
+    "beam": "04_beam_3pb_t5a1",
+    "3pb": "04_beam_3pb_t5a1",
+    "t5a1": "04_beam_3pb_t5a1",
+    # Walls
+    "wall": "05_wall_c1_cyclic",
+    "c1": "05_wall_c1_cyclic",
+    "cyclic": "05_wall_c1_cyclic",
+    # Fibres
+    "fibre": "06_fibre_tensile",
+    "fiber": "06_fibre_tensile",
 }
 
 MESH_PRESETS = {
@@ -65,16 +86,12 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False):
     print(f"Description: {case_config.description}")
     print(f"{'='*70}\n")
 
-    # Apply mesh factor
+    # mesh_factor is now applied only in solver_interface.run_case_solver()
+    # to avoid double scaling (was being applied here AND in solver)
     if mesh_factor != 1.0:
-        case_config.geometry.n_elem_x = int(
-            case_config.geometry.n_elem_x * mesh_factor
-        )
-        case_config.geometry.n_elem_y = int(
-            case_config.geometry.n_elem_y * mesh_factor
-        )
-        print(f"Mesh adjusted: {case_config.geometry.n_elem_x} x "
-              f"{case_config.geometry.n_elem_y} elements")
+        nx = int(case_config.geometry.n_elem_x * mesh_factor)
+        ny = int(case_config.geometry.n_elem_y * mesh_factor)
+        print(f"Mesh adjusted: {nx} x {ny} elements (factor={mesh_factor})")
 
     # Print configuration summary
     print(f"Geometry: {case_config.geometry.length} x "
@@ -86,6 +103,21 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False):
     print(f"Fibres: {'Yes' if case_config.fibres else 'No'}")
     print(f"Loading: {case_config.loading.loading_type}")
     print(f"Output dir: {case_config.outputs.output_dir}\n")
+
+    # Apply CLI overrides to case_config
+    if hasattr(args, 'nsteps') and args.nsteps is not None:
+        if hasattr(case_config.loading, 'n_steps'):
+            case_config.loading.n_steps = args.nsteps
+            print(f"Override: n_steps = {args.nsteps}")
+
+    if hasattr(args, 'cycles') and args.cycles is not None:
+        if hasattr(case_config.loading, 'n_cycles_per_target'):
+            case_config.loading.n_cycles_per_target = args.cycles
+            print(f"Override: n_cycles_per_target = {args.cycles}")
+
+    if hasattr(args, 'output_dir') and args.output_dir is not None:
+        case_config.outputs.output_dir = args.output_dir
+        print(f"Override: output_dir = {args.output_dir}")
 
     if dry_run:
         print("DRY RUN - Solver not executed.\n")
@@ -101,13 +133,12 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False):
 
     try:
         from examples.gutierrez_thesis.solver_interface import run_case_solver
+        from examples.gutierrez_thesis.postprocess_comprehensive import postprocess_results
 
         results = run_case_solver(case_config, mesh_factor=mesh_factor)
 
         # Save results
         print("\nSaving results...")
-        # TODO: Implement post-processing and output saving (FASE G)
-        # For now, just save basic CSV
         import csv
         history_file = output_dir / "load_displacement.csv"
         with open(history_file, 'w', newline='') as f:
@@ -136,6 +167,9 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False):
                 ]
                 writer.writerow(row_out)
         print(f"  → {history_file}")
+
+        # Comprehensive postprocessing (FASE G)
+        postprocess_results(results, case_config, output_dir)
 
     except Exception as e:
         import traceback
@@ -227,6 +261,26 @@ Examples:
         action="store_true",
         help="Print configuration without running solver"
     )
+    parser.add_argument(
+        "--nsteps",
+        type=int,
+        help="Override number of steps"
+    )
+    parser.add_argument(
+        "--cycles",
+        type=int,
+        help="Override number of cycles per target (for cyclic cases)"
+    )
+    parser.add_argument(
+        "--mesh-factor",
+        type=float,
+        help="Override mesh factor (alternative to --mesh preset)"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        help="Override output directory"
+    )
 
     args = parser.parse_args()
 
@@ -241,8 +295,11 @@ Examples:
         print("\nError: --case is required (or use --list)")
         sys.exit(1)
 
-    # Get mesh factor
-    mesh_factor = MESH_PRESETS[args.mesh]
+    # Get mesh factor (CLI override takes precedence)
+    if args.mesh_factor is not None:
+        mesh_factor = args.mesh_factor
+    else:
+        mesh_factor = MESH_PRESETS[args.mesh]
 
     # Run cases
     if args.case.lower() == "all":
