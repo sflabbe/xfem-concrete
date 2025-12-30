@@ -107,13 +107,12 @@ def test_case_01_pullout_coarse():
         print(f"    ✓ All history finite (no NaNs)")
 
         print("✅ Case 01 Simple beam: PASS")
-        return True
 
     except Exception as e:
         print(f"❌ Test failed: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise  # Let pytest capture the failure
 
 
 def test_case_03_tensile_coarse():
@@ -199,13 +198,12 @@ def test_case_03_tensile_coarse():
         print(f"    ✓ Cracks: {n_active} active (might be 0 if ft too high)")
 
         print("✅ Case 03 Tensile: PASS")
-        return True
 
     except Exception as e:
         print(f"❌ Test failed: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise  # Let pytest capture the failure
 
 
 def test_case_04_beam_coarse():
@@ -283,13 +281,12 @@ def test_case_04_beam_coarse():
         print(f"    ✓ All history finite (no NaNs)")
 
         print("✅ Case 04 Beam: PASS")
-        return True
 
     except Exception as e:
         print(f"❌ Test failed: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise  # Let pytest capture the failure
 
 
 def test_case_05_wall_coarse():
@@ -387,13 +384,12 @@ def test_case_05_wall_coarse():
             print(f"    ⚠️  No clear load reversal (amplitude might be too small)")
 
         print("✅ Case 05 Wall: PASS")
-        return True
 
     except Exception as e:
         print(f"❌ Test failed: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        raise  # Let pytest capture the failure
 
 
 def main():
