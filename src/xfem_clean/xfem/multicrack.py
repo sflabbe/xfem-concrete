@@ -347,6 +347,7 @@ def assemble_xfem_system_multi(
     bond_states_comm: Optional[object] = None,
     enable_bond_slip: bool = False,
     steel_EA: float = 0.0,
+    perimeter_total: Optional[float] = None,  # Total perimeter for bond-slip
     # Subdomain support (FASE D)
     subdomain_mgr: Optional[object] = None,
 ):
@@ -736,6 +737,21 @@ def assemble_xfem_system_multi(
 
         from xfem_clean.bond_slip import assemble_bond_slip
 
+        # Generate segment_mask for bond-disabled regions (FASE D)
+        segment_mask = None
+        bond_disabled_x_range = getattr(model, 'bond_disabled_x_range', None)
+        if bond_disabled_x_range is not None and rebar_segs is not None:
+            # Mask segments in the disabled x-range
+            n_seg = rebar_segs.shape[0]
+            segment_mask = np.ones(n_seg, dtype=bool)
+            x_min, x_max = bond_disabled_x_range
+            for i in range(n_seg):
+                n1 = int(rebar_segs[i, 0])
+                n2 = int(rebar_segs[i, 1])
+                x_mid = 0.5 * (nodes[n1, 0] + nodes[n2, 0])
+                if x_min <= x_mid <= x_max:
+                    segment_mask[i] = False  # Disable bond in this segment
+
         f_bond, K_bond, bond_updates = assemble_bond_slip(
             u_total=q,
             steel_segments=rebar_segs,
@@ -745,6 +761,8 @@ def assemble_xfem_system_multi(
             steel_dof_map=dofs.steel,
             steel_EA=steel_EA,
             use_numba=use_numba,
+            perimeter=perimeter_total,  # Pass explicit perimeter (FASE D)
+            segment_mask=segment_mask,  # Pass segment mask (FASE D)
         )
 
         # Add bond-slip contribution to global system
@@ -863,6 +881,7 @@ def run_analysis_xfem_multicrack(
     elems: Optional[np.ndarray] = None,
     u_targets: Optional[np.ndarray] = None,
     bc_spec: Optional["BCSpec"] = None,
+    bond_law: Optional[object] = None,
 ):
     """Run displacement-controlled analysis with multiple cracks.
 
@@ -954,22 +973,42 @@ def run_analysis_xfem_multicrack(
         pass
 
     # Bond-slip configuration (FASE D)
+    # Use external bond_law if provided, otherwise create default
     enable_bond_slip = bool(getattr(model, "enable_bond_slip", False))
-    bond_law = None
     bond_states = None
     steel_EA = 0.0
+    perimeter_total = None  # Perimeter for bond-slip (FASE D)
 
     if enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
-        from xfem_clean.bond_slip import BondSlipStateArrays, BondSlipModelCode2010
+        from xfem_clean.bond_slip import BondSlipStateArrays
 
         n_seg = rebar_segs.shape[0]
         bond_states = BondSlipStateArrays.zeros(n_seg)
-        bond_law = BondSlipModelCode2010(
-            f_cm=model.fc,
-            d_bar=model.rebar_diameter,
-            condition=getattr(model, "bond_condition", "good"),
-        )
+
+        # Use bond_law from parameter (passed from solver_interface)
+        if bond_law is None:
+            # Fallback: create default bond law (for backward compatibility)
+            from xfem_clean.bond_slip import BondSlipModelCode2010
+            bond_law = BondSlipModelCode2010(
+                f_cm=model.fc,
+                d_bar=model.rebar_diameter,
+                condition=getattr(model, "bond_condition", "good"),
+            )
+            print("WARNING: Using default BondSlipModelCode2010. Pass bond_law explicitly.")
+
         steel_EA = getattr(model, "steel_EA_min", model.steel_E * model.steel_A_total) if model.steel_A_total > 0 else 1e3
+
+        # Compute perimeter_total from rebar geometry (FASE D)
+        # perimeter = (n_bars * π * d_bar) for each layer, summed
+        d_bar = getattr(model, "rebar_diameter", 0.012)  # Default 12mm
+        # For simplicity, assume all bars have same diameter (can be refined)
+        # If model has steel_A_total, infer n_bars from A_total / (π*(d/2)^2)
+        A_bar = np.pi * (d_bar / 2.0) ** 2
+        if model.steel_A_total > 0 and A_bar > 0:
+            n_bars_total = model.steel_A_total / A_bar
+            perimeter_total = n_bars_total * np.pi * d_bar
+        else:
+            perimeter_total = np.pi * d_bar  # Default: 1 bar
 
     # Subdomain manager (FASE D)
     subdomain_mgr = getattr(model, 'subdomain_mgr', None)
@@ -1146,6 +1185,7 @@ def run_analysis_xfem_multicrack(
                 bond_states_comm=bond_states,
                 enable_bond_slip=enable_bond_slip,
                 steel_EA=steel_EA,
+                perimeter_total=perimeter_total,  # FASE D
                 # Subdomain support (FASE D)
                 subdomain_mgr=subdomain_mgr,
             )
@@ -1236,6 +1276,7 @@ def run_analysis_xfem_multicrack(
                         bond_states_comm=bond_states,
                         enable_bond_slip=enable_bond_slip,
                         steel_EA=steel_EA,
+                        perimeter_total=perimeter_total,  # FASE D
                         # Subdomain support (FASE D)
                         subdomain_mgr=subdomain_mgr,
                     )
