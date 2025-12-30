@@ -53,6 +53,80 @@ def prepare_rebar_segments(nodes: np.ndarray, cover: float):
     return np.array(segs, dtype=float)
 
 
+def prepare_edge_segments(
+    nodes: np.ndarray,
+    y_target: float,
+    x_min: float = None,
+    x_max: float = None,
+    tol: float = 1e-6
+):
+    """
+    Prepare segments along an edge at y=y_target (for FRP sheet or similar).
+
+    Returns a dense array segs[ns,5] with columns:
+      [n1, n2, L0, cx, cy]
+
+    Parameters
+    ----------
+    nodes : np.ndarray
+        Node coordinates [nnode, 2] in m
+    y_target : float
+        Target y-coordinate (m)
+    x_min : float, optional
+        Minimum x-coordinate (m). If None, use domain min.
+    x_max : float, optional
+        Maximum x-coordinate (m). If None, use domain max.
+    tol : float
+        Tolerance for y-coordinate matching (m)
+
+    Returns
+    -------
+    segs : np.ndarray
+        Segment array [n_seg, 5]: [n1, n2, L0, cx, cy]
+    node_ids_sorted : np.ndarray
+        Sorted node IDs along the edge
+    """
+    # Find nodes at y=y_target
+    edge_mask = np.isclose(nodes[:, 1], y_target, atol=tol)
+    edge_nodes = np.where(edge_mask)[0]
+
+    if len(edge_nodes) == 0:
+        return np.zeros((0, 5), dtype=float), np.array([], dtype=int)
+
+    # Filter by x range if specified
+    if x_min is not None:
+        edge_nodes = edge_nodes[nodes[edge_nodes, 0] >= x_min - tol]
+    if x_max is not None:
+        edge_nodes = edge_nodes[nodes[edge_nodes, 0] <= x_max + tol]
+
+    if len(edge_nodes) == 0:
+        return np.zeros((0, 5), dtype=float), np.array([], dtype=int)
+
+    # Sort by x-coordinate
+    edge_nodes = edge_nodes[np.argsort(nodes[edge_nodes, 0])]
+
+    # Build segments
+    segs = []
+    for i in range(len(edge_nodes) - 1):
+        n1 = int(edge_nodes[i])
+        n2 = int(edge_nodes[i + 1])
+        x1, y1 = nodes[n1]
+        x2, y2 = nodes[n2]
+        dx = float(x2 - x1)
+        dy = float(y2 - y1)
+        L0 = math.sqrt(dx * dx + dy * dy)
+        if L0 < 1e-12:
+            continue
+        cx = dx / L0
+        cy = dy / L0
+        segs.append((float(n1), float(n2), float(L0), float(cx), float(cy)))
+
+    if len(segs) == 0:
+        return np.zeros((0, 5), dtype=float), edge_nodes
+
+    return np.array(segs, dtype=float), edge_nodes
+
+
 
 
 def steel_bilinear_sigma_tangent(eps: float, E: float, fy: float, Eh: float, fu: float):

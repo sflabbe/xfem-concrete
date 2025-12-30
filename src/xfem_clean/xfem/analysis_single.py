@@ -52,11 +52,15 @@ class BCSpec:
         Scale factor for prescribed displacement (positive or negative)
     reaction_dofs : List[int]
         DOFs to measure reaction forces
+    nodal_forces : Dict[int, float], optional
+        External nodal forces (e.g., axial load for wall cases)
+        Format: {dof: force_value}
     """
     fixed_dofs: Dict[int, float]
     prescribed_dofs: List[int]
     prescribed_scale: float = 1.0
     reaction_dofs: Optional[List[int]] = None
+    nodal_forces: Optional[Dict[int, float]] = None
 
 
 def run_analysis_xfem(

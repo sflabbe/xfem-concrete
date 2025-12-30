@@ -683,6 +683,27 @@ def assemble_xfem_system_multi(
                     else:
                         coh_updates[key] = st_new
 
+                # Fibre bridging contribution (BLOQUE 6)
+                if hasattr(model, 'fibre_bridging_cfg') and model.fibre_bridging_cfg is not None:
+                    # Import here to avoid circular dependency
+                    from xfem_clean.fibre_bridging import fibre_traction_tangent
+
+                    # Estimate delta_l (patch length represented by this cohesive point)
+                    # Approximate as segment length (could be refined)
+                    delta_l = seg_len
+
+                    # Compute fibre contribution (uses crack opening delta_n)
+                    t_fibre, k_fibre = fibre_traction_tangent(
+                        w_n=delta_n,  # Crack opening (m)
+                        delta_l=delta_l,  # Patch length (m)
+                        cfg=model.fibre_bridging_cfg,
+                        rng=None,  # Will use cfg.random_seed
+                    )
+
+                    # Add to cohesive traction and tangent
+                    t_n += t_fibre
+                    dtn_dd += k_fibre
+
                 # cohesive force vector in global dofs
                 # f = J^T * (t_n * n)
                 tr_vec = t_n * n
@@ -1006,16 +1027,20 @@ def run_analysis_xfem_multicrack(
         steel_EA = getattr(model, "steel_EA_min", model.steel_E * model.steel_A_total) if model.steel_A_total > 0 else 1e3
 
         # Compute perimeter_total from rebar geometry (FASE D)
-        # perimeter = (n_bars * π * d_bar) for each layer, summed
-        d_bar = getattr(model, "rebar_diameter", 0.012)  # Default 12mm
-        # For simplicity, assume all bars have same diameter (can be refined)
-        # If model has steel_A_total, infer n_bars from A_total / (π*(d/2)^2)
-        A_bar = np.pi * (d_bar / 2.0) ** 2
-        if model.steel_A_total > 0 and A_bar > 0:
-            n_bars_total = model.steel_A_total / A_bar
-            perimeter_total = n_bars_total * np.pi * d_bar
+        # Check for override (e.g., FRP sheet with non-circular perimeter)
+        if hasattr(model, 'bond_perimeter_override') and model.bond_perimeter_override is not None:
+            perimeter_total = model.bond_perimeter_override
         else:
-            perimeter_total = np.pi * d_bar  # Default: 1 bar
+            # perimeter = (n_bars * π * d_bar) for each layer, summed
+            d_bar = getattr(model, "rebar_diameter", 0.012)  # Default 12mm
+            # For simplicity, assume all bars have same diameter (can be refined)
+            # If model has steel_A_total, infer n_bars from A_total / (π*(d/2)^2)
+            A_bar = np.pi * (d_bar / 2.0) ** 2
+            if model.steel_A_total > 0 and A_bar > 0:
+                n_bars_total = model.steel_A_total / A_bar
+                perimeter_total = n_bars_total * np.pi * d_bar
+            else:
+                perimeter_total = np.pi * d_bar  # Default: 1 bar
 
     # Subdomain manager (FASE D)
     subdomain_mgr = getattr(model, 'subdomain_mgr', None)
@@ -1196,6 +1221,12 @@ def run_analysis_xfem_multicrack(
                 # Subdomain support (FASE D)
                 subdomain_mgr=subdomain_mgr,
             )
+
+            # Apply nodal forces from bc_spec (e.g., axial load for walls)
+            if bc_spec is not None and bc_spec.nodal_forces is not None:
+                for dof, force_val in bc_spec.nodal_forces.items():
+                    fext[dof] += force_val
+
             R = fint - fext
             free, K_ff, r_f, _ = apply_dirichlet(K, R, fixed_step, q)
             rhs = -r_f
