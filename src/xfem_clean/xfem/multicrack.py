@@ -1006,16 +1006,20 @@ def run_analysis_xfem_multicrack(
         steel_EA = getattr(model, "steel_EA_min", model.steel_E * model.steel_A_total) if model.steel_A_total > 0 else 1e3
 
         # Compute perimeter_total from rebar geometry (FASE D)
-        # perimeter = (n_bars * π * d_bar) for each layer, summed
-        d_bar = getattr(model, "rebar_diameter", 0.012)  # Default 12mm
-        # For simplicity, assume all bars have same diameter (can be refined)
-        # If model has steel_A_total, infer n_bars from A_total / (π*(d/2)^2)
-        A_bar = np.pi * (d_bar / 2.0) ** 2
-        if model.steel_A_total > 0 and A_bar > 0:
-            n_bars_total = model.steel_A_total / A_bar
-            perimeter_total = n_bars_total * np.pi * d_bar
+        # Check for override (e.g., FRP sheet with non-circular perimeter)
+        if hasattr(model, 'bond_perimeter_override') and model.bond_perimeter_override is not None:
+            perimeter_total = model.bond_perimeter_override
         else:
-            perimeter_total = np.pi * d_bar  # Default: 1 bar
+            # perimeter = (n_bars * π * d_bar) for each layer, summed
+            d_bar = getattr(model, "rebar_diameter", 0.012)  # Default 12mm
+            # For simplicity, assume all bars have same diameter (can be refined)
+            # If model has steel_A_total, infer n_bars from A_total / (π*(d/2)^2)
+            A_bar = np.pi * (d_bar / 2.0) ** 2
+            if model.steel_A_total > 0 and A_bar > 0:
+                n_bars_total = model.steel_A_total / A_bar
+                perimeter_total = n_bars_total * np.pi * d_bar
+            else:
+                perimeter_total = np.pi * d_bar  # Default: 1 bar
 
     # Subdomain manager (FASE D)
     subdomain_mgr = getattr(model, 'subdomain_mgr', None)

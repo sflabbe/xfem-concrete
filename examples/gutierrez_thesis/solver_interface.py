@@ -181,6 +181,52 @@ def build_bcs_from_case(
         # Positive scale for pullout (pull in +x direction)
         prescribed_scale = 1.0
 
+    elif "frp" in case_name or "sspot" in case_name:
+        # FRP SHEET TEST (SSPOT - Single Shear Push-Off Test):
+        # - Fix bottom edge (y=0): uy=0 for all nodes
+        # - Fix ux=0 for left bottom corner (prevent rigid body)
+        # - Prescribe displacement on FRP sheet DOFs at loaded end (x≈L)
+
+        # Find bottom nodes (y ≈ 0)
+        y_tol = 1e-6
+        bottom_nodes = np.where(np.isclose(nodes[:, 1], 0.0, atol=y_tol))[0]
+
+        # Fix uy=0 for all bottom nodes (concrete)
+        for n in bottom_nodes:
+            fixed_dofs[2 * n + 1] = 0.0  # uy = 0
+
+        # Fix ux=0 for leftmost bottom node (prevent rigid body)
+        if len(bottom_nodes) > 0:
+            left_bottom = bottom_nodes[np.argmin(nodes[bottom_nodes, 0])]
+            fixed_dofs[2 * left_bottom] = 0.0  # ux = 0
+
+        # Prescribe displacement on FRP sheet DOFs at loaded end
+        # FRP sheet is at y=0 (bottom edge), loaded at x≈L (right edge)
+        L = model.L
+        load_halfwidth = case.loading.load_halfwidth * 1e-3  # mm → m
+
+        # Find nodes at bottom edge near right end
+        if hasattr(case.loading, 'load_x_center'):
+            load_x_center = case.loading.load_x_center * 1e-3
+        else:
+            load_x_center = L  # Right edge
+
+        # Find FRP nodes in load region
+        frp_load_nodes = []
+        for n in bottom_nodes:
+            x_n = nodes[n, 0]
+            if abs(x_n - load_x_center) <= load_halfwidth:
+                frp_load_nodes.append(n)
+
+        # Mark FRP DOFs for prescription (negative marker for steel DOFs)
+        for n in frp_load_nodes:
+            # FRP DOF marker: -(2*nnode + 2*node_id) for x-component
+            prescribed_dofs.append(-(2 * nnode + 2 * n))  # FRP ux
+            reaction_dofs.append(-(2 * nnode + 2 * n))
+
+        # Positive scale (pull in +x direction)
+        prescribed_scale = 1.0
+
     elif "wall" in case_name:
         # WALL TEST (RC wall under cyclic lateral loading):
         # - Fix base (y=0): uy=0 for all nodes, ux=0 for one corner node (prevent rigid body)
@@ -308,8 +354,9 @@ def case_config_to_xfem_model(case: CaseConfig) -> XFEMModel:
     Gf = case.concrete.G_f * 1e3  # N/mm → N/m
     fc = case.concrete.f_c * 1e6  # MPa → Pa
 
-    # Steel properties (use first rebar layer if available)
+    # Steel/FRP properties (rebar OR FRP sheet)
     if case.rebar_layers:
+        # Rebar case
         rebar_first = case.rebar_layers[0]
         steel_E = rebar_first.steel.E * 1e6  # MPa → Pa
         steel_fy = rebar_first.steel.f_y * 1e6  # MPa → Pa
@@ -324,7 +371,25 @@ def case_config_to_xfem_model(case: CaseConfig) -> XFEMModel:
 
         # Use first rebar diameter for bond-slip
         rebar_diameter = case.rebar_layers[0].diameter * 1e-3  # mm → m
+
+    elif case.frp_sheets:
+        # FRP sheet case: reuse "steel" DOFs for FRP
+        frp_sheet = case.frp_sheets[0]
+        steel_E = frp_sheet.E * 1e6  # MPa → Pa
+        steel_fy = steel_E * 0.01  # FRP doesn't yield, use high value
+        steel_fu = steel_E * 0.02
+        steel_Eh = 0.0  # No hardening for FRP (elastic-brittle)
+
+        # Compute FRP area
+        thickness_m = frp_sheet.thickness * 1e-3  # mm → m
+        width_m = frp_sheet.width * 1e-3  # mm → m
+        steel_A_total = thickness_m * width_m
+
+        # FRP doesn't have diameter; use dummy for backward compat
+        rebar_diameter = 0.001  # mm (will use explicit perimeter instead)
+
     else:
+        # No reinforcement
         steel_E = 200e9  # Default
         steel_fy = 500e6
         steel_fu = 600e6
@@ -341,8 +406,8 @@ def case_config_to_xfem_model(case: CaseConfig) -> XFEMModel:
     }
     bulk_material = bulk_material_map.get(case.concrete.model_type, "elastic")
 
-    # Bond-slip configuration
-    enable_bond_slip = len(case.rebar_layers) > 0
+    # Bond-slip configuration (rebar or FRP)
+    enable_bond_slip = len(case.rebar_layers) > 0 or len(case.frp_sheets) > 0
 
     # Characteristic length (element size)
     lch = L / case.geometry.n_elem_x  # Approximate
@@ -561,11 +626,24 @@ def run_case_solver(
         Gf=model.Gf,
     )
 
-    # Map bond law (if rebar present)
+    # Map bond law (rebar or FRP)
     bond_law = None
-    if case.rebar_layers:
-        # Use first rebar layer's bond law
+    bond_perimeter = None
+    bond_segment_mask = None
+    bond_segs = rebar_segs  # Default to rebar segments
+
+    if case.frp_sheets and hasattr(model, 'frp_segs'):
+        # FRP case: use FRP parameters
+        bond_law = model.frp_bond_law
+        bond_perimeter = model.frp_bond_perimeter
+        bond_segment_mask = model.frp_segment_mask
+        bond_segs = model.frp_segs
+    elif case.rebar_layers:
+        # Rebar case: use first rebar layer's bond law
         bond_law = map_bond_law(case.rebar_layers[0].bond_law)
+        # perimeter will be computed from bond_law.d_bar (legacy)
+        bond_perimeter = None
+        # segment_mask from bond_disabled_x_range (handled inside solver)
 
     # Create mesh (needed for subdomain manager and BCs)
     nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
@@ -588,15 +666,79 @@ def run_case_solver(
         x_min, x_max = case.rebar_layers[0].bond_disabled_x_range
         model.bond_disabled_x_range = (x_min * 1e-3, x_max * 1e-3)  # mm → m
 
-    # Prepare rebar segments for BC mapping
+    # Prepare rebar/FRP segments for BC mapping
     from xfem_clean.rebar import prepare_rebar_segments
     rebar_segs = prepare_rebar_segments(nodes, cover=model.cover) if case.rebar_layers else None
 
-    # Build boundary conditions from case configuration
+    # Build boundary conditions from case configuration (must happen before FRP setup to have correct nnode)
     bc_spec = build_bcs_from_case(case, nodes, model, rebar_segs=rebar_segs)
 
-    # TODO: Handle FRP sheets (FASE E)
-    # TODO: Handle fibres (FASE E)
+    # FRP sheets handling (BLOQUE 5)
+    frp_segs = None
+    frp_bond_perimeter = None
+    frp_segment_mask = None
+    frp_EA = None
+    if case.frp_sheets:
+        # FRP sheets: use first sheet (multi-sheet TODO for future)
+        frp_sheet = case.frp_sheets[0]
+
+        # Convert units
+        y_pos = frp_sheet.y_position * 1e-3  # mm → m
+        bonded_length = frp_sheet.bonded_length * 1e-3  # mm → m
+        L = model.L
+
+        # Determine bonded region (assume bonded at loaded end for SSPOT)
+        # For FRP: bonded region is typically at x ∈ [L - bonded_length, L]
+        x_bonded_min = L - bonded_length
+        x_bonded_max = L
+
+        # Generate FRP segments
+        from xfem_clean.rebar import prepare_edge_segments
+        frp_segs, frp_nodes = prepare_edge_segments(
+            nodes,
+            y_target=y_pos,
+            x_min=None,  # Include all segments, will mask unbonded later
+            x_max=None,
+            tol=1e-6,
+        )
+
+        if len(frp_segs) > 0:
+            # Compute FRP perimeter (sheet width, not circular)
+            frp_bond_perimeter = frp_sheet.width * 1e-3  # mm → m
+
+            # Compute FRP EA
+            thickness_m = frp_sheet.thickness * 1e-3  # mm → m
+            width_m = frp_sheet.width * 1e-3  # mm → m
+            E_frp = frp_sheet.E * 1e6  # MPa → Pa
+            A_frp = thickness_m * width_m
+            frp_EA = E_frp * A_frp
+
+            # Generate segment mask (disable bond in unbonded region)
+            frp_segment_mask = np.zeros(len(frp_segs), dtype=bool)
+            for i, seg in enumerate(frp_segs):
+                n1, n2 = int(seg[0]), int(seg[1])
+                cx_seg = 0.5 * (nodes[n1, 0] + nodes[n2, 0])  # Segment center x
+                # Mark as disabled (True) if outside bonded region
+                if cx_seg < x_bonded_min or cx_seg > x_bonded_max:
+                    frp_segment_mask[i] = True
+
+            # Map FRP bond law
+            bond_law = map_bond_law(frp_sheet.bond_law)
+
+            # Store in model for analysis
+            model.frp_segs = frp_segs
+            model.frp_bond_law = bond_law
+            model.frp_bond_perimeter = frp_bond_perimeter
+            model.frp_segment_mask = frp_segment_mask
+            model.frp_EA = frp_EA
+            # Override bond perimeter for FRP (used by multicrack)
+            model.bond_perimeter_override = frp_bond_perimeter
+
+            print(f"FRP sheet: {len(frp_segs)} segments, perimeter={frp_bond_perimeter*1e3:.2f} mm, EA={frp_EA:.2e} N")
+            print(f"  Bonded region: x ∈ [{x_bonded_min*1e3:.1f}, {x_bonded_max*1e3:.1f}] mm")
+            print(f"  Disabled segments: {np.sum(frp_segment_mask)}/{len(frp_segs)}")
+
+    # TODO: Handle fibres (BLOQUE 6)
 
     # Dispatch to appropriate solver
     print(f"Running solver: nx={nx}, ny={ny}, nsteps={nsteps}, umax={umax*1e3:.3f} mm")
