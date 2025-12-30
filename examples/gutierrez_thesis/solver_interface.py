@@ -93,6 +93,7 @@ def build_bcs_from_case(
     nodes: np.ndarray,
     model: XFEMModel,
     rebar_segs: Optional[np.ndarray] = None,
+    frp_nodes: Optional[np.ndarray] = None,
 ) -> BCSpec:
     """
     Build boundary condition specification from case configuration.
@@ -107,6 +108,8 @@ def build_bcs_from_case(
         XFEM model (for accessing steel DOF mapping)
     rebar_segs : np.ndarray, optional
         Rebar segments for bond-slip cases
+    frp_nodes : np.ndarray, optional
+        Node IDs that have FRP DOFs allocated (from prepare_edge_segments)
 
     Returns
     -------
@@ -212,8 +215,11 @@ def build_bcs_from_case(
             load_x_center = L  # Right edge
 
         # Find FRP nodes in load region
+        # Use frp_nodes if provided (contains only nodes with FRP DOFs allocated),
+        # otherwise fall back to bottom_nodes
+        candidate_nodes = frp_nodes if frp_nodes is not None and len(frp_nodes) > 0 else bottom_nodes
         frp_load_nodes = []
-        for n in bottom_nodes:
+        for n in candidate_nodes:
             x_n = nodes[n, 0]
             if abs(x_n - load_x_center) <= load_halfwidth:
                 frp_load_nodes.append(n)
@@ -694,11 +700,24 @@ def run_case_solver(
         model.bond_disabled_x_range = (x_min * 1e-3, x_max * 1e-3)  # mm → m
 
     # Prepare rebar/FRP segments for BC mapping
-    from xfem_clean.rebar import prepare_rebar_segments
+    from xfem_clean.rebar import prepare_rebar_segments, prepare_edge_segments
     rebar_segs = prepare_rebar_segments(nodes, cover=model.cover) if case.rebar_layers else None
 
-    # Build boundary conditions from case configuration (must happen before FRP setup to have correct nnode)
-    bc_spec = build_bcs_from_case(case, nodes, model, rebar_segs=rebar_segs)
+    # Pre-generate FRP nodes for BC mapping (needed before build_bcs_from_case)
+    frp_nodes_for_bc = None
+    if case.frp_sheets:
+        frp_sheet = case.frp_sheets[0]
+        y_pos = frp_sheet.y_position * 1e-3  # mm → m
+        _, frp_nodes_for_bc = prepare_edge_segments(
+            nodes,
+            y_target=y_pos,
+            x_min=None,
+            x_max=None,
+            tol=1e-6,
+        )
+
+    # Build boundary conditions from case configuration
+    bc_spec = build_bcs_from_case(case, nodes, model, rebar_segs=rebar_segs, frp_nodes=frp_nodes_for_bc)
 
     # FRP sheets handling (BLOQUE 5)
     frp_segs = None
@@ -719,8 +738,7 @@ def run_case_solver(
         x_bonded_min = L - bonded_length
         x_bonded_max = L
 
-        # Generate FRP segments
-        from xfem_clean.rebar import prepare_edge_segments
+        # Generate FRP segments (re-use y_pos from above)
         frp_segs, frp_nodes = prepare_edge_segments(
             nodes,
             y_target=y_pos,
