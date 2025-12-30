@@ -203,6 +203,7 @@ def build_subdomain_manager_from_config(
     nodes: np.ndarray,
     elems: np.ndarray,
     subdomains: List,
+    unit_conversion: float = 1e-3,  # Default: mm → m
 ) -> SubdomainManager:
     """
     Build SubdomainManager from case configuration.
@@ -210,11 +211,13 @@ def build_subdomain_manager_from_config(
     Parameters
     ----------
     nodes : np.ndarray
-        Node coordinates [nnode, 2]
+        Node coordinates [nnode, 2] in SI units (m)
     elems : np.ndarray
         Element connectivity [nelem, nnodes_per_elem]
     subdomains : List[SubdomainConfig]
         Subdomain configurations from case
+    unit_conversion : float
+        Conversion factor from config units to node units (default: 1e-3 for mm→m)
 
     Returns
     -------
@@ -234,12 +237,21 @@ def build_subdomain_manager_from_config(
             elem_ids = subdomain.element_indices
 
         elif subdomain.x_range is not None or subdomain.y_range is not None:
-            # Spatial region
-            x_min, x_max = subdomain.x_range if subdomain.x_range else (-1e30, 1e30)
-            y_min, y_max = subdomain.y_range if subdomain.y_range else (-1e30, 1e30)
+            # Spatial region (convert from config units to SI units)
+            if subdomain.x_range is not None:
+                x_min = subdomain.x_range[0] * unit_conversion
+                x_max = subdomain.x_range[1] * unit_conversion
+            else:
+                x_min, x_max = -1e30, 1e30
+
+            if subdomain.y_range is not None:
+                y_min = subdomain.y_range[0] * unit_conversion
+                y_max = subdomain.y_range[1] * unit_conversion
+            else:
+                y_min, y_max = -1e30, 1e30
 
             for e in range(nelem):
-                # Get element centroid
+                # Get element centroid (already in SI units)
                 elem_nodes = nodes[elems[e], :]
                 xc = np.mean(elem_nodes[:, 0])
                 yc = np.mean(elem_nodes[:, 1])
