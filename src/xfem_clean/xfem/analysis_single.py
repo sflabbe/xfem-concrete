@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import Dict, Tuple, Optional, Union
+from typing import Dict, Tuple, Optional, Union, List
+from dataclasses import dataclass
 
 import numpy as np
 import scipy.sparse.linalg as spla
@@ -36,6 +37,28 @@ from xfem_clean.xfem.state_arrays import (
 )
 
 
+@dataclass
+class BCSpec:
+    """
+    Boundary condition specification for XFEM analysis.
+
+    Attributes
+    ----------
+    fixed_dofs : Dict[int, float]
+        Fixed DOF values (e.g., {dof: value})
+    prescribed_dofs : List[int]
+        DOFs to prescribe displacement (for displacement control)
+    prescribed_scale : float
+        Scale factor for prescribed displacement (positive or negative)
+    reaction_dofs : List[int]
+        DOFs to measure reaction forces
+    """
+    fixed_dofs: Dict[int, float]
+    prescribed_dofs: List[int]
+    prescribed_scale: float = 1.0
+    reaction_dofs: Optional[List[int]] = None
+
+
 def run_analysis_xfem(
     model: XFEMModel,
     nx: int,
@@ -44,25 +67,48 @@ def run_analysis_xfem(
     umax: float,
     law: Optional[CohesiveLaw] = None,
     return_states: bool = False,
+    bc_spec: Optional[BCSpec] = None,
+    bond_law: Optional[Any] = None,
 ):
-    """Run the single-crack XFEM prototype (stable linear version + cohesive)."""
+    """Run the single-crack XFEM prototype (stable linear version + cohesive).
 
-    nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
+    Parameters
+    ----------
+    bc_spec : BCSpec, optional
+        Boundary condition specification. If None, defaults to 3-point bending:
+        - Fixed: left bottom (ux=0, uy=0) and right bottom (uy=0)
+        - Prescribed: top center nodes (uy=-umax)
+    """
+
+    # Use mesh from model if provided (avoids re-meshing in solver_interface)
+    if hasattr(model, '_nodes') and hasattr(model, '_elems'):
+        nodes = model._nodes
+        elems = model._elems
+    else:
+        nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
+
     nnode = nodes.shape[0]
 
-    left = int(np.argmin(nodes[:, 0]))
-    right = int(np.argmax(nodes[:, 0]))
-    fixed_base = {2 * left: 0.0, 2 * left + 1: 0.0, 2 * right + 1: 0.0}
+    # Default BCs: 3-point bending (for backward compatibility)
+    if bc_spec is None:
+        left = int(np.argmin(nodes[:, 0]))
+        right = int(np.argmax(nodes[:, 0]))
+        fixed_base = {2 * left: 0.0, 2 * left + 1: 0.0, 2 * right + 1: 0.0}
 
-    y_top = model.H
-    top_nodes = np.where(np.isclose(nodes[:, 1], y_top))[0]
-    dx = model.L / nx
-    dy = model.H / ny
-    load_halfwidth = model.load_halfwidth if (model.load_halfwidth and model.load_halfwidth > 0.0) else 2.0 * dx
-    load_nodes = top_nodes[np.where(np.abs(nodes[top_nodes, 0] - model.L / 2) <= load_halfwidth)[0]]
-    if len(load_nodes) == 0:
-        load_nodes = np.array([int(top_nodes[np.argmin(np.abs(nodes[top_nodes, 0] - model.L / 2))])], dtype=int)
-    load_dofs = [2 * n + 1 for n in load_nodes]
+        y_top = model.H
+        top_nodes = np.where(np.isclose(nodes[:, 1], y_top))[0]
+        dx = model.L / nx
+        dy = model.H / ny
+        load_halfwidth = model.load_halfwidth if (model.load_halfwidth and model.load_halfwidth > 0.0) else 2.0 * dx
+        load_nodes = top_nodes[np.where(np.abs(nodes[top_nodes, 0] - model.L / 2) <= load_halfwidth)[0]]
+        if len(load_nodes) == 0:
+            load_nodes = np.array([int(top_nodes[np.argmin(np.abs(nodes[top_nodes, 0] - model.L / 2))])], dtype=int)
+        load_dofs = [2 * n + 1 for n in load_nodes]
+    else:
+        # Use BCs from bc_spec
+        fixed_base = dict(bc_spec.fixed_dofs)
+        load_dofs = list(bc_spec.prescribed_dofs)
+        # NOTE: Negative DOFs mark steel nodes to be resolved after DOF manager is created
 
     rebar_segs = prepare_rebar_segments(nodes, cover=model.cover)
 
@@ -131,20 +177,25 @@ def run_analysis_xfem(
 
     # Bond-slip state initialization (Phase 2)
     bond_states = None
-    bond_law = None
     if model.enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
         from xfem_clean.bond_slip import BondSlipStateArrays, BondSlipModelCode2010
 
         n_seg = rebar_segs.shape[0]
         bond_states = BondSlipStateArrays.zeros(n_seg)
-        bond_law = BondSlipModelCode2010(
-            f_cm=model.fc,
-            d_bar=model.rebar_diameter,
-            condition=model.bond_condition,
-        )
+
+        # Use bond_law from parameter if provided, otherwise create default
+        if bond_law is None:
+            bond_law = BondSlipModelCode2010(
+                f_cm=model.fc,
+                d_bar=model.rebar_diameter,
+                condition=model.bond_condition,
+            )
 
     # Subdomain manager (Phase C - thesis cases)
     subdomain_mgr = getattr(model, 'subdomain_mgr', None)
+
+    # Bond-disabled x-range (for pullout empty elements)
+    bond_disabled_x_range = getattr(model, 'bond_disabled_x_range', None)
 
     def _compute_global_dissipation(
         aux: Dict,
@@ -234,6 +285,60 @@ def run_analysis_xfem(
             steel_nodes=steel_nodes,
         )
 
+    def _resolve_steel_dofs_in_bc_spec(dofs_obj: XFEMDofs):
+        """
+        Resolve negative DOF markers in bc_spec to actual steel DOFs.
+
+        Modifies load_dofs and fixed_base to replace negative markers
+        with actual steel DOFs from dofs_obj.
+        """
+        nonlocal load_dofs, fixed_base
+
+        if bc_spec is None:
+            return
+
+        # Check if we have steel DOFs to resolve
+        if dofs_obj.steel is None:
+            return
+
+        # Resolve prescribed_dofs (load_dofs)
+        resolved_load_dofs = []
+        for dof_marker in bc_spec.prescribed_dofs:
+            if dof_marker < 0:
+                # Negative marker: -(2*nnode + node_id * 2)
+                # Extract node_id
+                node_id = -(dof_marker + 2 * nnode) // 2
+                component = 0  # ux for pullout
+
+                if node_id >= 0 and node_id < nnode:
+                    steel_dof = dofs_obj.steel[node_id, component]
+                    if steel_dof >= 0:
+                        resolved_load_dofs.append(steel_dof)
+                    else:
+                        print(f"WARNING: Steel DOF for node {node_id} not allocated")
+            else:
+                # Positive: already a concrete DOF
+                resolved_load_dofs.append(dof_marker)
+
+        load_dofs = resolved_load_dofs
+
+        # Resolve reaction_dofs (if needed)
+        if bc_spec.reaction_dofs:
+            resolved_reaction_dofs = []
+            for dof_marker in bc_spec.reaction_dofs:
+                if dof_marker < 0:
+                    node_id = -(dof_marker + 2 * nnode) // 2
+                    component = 0
+
+                    if node_id >= 0 and node_id < nnode:
+                        steel_dof = dofs_obj.steel[node_id, component]
+                        if steel_dof >= 0:
+                            resolved_reaction_dofs.append(steel_dof)
+                else:
+                    resolved_reaction_dofs.append(dof_marker)
+
+            bc_spec.reaction_dofs = resolved_reaction_dofs
+
     def _tip_patch() -> Tuple[float, float, float, float]:
         r = float(model.tip_enr_radius)
         if r <= 0.0:
@@ -273,8 +378,10 @@ def run_analysis_xfem(
                         # Bond-slip: DO NOT fix steel DOFs - they should be free to slip!
                         # Steel is coupled to concrete through bond-slip interface only
 
+            # Apply prescribed displacement with scale factor from bc_spec
+            prescribed_scale = bc_spec.prescribed_scale if bc_spec is not None else -1.0
             for dof in load_dofs:
-                fixed[int(dof)] = -float(u_target)
+                fixed[int(dof)] = prescribed_scale * float(u_target)
 
             for dof, val in fixed.items():
                 q[int(dof)] = float(val)
@@ -306,6 +413,8 @@ def run_analysis_xfem(
                 bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
                 enable_bond_slip=model.enable_bond_slip,
                 steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
+                rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
+                bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
                 subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
             )
             if model.debug_newton:
@@ -428,6 +537,8 @@ def run_analysis_xfem(
                         bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
                         enable_bond_slip=model.enable_bond_slip,
                         steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
+                        rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
+                        bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
                         subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
                     )
                     # Perfect bond rebar (only if bond-slip disabled)
@@ -552,6 +663,9 @@ def run_analysis_xfem(
 
                 if not crack.active:
                     dofs_local = _std_only_dofs()
+                    # Resolve steel DOFs from bc_spec markers (first time only)
+                    if bc_spec is not None and inner_updates == 0:
+                        _resolve_steel_dofs_in_bc_spec(dofs_local)
                 else:
                     if dofs is None:
                         yH = float(min(crack.tip_y, crack.stop_y))
@@ -559,6 +673,9 @@ def run_analysis_xfem(
                             nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch(),
                             rebar_segs=rebar_segs, enable_bond_slip=model.enable_bond_slip
                         )
+                        # Resolve steel DOFs from bc_spec markers (first time crack activates)
+                        if bc_spec is not None:
+                            _resolve_steel_dofs_in_bc_spec(dofs)
                     dofs_local = dofs
 
                 if q_guess is None:

@@ -18,7 +18,7 @@ from examples.gutierrez_thesis.case_config import (
 )
 
 from xfem_clean.xfem.model import XFEMModel
-from xfem_clean.xfem.analysis_single import run_analysis_xfem
+from xfem_clean.xfem.analysis_single import run_analysis_xfem, BCSpec
 from xfem_clean.cohesive_laws import CohesiveLaw
 from xfem_clean.bond_slip import (
     CustomBondSlipLaw,
@@ -81,6 +81,150 @@ def map_bond_law(bond_law_config: Any) -> Any:
 
     else:
         raise ValueError(f"Unknown bond law type: {type(bond_law_config)}")
+
+
+# =============================================================================
+# BOUNDARY CONDITIONS MAPPER
+# =============================================================================
+
+def build_bcs_from_case(
+    case: CaseConfig,
+    nodes: np.ndarray,
+    model: XFEMModel,
+    rebar_segs: Optional[np.ndarray] = None,
+) -> BCSpec:
+    """
+    Build boundary condition specification from case configuration.
+
+    Parameters
+    ----------
+    case : CaseConfig
+        Case configuration
+    nodes : np.ndarray
+        Node coordinates [nnode, 2] in SI units (m)
+    model : XFEMModel
+        XFEM model (for accessing steel DOF mapping)
+    rebar_segs : np.ndarray, optional
+        Rebar segments for bond-slip cases
+
+    Returns
+    -------
+    bc_spec : BCSpec
+        Boundary condition specification
+    """
+    nnode = nodes.shape[0]
+    fixed_dofs = {}
+    prescribed_dofs = []
+    prescribed_scale = 1.0
+    reaction_dofs = []
+
+    # Determine BC type from case geometry and loading
+    # For now, we implement pullout and beam (3PB) configurations
+    case_name = case.case_id.lower()
+
+    if "pullout" in case_name:
+        # PULLOUT TEST:
+        # - Fix right edge (x=L) concrete nodes: ux=0, uy=0
+        # - Prescribe displacement on steel DOFs at load element (left edge)
+        # - Measure reaction at steel DOFs
+
+        L = model.L
+        # Find nodes at right edge (x ≈ L)
+        right_nodes = np.where(np.isclose(nodes[:, 0], L, atol=1e-6))[0]
+
+        # Fix concrete DOFs at right edge
+        for n in right_nodes:
+            fixed_dofs[2 * n] = 0.0      # ux = 0
+            fixed_dofs[2 * n + 1] = 0.0  # uy = 0
+
+        # For steel DOFs, we need to identify them from the DOF manager
+        # Since we don't have DOFs built yet, we'll use a spatial criterion
+        # based on load_x_center from case.loading
+
+        # Load element region (from case.loading)
+        if hasattr(case.loading, 'load_x_center'):
+            load_x_center = case.loading.load_x_center * 1e-3  # mm → m
+            load_halfwidth = case.loading.load_halfwidth * 1e-3  # mm → m
+        else:
+            # Default to left edge
+            load_x_center = 0.0
+            load_halfwidth = 0.05  # 50 mm
+
+        # Find rebar nodes in load element region
+        if rebar_segs is not None and len(rebar_segs) > 0:
+            # Identify rebar nodes
+            rebar_nodes = set()
+            for seg in rebar_segs:
+                n1, n2 = int(seg[0]), int(seg[1])
+                rebar_nodes.add(n1)
+                rebar_nodes.add(n2)
+
+            # Filter rebar nodes in load region
+            load_rebar_nodes = []
+            for n in rebar_nodes:
+                x_n = nodes[n, 0]
+                if abs(x_n - load_x_center) <= load_halfwidth:
+                    load_rebar_nodes.append(n)
+
+            # Steel DOFs: [steel_dof_offset + 2*local_idx, ...]
+            # Since we don't have steel_dof_offset yet, store node indices
+            # and convert later in analysis driver
+            # WORKAROUND: store steel node indices as negative DOFs for now
+            # (will be converted in run_analysis_xfem after DOF manager is built)
+            for n in load_rebar_nodes:
+                # Mark steel DOFs for this node (to be resolved later)
+                # Use a marker: -(nnode + steel_node_id) to distinguish from concrete DOFs
+                prescribed_dofs.append(-(2 * nnode + n * 2))  # steel ux
+                reaction_dofs.append(-(2 * nnode + n * 2))
+
+        # Positive scale for pullout (pull in +x direction)
+        prescribed_scale = 1.0
+
+    else:
+        # DEFAULT: 3-point bending beam
+        # - Fix left bottom (ux=0, uy=0) and right bottom (uy=0)
+        # - Prescribe top center (uy=-umax)
+
+        left = int(np.argmin(nodes[:, 0]))
+        right = int(np.argmax(nodes[:, 0]))
+
+        fixed_dofs[2 * left] = 0.0      # ux = 0
+        fixed_dofs[2 * left + 1] = 0.0  # uy = 0
+        fixed_dofs[2 * right + 1] = 0.0  # uy = 0
+
+        # Top center nodes for prescribed displacement
+        y_top = model.H
+        top_nodes = np.where(np.isclose(nodes[:, 1], y_top))[0]
+
+        if hasattr(case.loading, 'load_x_center'):
+            load_x_center = case.loading.load_x_center * 1e-3
+        else:
+            load_x_center = model.L / 2.0
+
+        if hasattr(case.loading, 'load_halfwidth'):
+            load_halfwidth = case.loading.load_halfwidth * 1e-3
+        else:
+            dx = model.L / case.geometry.n_elem_x
+            load_halfwidth = 2.0 * dx
+
+        load_nodes = top_nodes[np.where(np.abs(nodes[top_nodes, 0] - load_x_center) <= load_halfwidth)[0]]
+
+        if len(load_nodes) == 0:
+            load_nodes = [int(top_nodes[np.argmin(np.abs(nodes[top_nodes, 0] - load_x_center))])]
+
+        for n in load_nodes:
+            prescribed_dofs.append(2 * n + 1)  # uy
+            reaction_dofs.append(2 * n + 1)
+
+        # Negative scale for beam (load downward)
+        prescribed_scale = -1.0
+
+    return BCSpec(
+        fixed_dofs=fixed_dofs,
+        prescribed_dofs=prescribed_dofs,
+        prescribed_scale=prescribed_scale,
+        reaction_dofs=reaction_dofs,
+    )
 
 
 # =============================================================================
@@ -273,18 +417,33 @@ def run_case_solver(
         # Use first rebar layer's bond law
         bond_law = map_bond_law(case.rebar_layers[0].bond_law)
 
+    # Create mesh (needed for subdomain manager and BCs)
+    nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
+
     # Build subdomain manager (FASE C)
     subdomain_mgr = None
     if case.subdomains:
-        # Create mesh first (needed for subdomain assignment)
-        nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
         # Note: nodes are in m, subdomain ranges in case are in mm → convert with 1e-3
         subdomain_mgr = build_subdomain_manager_from_config(
             nodes, elems, case.subdomains, unit_conversion=1e-3
         )
         print(f"Subdomain manager created: {len(case.subdomains)} subdomain(s)")
-    else:
-        nodes, elems = None, None
+
+    # Store subdomain_mgr in model for access during assembly
+    if subdomain_mgr is not None:
+        model.subdomain_mgr = subdomain_mgr
+
+    # Bond-disabled x-range (for pullout empty elements)
+    if case.rebar_layers and case.rebar_layers[0].bond_disabled_x_range is not None:
+        x_min, x_max = case.rebar_layers[0].bond_disabled_x_range
+        model.bond_disabled_x_range = (x_min * 1e-3, x_max * 1e-3)  # mm → m
+
+    # Prepare rebar segments for BC mapping
+    from xfem_clean.rebar import prepare_rebar_segments
+    rebar_segs = prepare_rebar_segments(nodes, cover=model.cover) if case.rebar_layers else None
+
+    # Build boundary conditions from case configuration
+    bc_spec = build_bcs_from_case(case, nodes, model, rebar_segs=rebar_segs)
 
     # TODO: Handle FRP sheets (FASE E)
     # TODO: Handle fibres (FASE E)
@@ -293,11 +452,11 @@ def run_case_solver(
     # Run solver
     print(f"Running solver: nx={nx}, ny={ny}, nsteps={nsteps}, umax={umax*1e3:.3f} mm")
 
-    # Note: run_analysis_xfem creates mesh internally if nodes/elems not passed
-    # We need to modify it to accept pre-created mesh and subdomain_mgr
-    # For now, we'll store subdomain_mgr in model for access during assembly
-    if subdomain_mgr is not None:
-        model.subdomain_mgr = subdomain_mgr
+    # Pass mesh and bc_spec to analysis
+    # NOTE: We pass nodes/elems manually to avoid re-creating mesh inside run_analysis_xfem
+    # The analysis driver will use these if provided, otherwise creates its own
+    model._nodes = nodes  # Store in model to pass to analysis
+    model._elems = elems
 
     nodes_out, elems_out, u, history, crack = run_analysis_xfem(
         model=model,
@@ -307,6 +466,8 @@ def run_case_solver(
         umax=umax,
         law=law,
         return_states=False,
+        bc_spec=bc_spec,
+        bond_law=bond_law,  # Pass mapped bond law from case config
     )
 
     # Package results

@@ -72,7 +72,7 @@ MESH_PRESETS = {
 # SOLVER INTERFACE
 # ============================================================================
 
-def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False):
+def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, cli_args=None):
     """
     Run a single case with the XFEM solver.
 
@@ -80,6 +80,7 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False):
         case_config: CaseConfig instance
         mesh_factor: Mesh refinement factor (1.0 = default)
         dry_run: If True, only print configuration without running
+        cli_args: Optional CLI arguments for overrides
     """
     print(f"\n{'='*70}")
     print(f"Running Case: {case_config.case_id}")
@@ -105,19 +106,19 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False):
     print(f"Output dir: {case_config.outputs.output_dir}\n")
 
     # Apply CLI overrides to case_config
-    if hasattr(args, 'nsteps') and args.nsteps is not None:
+    if cli_args and hasattr(cli_args, 'nsteps') and cli_args.nsteps is not None:
         if hasattr(case_config.loading, 'n_steps'):
-            case_config.loading.n_steps = args.nsteps
-            print(f"Override: n_steps = {args.nsteps}")
+            case_config.loading.n_steps = cli_args.nsteps
+            print(f"Override: n_steps = {cli_args.nsteps}")
 
-    if hasattr(args, 'cycles') and args.cycles is not None:
+    if cli_args and hasattr(cli_args, 'cycles') and cli_args.cycles is not None:
         if hasattr(case_config.loading, 'n_cycles_per_target'):
-            case_config.loading.n_cycles_per_target = args.cycles
-            print(f"Override: n_cycles_per_target = {args.cycles}")
+            case_config.loading.n_cycles_per_target = cli_args.cycles
+            print(f"Override: n_cycles_per_target = {cli_args.cycles}")
 
-    if hasattr(args, 'output_dir') and args.output_dir is not None:
-        case_config.outputs.output_dir = args.output_dir
-        print(f"Override: output_dir = {args.output_dir}")
+    if cli_args and hasattr(cli_args, 'output_dir') and cli_args.output_dir is not None:
+        case_config.outputs.output_dir = cli_args.output_dir
+        print(f"Override: output_dir = {cli_args.output_dir}")
 
     if dry_run:
         print("DRY RUN - Solver not executed.\n")
@@ -310,7 +311,7 @@ Examples:
 
         for case_id, factory in CASE_REGISTRY.items():
             case_config = factory()
-            run_case(case_config, mesh_factor, args.dry_run)
+            run_case(case_config, mesh_factor, args.dry_run, cli_args=args)
 
     else:
         # Run single case
@@ -320,7 +321,7 @@ Examples:
 
         factory = CASE_REGISTRY[case_id]
         case_config = factory()
-        run_case(case_config, mesh_factor, args.dry_run)
+        run_case(case_config, mesh_factor, args.dry_run, cli_args=args)
 
 
 if __name__ == "__main__":
