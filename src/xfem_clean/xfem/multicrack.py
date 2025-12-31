@@ -398,18 +398,28 @@ def assemble_xfem_system_multi(
     for e, conn in enumerate(elems):
         xe = np.array([_node_xy(nodes, i) for i in conn], dtype=float)
 
-        # Skip void elements (FASE D: subdomain support)
-        if subdomain_mgr is not None and subdomain_mgr.is_void(e):
-            continue
+        # Check if element is void (use penalty stiffness) - BLOQUE D
+        is_void_elem = subdomain_mgr is not None and subdomain_mgr.is_void(e)
 
-        # Get effective thickness (for rigid or void elements)
+        # Get effective material properties and thickness
         thickness_eff = thickness
+        C_eff = C  # Default: use full stiffness
         if subdomain_mgr is not None:
             thickness_eff = subdomain_mgr.get_effective_thickness(e, thickness)
 
-        # Skip if thickness is effectively zero
-        if thickness_eff < 1e-12:
-            continue
+        # BLOQUE D: Void elements - apply penalty stiffness to prevent singularity
+        # Instead of skipping, use very small stiffness to keep matrix non-singular
+        void_penalty_factor = 1e-9
+        if is_void_elem:
+            C_eff = C * void_penalty_factor  # Penalty stiffness (very small but non-zero)
+            if thickness_eff < 1e-12:
+                thickness_eff = thickness * void_penalty_factor  # Minimal thickness to avoid zero volume
+            # For Numba path: store penalty factor to scale material parameters
+            # (applied in the integration loop below)
+        else:
+            # Non-void element: skip only if thickness is effectively zero
+            if thickness_eff < 1e-12:
+                continue
 
         is_cut = False
         for crack in cracks:
@@ -485,6 +495,9 @@ def assemble_xfem_system_multi(
                         if int(bulk_kind) == 1:
                             E_mat = float(bulk_params[0])
                             nu_mat = float(bulk_params[1])
+                            # BLOQUE D: Apply penalty to E_mat for void elements
+                            if is_void_elem:
+                                E_mat *= void_penalty_factor
                             sig, Ct = elastic_integrate_plane_stress_numba(eps, E_mat, nu_mat, dt0, dc0)
                             eps_p6_new = eps_p6_old
                             ezz_new = ezz_old
@@ -498,6 +511,9 @@ def assemble_xfem_system_multi(
                             alpha = float(bulk_params[2])
                             k0 = float(bulk_params[3])
                             Hh = float(bulk_params[4])
+                            # BLOQUE D: Apply penalty to E_mat for void elements
+                            if is_void_elem:
+                                E_mat *= void_penalty_factor
                             sig, Ct, eps_p6_new, ezz_new, kappa_new, dW = dp_integrate_plane_stress_numba(
                                 eps, eps_p6_old, ezz_old, kappa_old, E_mat, nu_mat, alpha, k0, Hh
                             )
@@ -516,6 +532,9 @@ def assemble_xfem_system_multi(
                             Gf_t = float(bulk_params[7])
                             Gf_c = float(bulk_params[8])
                             lch = float(bulk_params[9])
+                            # BLOQUE D: Apply penalty to E_mat for void elements
+                            if is_void_elem:
+                                E_mat *= void_penalty_factor
                             sig, Ct, eps_p6_new, ezz_new, kappa_new, dt_new, dc_new, kt_new, kc_new, wpl_new, wft_new, wfc_new = cdp_integrate_plane_stress_numba(
                                 eps, eps_p6_old, ezz_old, kappa_old, dt0, dc0, kt0, kc0, wpl0, wft0, wfc0,
                                 E_mat, nu_mat, alpha, k0, Hh, ft, fc, Gf_t, Gf_c, lch
@@ -546,6 +565,12 @@ def assemble_xfem_system_multi(
                             )
                     elif bulk_states is not None and material is not None:
                         # Python material path (retrocompat or ConcreteCDPReal with tables)
+                        # BLOQUE D: Override material C for void elements
+                        C_orig = None
+                        if is_void_elem and hasattr(material, 'C'):
+                            C_orig = material.C.copy()
+                            material.C = C_eff
+
                         if use_bulk_arrays:
                             assert isinstance(bulk_states, BulkStateArrays)
                             mp0 = bulk_states.get_mp(e, ipid)
@@ -553,14 +578,19 @@ def assemble_xfem_system_multi(
                             mp0 = bulk_states.get((e, ipid), mp_default())
                         mp = mp0.copy_shallow()
                         sig, Ct = material.integrate(mp, eps)
+
+                        # BLOQUE D: Restore original material C
+                        if C_orig is not None:
+                            material.C = C_orig
                         if isinstance(bulk_updates, BulkStatePatch):
                             bulk_updates.add(e, ipid, mp)
                         else:
                             bulk_updates[(e, ipid)] = mp
                     else:
                         # Fallback: linear elastic (retrocompat)
-                        sig = C @ eps
-                        Ct = C
+                        # BLOQUE D: Use C_eff for void elements
+                        sig = C_eff @ eps
+                        Ct = C_eff
 
                     # store aux data for nonlocal averaging
                     aux_gp_pos.append((x_gp, y_gp))
