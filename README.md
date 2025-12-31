@@ -63,3 +63,120 @@ Notes:
 - `--bulk-material cdp` still uses the Python constitutive model (next phase).
 
 See `docs/ROADMAP_NUMBA.md` for the phased plan.
+
+## Validation & Calibration (Thesis Parity)
+
+This repository includes comprehensive validation tools to achieve **thesis parity** with experimental data:
+
+### 1. Quantitative Validation (P–δ Curve Comparison)
+
+Compare simulation results with experimental reference curves using RMSE, peak load error, and energy error metrics:
+
+```bash
+# Run validation tests (requires simulation outputs)
+pytest tests/test_validation_curves.py -v -m slow
+
+# Example: Validate T5A1 beam
+python -m examples.gutierrez_thesis.run --case t5a1 --mesh coarse
+pytest tests/test_validation_curves.py::test_validate_t5a1_coarse -v -s
+```
+
+**Tolerance thresholds:**
+- Peak load error: |ΔPmax| < 10%
+- Energy error: |ΔE| < 15%
+- RMSE: < 5% of peak load
+
+**Module:** `validation/compare_curves.py`
+
+### 2. Parametric Studies (Sensitivity Analysis)
+
+Perform parameter sweeps to study influence of material/geometric parameters:
+
+```bash
+# Sweep fracture energy Gf for T5A1 beam
+python -m examples.parametric.parametric_study \
+  --case t5a1 --param Gf --values 0.05,0.1,0.2 --mesh coarse
+
+# Sweep bond strength τmax for VVBS3 beam
+python -m examples.parametric.parametric_study \
+  --case vvbs3 --param tau_max --values 4.0,6.47,9.0 --plot
+
+# Available parameters: Gf, f_t, f_c, tau_max, s1, s2, n_bars, rho_fibre, etc.
+```
+
+**Output:** `outputs/parametric/<case>_<param>.csv` (table with Pmax, energy, ductility)
+
+**Module:** `examples/parametric/parametric_study.py`
+
+### 3. Bond Parameter Calibration (Experimental Fitting)
+
+Calibrate bond law parameters (τmax, s1, s2) by fitting to experimental P–δ curves:
+
+```bash
+# Calibrate VVBS3 FRP bond parameters
+python -m calibration.fit_bond_parameters \
+  --case vvbs3 \
+  --params tau_max,s1,s2 \
+  --init tau_max=6.47,s1=0.02,s2=0.25 \
+  --bounds 5-8,0.01-0.05,0.2-0.3 \
+  --method L-BFGS-B
+
+# Use global optimizer for robust fitting
+python -m calibration.fit_bond_parameters \
+  --case vvbs3 \
+  --params tau_max,s1 \
+  --method differential_evolution \
+  --max-iter 100
+```
+
+**Output:** `calibration/results_<case>.json` (optimal parameters, convergence metrics)
+
+**Module:** `calibration/fit_bond_parameters.py`
+
+### 4. Performance Benchmarks (Scaling Analysis)
+
+Measure runtime, memory, and energy residual across mesh sizes:
+
+```bash
+# Benchmark single case with multiple meshes
+python -m benchmarks.benchmark_scaling \
+  --case t5a1 --meshes coarse,medium,fine --plot
+
+# Benchmark all cases (fast meshes only)
+python -m benchmarks.benchmark_scaling \
+  --case all --meshes coarse,medium
+```
+
+**Output:** `benchmarks/scaling_summary.csv` (runtime, memory, energy residual)
+
+**Validation:** Energy residual < 1% (W_external ≈ W_total)
+
+**Module:** `benchmarks/benchmark_scaling.py`
+
+### Reference Data
+
+Experimental reference curves are located in `validation/reference_data/`:
+- `t5a1.csv` - Bosco T5A1 beam (Chapter 5)
+- `vvbs3.csv` - CFRP strengthened beam (Fig 5.30)
+- `sorelli.csv` - Fibre-reinforced beam (Chapter 6)
+
+These curves were digitized from thesis figures using WebPlotDigitizer.
+
+### Thesis Case Suite
+
+Run all 10 thesis cases:
+
+```bash
+# List available cases
+python -m examples.gutierrez_thesis.run --list
+
+# Run specific case
+python -m examples.gutierrez_thesis.run --case t5a1 --mesh medium
+python -m examples.gutierrez_thesis.run --case vvbs3 --mesh coarse
+python -m examples.gutierrez_thesis.run --case sorelli --mesh fine
+
+# Run all cases (coarse mesh for speed)
+python -m examples.gutierrez_thesis.run --case all --mesh coarse
+```
+
+See `docs/thesis_mapping.md` for detailed mapping between thesis sections and repository cases.

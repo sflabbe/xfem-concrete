@@ -17,3 +17,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 norecursedirs = ["examples", "docs", "outputs", "tests/tmp"]
+markers = [
+    "slow: marks tests as slow (run with pytest -m slow)",
+    "fast: marks tests as fast (default)",
+]
