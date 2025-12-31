@@ -1,0 +1,107 @@
+# Case 04a: Three-Point Bending Beam T5A1 (BOSCO)
+# Reference: Gutiérrez thesis Chapter 5, Fig. 5.17
+
+case_id: "04a_beam_3pb_t5a1_bosco"
+description: "3PB beam T5A1 with 4Ø12 bottom reinforcement"
+
+geometry:
+  length: 4000.0      # mm
+  height: 400.0       # mm
+  thickness: 200.0    # mm (out-of-plane)
+  n_elem_x: 80
+  n_elem_y: 16
+  element_type: "Q4"
+  notch_depth: null
+  notch_x: null
+  use_symmetry: false
+
+concrete:
+  E: 30000.0          # MPa
+  nu: 0.2
+  f_c: 32.0           # MPa (compressive strength)
+  f_t: 3.0            # MPa (tensile strength)
+  G_f: 0.100          # N/mm (fracture energy)
+  eps_cu: -0.0035     # Crushing strain
+  model_type: "cdp_full"
+
+loading:
+  loading_type: "monotonic"
+  max_displacement: 15.0   # mm (can override with --nsteps)
+  n_steps: 100
+  load_x_center: 2000.0    # mm (midspan)
+  load_halfwidth: 50.0     # mm
+
+outputs:
+  output_dir: "outputs/t5a1_bosco"
+  case_name: "t5a1"
+  save_load_displacement: true
+  save_crack_data: true
+  save_energy: true
+  save_crack_pattern: true
+  save_damage_field: true
+  save_deformed_shape: true
+  save_metrics: true
+  save_vtk: true
+  vtk_frequency: 10
+  compute_CTOD: false
+  compute_crack_widths: true
+  compute_slip_profiles: true
+  compute_bond_profiles: true
+  compute_steel_forces: true
+  compute_base_moment: false
+  ctod_node_pairs: null
+
+rebar_layers:
+  # Bottom rebar layer (4Ø12)
+  - diameter: 12.0       # mm
+    y_position: 35.0     # mm from bottom
+    n_bars: 4
+    orientation_deg: 0.0  # Horizontal
+    bond_disabled_x_range: null
+    steel:
+      E: 200000.0        # MPa
+      nu: 0.3
+      f_y: 500.0         # MPa
+      f_u: 600.0         # MPa
+      hardening_modulus: 2000.0  # MPa
+      f_ult: null
+    bond_law:
+      law_type: "ceb_fip"
+      s1: 1.0            # mm
+      s2: 2.0            # mm
+      s3: 12.0           # mm
+      tau_max: 12.0      # MPa
+      tau_f: 2.0         # MPa
+      alpha: 0.4
+
+  # Top rebar layer (2Ø10)
+  - diameter: 10.0       # mm
+    y_position: 355.0    # mm from bottom
+    n_bars: 2
+    orientation_deg: 0.0
+    bond_disabled_x_range: null
+    steel:
+      E: 200000.0
+      nu: 0.3
+      f_y: 500.0
+      f_u: 600.0
+      hardening_modulus: 2000.0
+      f_ult: null
+    bond_law:
+      law_type: "ceb_fip"
+      s1: 0.9
+      s2: 1.8
+      s3: 10.0
+      tau_max: 13.0
+      tau_f: 2.2
+      alpha: 0.4
+
+frp_sheets: []
+fibres: null
+subdomains: []
+
+# Solver parameters
+max_steps: 1000
+tolerance: 1.0e-6
+use_line_search: true
+use_substepping: true

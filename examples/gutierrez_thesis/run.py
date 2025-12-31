@@ -271,6 +271,11 @@ Examples:
         help="Case ID or alias (or 'all' to run all cases)"
     )
     parser.add_argument(
+        "--case-config",
+        type=str,
+        help="Path to YAML/JSON case configuration file (overrides --case)"
+    )
+    parser.add_argument(
         "--mesh",
         type=str,
         default="medium",
@@ -316,9 +321,9 @@ Examples:
         sys.exit(0)
 
     # Validate arguments
-    if not args.case:
+    if not args.case and not args.case_config:
         parser.print_help()
-        print("\nError: --case is required (or use --list)")
+        print("\nError: --case or --case-config is required (or use --list)")
         sys.exit(1)
 
     # Get mesh factor (CLI override takes precedence)
@@ -327,8 +332,30 @@ Examples:
     else:
         mesh_factor = MESH_PRESETS[args.mesh]
 
-    # Run cases
-    if args.case.lower() == "all":
+    # Load from config file if provided (takes precedence over --case)
+    if args.case_config:
+        from examples.gutierrez_thesis.case_config import CaseConfig
+        config_path = Path(args.case_config)
+
+        if not config_path.exists():
+            print(f"Error: Config file not found: {config_path}")
+            sys.exit(1)
+
+        print(f"Loading configuration from: {config_path}")
+
+        if config_path.suffix in ['.yaml', '.yml']:
+            case_config = CaseConfig.load_yaml(str(config_path))
+        elif config_path.suffix == '.json':
+            case_config = CaseConfig.load_json(str(config_path))
+        else:
+            print(f"Error: Unsupported config file format: {config_path.suffix}")
+            print("Supported formats: .yaml, .yml, .json")
+            sys.exit(1)
+
+        run_case(case_config, mesh_factor, args.dry_run, cli_args=args)
+
+    # Run cases from registry
+    elif args.case.lower() == "all":
         # Run all cases
         print(f"\n{'='*70}")
         print(f"Running ALL {len(CASE_REGISTRY)} cases with mesh={args.mesh}")
