@@ -1,0 +1,73 @@
+# Case 07: Four-Point Bending Beam (Jason 4PBT)
+# Reference: Gutiérrez thesis - Jason beam validation
+
+case_id: "07_beam_4pb_jason_4pbt"
+description: "4PB beam from Jason tests"
+
+geometry:
+  length: 2400.0      # mm
+  height: 200.0       # mm
+  thickness: 160.0    # mm
+  n_elem_x: 48
+  n_elem_y: 10
+  element_type: "Q4"
+  notch_depth: null
+  notch_x: null
+  use_symmetry: false
+
+concrete:
+  E: 32000.0          # MPa
+  nu: 0.2
+  f_c: 35.0           # MPa
+  f_t: 3.2            # MPa
+  G_f: 0.110          # N/mm
+  eps_cu: -0.0035
+  model_type: "cdp_full"
+
+loading:
+  loading_type: "monotonic"
+  max_displacement: 8.0    # mm
+  n_steps: 60
+  load_x_center: 1200.0    # mm (midspan)
+  load_halfwidth: 100.0    # mm (4PB loading span)
+
+outputs:
+  output_dir: "outputs/jason_4pbt"
+  case_name: "jason"
+  save_load_displacement: true
+  save_crack_data: true
+  save_energy: true
+  save_crack_pattern: true
+  save_damage_field: true
+  save_metrics: true
+
+rebar_layers:
+  # Bottom rebar (3Ø10)
+  - diameter: 10.0       # mm
+    y_position: 25.0     # mm from bottom
+    n_bars: 3
+    orientation_deg: 0.0
+    bond_disabled_x_range: null
+    steel:
+      E: 200000.0
+      nu: 0.3
+      f_y: 520.0
+      f_u: 620.0
+      hardening_modulus: 2000.0
+    bond_law:
+      law_type: "ceb_fip"
+      s1: 0.7
+      s2: 1.4
+      s3: 9.0
+      tau_max: 12.0
+      tau_f: 2.0
+      alpha: 0.4
+
+frp_sheets: []
+fibres: null
+subdomains: []
+
+max_steps: 600
+tolerance: 1.0e-6
+use_line_search: true
+use_substepping: true

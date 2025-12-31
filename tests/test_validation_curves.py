@@ -27,6 +27,7 @@ try:
         compute_error_metrics,
         generate_validation_report,
         save_validation_summary,
+        is_placeholder_data,
     )
     from examples.gutierrez_thesis.cases.case_04a_beam_3pb_t5a1_bosco import create_case_04a
     from examples.gutierrez_thesis.cases.case_08_beam_3pb_vvbs3_cfrp import create_case_08
@@ -45,6 +46,32 @@ TOLERANCES = {
     'energy_error_pct': 15.0,    # ± 15%
     'rmse_normalized_pct': 5.0,  # 5% of peak load
 }
+
+
+def check_placeholder_and_skip_if_needed(ref_df, case_name: str):
+    """
+    Check if reference data is placeholder and skip/xfail test if so.
+
+    Parameters
+    ----------
+    ref_df : pd.DataFrame
+        Reference curve dataframe
+    case_name : str
+        Case name for error messages
+
+    Raises
+    ------
+    pytest.xfail
+        If reference data is placeholder (with reason)
+    """
+    is_placeholder, reason = is_placeholder_data(ref_df)
+    if is_placeholder:
+        pytest.xfail(
+            f"Reference curve for '{case_name}' is PLACEHOLDER data.\n"
+            f"Reason: {reason}\n"
+            f"Real digitized experimental data needed for meaningful validation.\n"
+            f"See validation/reference_data/SOURCES.md for digitization guidelines."
+        )
 
 
 @pytest.mark.slow
@@ -71,6 +98,9 @@ def test_validate_t5a1_coarse():
     # Load curves
     sim = load_simulation_curve(case_id, mesh="coarse")
     ref = load_reference_curve(ref_id)
+
+    # Check if reference data is placeholder (xfail if so)
+    check_placeholder_and_skip_if_needed(ref, ref_id)
 
     # Compute metrics
     metrics = compute_error_metrics(sim, ref)
@@ -118,6 +148,9 @@ def test_validate_vvbs3_coarse():
     sim = load_simulation_curve(case_id, mesh="coarse")
     ref = load_reference_curve(ref_id)
 
+    # Check if reference data is placeholder (xfail if so)
+    check_placeholder_and_skip_if_needed(ref, ref_id)
+
     # Compute metrics
     metrics = compute_error_metrics(sim, ref)
 
@@ -159,6 +192,9 @@ def test_validate_sorelli_coarse():
     # Load curves
     sim = load_simulation_curve(case_id, mesh="coarse")
     ref = load_reference_curve(ref_id)
+
+    # Check if reference data is placeholder (xfail if so)
+    check_placeholder_and_skip_if_needed(ref, ref_id)
 
     # Compute metrics
     metrics = compute_error_metrics(sim, ref)

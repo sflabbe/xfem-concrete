@@ -1,0 +1,65 @@
+# Case 09: Fibre-Reinforced Beam (Sorelli)
+# Reference: Sorelli et al. - Steel fibre reinforced concrete
+
+case_id: "09_beam_4pb_fibres_sorelli"
+description: "4PB beam with steel fibres (Sorelli)"
+
+geometry:
+  length: 1800.0      # mm
+  height: 150.0       # mm
+  thickness: 150.0    # mm
+  n_elem_x: 36
+  n_elem_y: 8
+  element_type: "Q4"
+  notch_depth: null
+  notch_x: null
+  use_symmetry: false
+
+concrete:
+  E: 30000.0          # MPa
+  nu: 0.2
+  f_c: 40.0           # MPa
+  f_t: 3.5            # MPa
+  G_f: 0.120          # N/mm (enhanced by fibres)
+  eps_cu: -0.0035
+  model_type: "cdp_full"
+
+loading:
+  loading_type: "monotonic"
+  max_displacement: 10.0   # mm
+  n_steps: 70
+  load_x_center: 900.0     # mm (midspan)
+  load_halfwidth: 150.0    # mm (4PB)
+
+outputs:
+  output_dir: "outputs/sorelli_fibres"
+  case_name: "sorelli"
+  save_load_displacement: true
+  save_crack_data: true
+  save_energy: true
+  save_crack_pattern: true
+  save_damage_field: true
+  save_metrics: true
+
+rebar_layers: []  # Plain fibre-reinforced, no rebars
+
+frp_sheets: []
+
+fibres:
+  fibre_type: "steel"
+  volume_fraction: 0.01    # 1% volume fraction
+  length: 30.0             # mm
+  diameter: 0.5            # mm
+  E_fibre: 200000.0        # MPa
+  sigma_fibre_max: 2000.0  # MPa
+  orientation: "random_2d"
+  bond_strength: 5.0       # MPa (fibre-matrix bond)
+  debond_energy: 0.5       # N/mm
+  pullout_mode: "elastic_plastic"
+
+subdomains: []
+
+max_steps: 700
+tolerance: 1.0e-6
+use_line_search: true
+use_substepping: true

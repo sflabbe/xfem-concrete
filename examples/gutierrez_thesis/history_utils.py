@@ -11,6 +11,7 @@ History formats supported:
 
 from typing import Dict, List, Any, Union, Optional
 import numpy as np
+from xfem_clean.utils.numpy_compat import trapezoid
 
 
 def history_to_arrays(history: Union[List, np.ndarray]) -> Dict[str, np.ndarray]:
@@ -180,7 +181,7 @@ def extract_metrics(history: Union[List, np.ndarray]) -> Dict[str, float]:
     u_final = np.abs(u_mm[-1])
 
     # Dissipated energy (∫ P du, trapezoidal rule)
-    energy = np.trapezoid(np.abs(P_kN), u_mm)  # kN·mm
+    energy = trapezoid(np.abs(P_kN), u_mm)  # kN·mm
 
     # Number of cracks (maximum active)
     num_cracks = int(np.max(ncr))

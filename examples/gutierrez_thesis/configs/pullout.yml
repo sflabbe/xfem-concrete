@@ -1,0 +1,71 @@
+# Case 01: Pullout Test (Lettow)
+# Reference: Gutiérrez thesis - Bond-slip pullout validation
+
+case_id: "01_pullout_lettow"
+description: "Direct pullout test with bond-slip interface"
+
+geometry:
+  length: 200.0       # mm
+  height: 200.0       # mm
+  thickness: 200.0    # mm
+  n_elem_x: 20
+  n_elem_y: 20
+  element_type: "Q4"
+  notch_depth: null
+  notch_x: null
+  use_symmetry: false
+
+concrete:
+  E: 30000.0          # MPa
+  nu: 0.2
+  f_c: 30.0           # MPa
+  f_t: 2.8            # MPa
+  G_f: 0.080          # N/mm
+  eps_cu: -0.0035
+  model_type: "linear_elastic"
+
+loading:
+  loading_type: "monotonic"
+  max_displacement: 5.0    # mm
+  n_steps: 50
+  load_x_center: 100.0     # mm
+  load_halfwidth: 10.0     # mm
+
+outputs:
+  output_dir: "outputs/pullout_lettow"
+  case_name: "pullout"
+  save_load_displacement: true
+  save_crack_data: true
+  save_energy: true
+  save_slip_profiles: true
+  save_bond_profiles: true
+
+rebar_layers:
+  - diameter: 16.0       # mm
+    y_position: 100.0    # mm (center)
+    n_bars: 1
+    orientation_deg: 0.0
+    bond_disabled_x_range: null
+    steel:
+      E: 200000.0
+      nu: 0.3
+      f_y: 500.0
+      f_u: 600.0
+      hardening_modulus: 2000.0
+    bond_law:
+      law_type: "ceb_fip"
+      s1: 0.6
+      s2: 1.2
+      s3: 8.0
+      tau_max: 10.0
+      tau_f: 1.5
+      alpha: 0.4
+
+frp_sheets: []
+fibres: null
+subdomains: []
+
+max_steps: 500
+tolerance: 1.0e-6
+use_line_search: true
+use_substepping: true
