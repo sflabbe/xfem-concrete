@@ -149,20 +149,27 @@ def assemble_xfem_system(
         xe = nodes[conn, :]
         xmin, xmax, ymin, ymax = element_bounds(xe)
 
-        # Check if element is void (skip bulk assembly)
-        if subdomain_mgr is not None and subdomain_mgr.is_void(e):
-            # Void elements: no bulk contribution
-            # Still integrate canonical Gauss points for post-processing
-            continue
+        # Check if element is void (use penalty stiffness)
+        is_void_elem = subdomain_mgr is not None and subdomain_mgr.is_void(e)
 
         # Get effective material properties (for rigid or overridden elements)
         thickness_eff = thickness
         if subdomain_mgr is not None:
             thickness_eff = subdomain_mgr.get_effective_thickness(e, thickness)
 
-        # If thickness is effectively zero, skip this element
-        if thickness_eff < 1e-12:
-            continue
+        # Void elements: apply penalty stiffness to prevent singularity
+        # Use E_penalty ~ 1e-9 * E to be negligible but avoid singular matrix
+        if is_void_elem:
+            # Small penalty to keep matrix non-singular
+            C_eff = C * 1e-9  # Penalty stiffness (very small)
+            # Use minimal thickness if zero
+            if thickness_eff < 1e-12:
+                thickness_eff = thickness * 1e-9
+        else:
+            C_eff = C  # Normal stiffness
+            # If thickness is effectively zero for non-void, skip this element
+            if thickness_eff < 1e-12:
+                continue
 
         is_cut = False
         if crack_active:
@@ -377,8 +384,16 @@ def assemble_xfem_system(
                         mp = mp_default().copy_shallow()
                         sig, Ct = material.integrate(mp, eps)
 
+                    # Apply penalty factor for void elements
+                    if is_void_elem:
+                        # Reduce stiffness by penalty factor (1e-9) for void
+                        # Do NOT reduce forces (keep sig as is for consistency)
+                        Ct_scaled = Ct * 1e-9
+                    else:
+                        Ct_scaled = Ct
+
                     fe = B.T @ sig * weight
-                    Ke = (B.T @ Ct @ B) * weight
+                    Ke = (B.T @ Ct_scaled @ B) * weight
 
                     fint[edofs] += fe
                     rr = np.repeat(edofs, len(edofs))
