@@ -348,6 +348,7 @@ def assemble_xfem_system_multi(
     enable_bond_slip: bool = False,
     steel_EA: float = 0.0,
     perimeter_total: Optional[float] = None,  # Total perimeter for bond-slip
+    bond_gamma: float = 1.0,  # BLOQUE A: Bond-slip continuation parameter
     # Subdomain support (FASE D)
     subdomain_mgr: Optional[object] = None,
 ):
@@ -397,18 +398,28 @@ def assemble_xfem_system_multi(
     for e, conn in enumerate(elems):
         xe = np.array([_node_xy(nodes, i) for i in conn], dtype=float)
 
-        # Skip void elements (FASE D: subdomain support)
-        if subdomain_mgr is not None and subdomain_mgr.is_void(e):
-            continue
+        # Check if element is void (use penalty stiffness) - BLOQUE D
+        is_void_elem = subdomain_mgr is not None and subdomain_mgr.is_void(e)
 
-        # Get effective thickness (for rigid or void elements)
+        # Get effective material properties and thickness
         thickness_eff = thickness
+        C_eff = C  # Default: use full stiffness
         if subdomain_mgr is not None:
             thickness_eff = subdomain_mgr.get_effective_thickness(e, thickness)
 
-        # Skip if thickness is effectively zero
-        if thickness_eff < 1e-12:
-            continue
+        # BLOQUE D: Void elements - apply penalty stiffness to prevent singularity
+        # Instead of skipping, use very small stiffness to keep matrix non-singular
+        void_penalty_factor = 1e-9
+        if is_void_elem:
+            C_eff = C * void_penalty_factor  # Penalty stiffness (very small but non-zero)
+            if thickness_eff < 1e-12:
+                thickness_eff = thickness * void_penalty_factor  # Minimal thickness to avoid zero volume
+            # For Numba path: store penalty factor to scale material parameters
+            # (applied in the integration loop below)
+        else:
+            # Non-void element: skip only if thickness is effectively zero
+            if thickness_eff < 1e-12:
+                continue
 
         is_cut = False
         for crack in cracks:
@@ -484,6 +495,9 @@ def assemble_xfem_system_multi(
                         if int(bulk_kind) == 1:
                             E_mat = float(bulk_params[0])
                             nu_mat = float(bulk_params[1])
+                            # BLOQUE D: Apply penalty to E_mat for void elements
+                            if is_void_elem:
+                                E_mat *= void_penalty_factor
                             sig, Ct = elastic_integrate_plane_stress_numba(eps, E_mat, nu_mat, dt0, dc0)
                             eps_p6_new = eps_p6_old
                             ezz_new = ezz_old
@@ -497,6 +511,9 @@ def assemble_xfem_system_multi(
                             alpha = float(bulk_params[2])
                             k0 = float(bulk_params[3])
                             Hh = float(bulk_params[4])
+                            # BLOQUE D: Apply penalty to E_mat for void elements
+                            if is_void_elem:
+                                E_mat *= void_penalty_factor
                             sig, Ct, eps_p6_new, ezz_new, kappa_new, dW = dp_integrate_plane_stress_numba(
                                 eps, eps_p6_old, ezz_old, kappa_old, E_mat, nu_mat, alpha, k0, Hh
                             )
@@ -515,6 +532,9 @@ def assemble_xfem_system_multi(
                             Gf_t = float(bulk_params[7])
                             Gf_c = float(bulk_params[8])
                             lch = float(bulk_params[9])
+                            # BLOQUE D: Apply penalty to E_mat for void elements
+                            if is_void_elem:
+                                E_mat *= void_penalty_factor
                             sig, Ct, eps_p6_new, ezz_new, kappa_new, dt_new, dc_new, kt_new, kc_new, wpl_new, wft_new, wfc_new = cdp_integrate_plane_stress_numba(
                                 eps, eps_p6_old, ezz_old, kappa_old, dt0, dc0, kt0, kc0, wpl0, wft0, wfc0,
                                 E_mat, nu_mat, alpha, k0, Hh, ft, fc, Gf_t, Gf_c, lch
@@ -545,6 +565,12 @@ def assemble_xfem_system_multi(
                             )
                     elif bulk_states is not None and material is not None:
                         # Python material path (retrocompat or ConcreteCDPReal with tables)
+                        # BLOQUE D: Override material C for void elements
+                        C_orig = None
+                        if is_void_elem and hasattr(material, 'C'):
+                            C_orig = material.C.copy()
+                            material.C = C_eff
+
                         if use_bulk_arrays:
                             assert isinstance(bulk_states, BulkStateArrays)
                             mp0 = bulk_states.get_mp(e, ipid)
@@ -552,14 +578,19 @@ def assemble_xfem_system_multi(
                             mp0 = bulk_states.get((e, ipid), mp_default())
                         mp = mp0.copy_shallow()
                         sig, Ct = material.integrate(mp, eps)
+
+                        # BLOQUE D: Restore original material C
+                        if C_orig is not None:
+                            material.C = C_orig
                         if isinstance(bulk_updates, BulkStatePatch):
                             bulk_updates.add(e, ipid, mp)
                         else:
                             bulk_updates[(e, ipid)] = mp
                     else:
                         # Fallback: linear elastic (retrocompat)
-                        sig = C @ eps
-                        Ct = C
+                        # BLOQUE D: Use C_eff for void elements
+                        sig = C_eff @ eps
+                        Ct = C_eff
 
                     # store aux data for nonlocal averaging
                     aux_gp_pos.append((x_gp, y_gp))
@@ -784,6 +815,7 @@ def assemble_xfem_system_multi(
             use_numba=use_numba,
             perimeter=perimeter_total,  # Pass explicit perimeter (FASE D)
             segment_mask=segment_mask,  # Pass segment mask (FASE D)
+            bond_gamma=bond_gamma,  # BLOQUE A: Bond-slip continuation parameter
         )
 
         # Add bond-slip contribution to global system
@@ -1137,7 +1169,7 @@ def run_analysis_xfem_multicrack(
 
         return fixed_dict
 
-    def solve_step(u_bar, q_init, coh_states_committed, bulk_states_committed, *, enr_scale: float = 1.0):
+    def solve_step(u_bar, q_init, coh_states_committed, bulk_states_committed, *, enr_scale: float = 1.0, bond_gamma: float = 1.0):
         """Newton solve for one load/displacement level.
 
         Important: cohesive states are *not* mutated inside Newton; we always
@@ -1218,6 +1250,7 @@ def run_analysis_xfem_multicrack(
                 enable_bond_slip=enable_bond_slip,
                 steel_EA=steel_EA,
                 perimeter_total=perimeter_total,  # FASE D
+                bond_gamma=bond_gamma,  # BLOQUE A: Bond-slip continuation parameter
                 # Subdomain support (FASE D)
                 subdomain_mgr=subdomain_mgr,
             )
@@ -1315,6 +1348,7 @@ def run_analysis_xfem_multicrack(
                         enable_bond_slip=enable_bond_slip,
                         steel_EA=steel_EA,
                         perimeter_total=perimeter_total,  # FASE D
+                        bond_gamma=bond_gamma,  # BLOQUE A: Bond-slip continuation parameter
                         # Subdomain support (FASE D)
                         subdomain_mgr=subdomain_mgr,
                     )
@@ -1338,7 +1372,7 @@ def run_analysis_xfem_multicrack(
 
         return False, q, coh_states_committed, bulk_states_committed, last_aux_pos, last_aux_sig, "maxit", model.newton_maxit, last_fint
 
-    def ramp_solve_step(u_bar, q_init, coh_committed, bulk_committed):
+    def ramp_solve_step(u_bar, q_init, coh_committed, bulk_committed, bond_gamma: float = 1.0):
         """Gutierrez-style adaptive ramping/continuation after init/grow.
 
         We solve the same displacement level multiple times while gradually
@@ -1361,7 +1395,7 @@ def run_analysis_xfem_multicrack(
 
         # Always do an initial solve at alpha=a (including a=0)
         ok, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, why, iters, fint_last = solve_step(
-            u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a
+            u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a, bond_gamma=bond_gamma
         )
         if not ok:
             return False, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, why, iters, fint_last
@@ -1370,7 +1404,7 @@ def run_analysis_xfem_multicrack(
         while a < 1.0:
             a_try = min(1.0, a + da)
             ok, q_try, coh_try, bulk_try, aux_pos, aux_sig, why, iters, fint_last = solve_step(
-                u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a_try
+                u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a_try, bond_gamma=bond_gamma
             )
             if ok:
                 a = a_try

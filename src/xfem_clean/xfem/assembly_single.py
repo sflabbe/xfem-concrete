@@ -57,6 +57,9 @@ def assemble_xfem_system(
     steel_EA: float = 0.0,
     rebar_diameter: Optional[float] = None,  # For perimeter calculation [m]
     bond_disabled_x_range: Optional[Tuple[float, float]] = None,  # x-range where bond is disabled [m]
+    bond_gamma: float = 1.0,  # BLOQUE B: Bond-slip continuation parameter [0,1]
+    bond_k_cap: Optional[float] = None,  # BLOQUE C: Cap dtau/ds [Pa/m]
+    bond_s_eps: float = 0.0,  # BLOQUE C: Smooth regularization epsilon [m]
     # Dissertation parity features
     reinforcement_layers: Optional[list] = None,
     enable_reinforcement: bool = False,
@@ -677,6 +680,9 @@ def assemble_xfem_system(
             use_numba=use_numba,
             perimeter=perimeter,  # Explicit perimeter (or None → fallback to bond_law.d_bar)
             segment_mask=segment_mask,  # Mask to disable bond in empty elements
+            bond_gamma=bond_gamma,  # BLOQUE B: Bond-slip continuation parameter
+            bond_k_cap=bond_k_cap,  # BLOQUE C: Tangent regularization cap
+            bond_s_eps=bond_s_eps,  # BLOQUE C: Tangent regularization epsilon
         )
 
         # Add bond-slip contribution to global system

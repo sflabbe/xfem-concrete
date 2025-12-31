@@ -369,6 +369,7 @@ def run_analysis_xfem(
         coh_committed,
         mp_committed,
         bond_committed=None,
+        bond_gamma: float = 1.0,  # BLOQUE A: Bond-slip continuation parameter
     ):
         nonlocal total_newton_solves
         if model.debug_newton:
@@ -431,6 +432,9 @@ def run_analysis_xfem(
                 steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
                 rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
                 bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
+                bond_gamma=bond_gamma,  # BLOQUE B: Bond-slip continuation parameter
+                bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,  # BLOQUE C
+                bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,  # BLOQUE C
                 subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
             )
             if model.debug_newton:
@@ -555,6 +559,9 @@ def run_analysis_xfem(
                         steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
                         rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
                         bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
+                        bond_gamma=bond_gamma,  # BLOQUE B: Bond-slip continuation parameter
+                        bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,  # BLOQUE C
+                        bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,  # BLOQUE C
                         subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
                     )
                     # Perfect bond rebar (only if bond-slip disabled)
@@ -716,17 +723,88 @@ def run_analysis_xfem(
                 else:
                     q_guess_loc = transfer_q_between_dofs(base, base_dofs, dofs_local)
 
-                if model.debug_substeps:
-                    print(f"    [inner] calling solve_step with u1={u1*1e3:.3f}mm")
-                ok, q_sol, coh_trial, mp_trial, aux, P, bond_trial = solve_step(
-                    u1,
-                    q_guess_loc,
-                    crack,
-                    dofs_local,
-                    coh_states,
-                    mp_states,
-                    bond_states,
+                # BLOQUE B: Bond-slip gamma continuation
+                # If bond-slip is enabled and gamma ramping is active, solve multiple times
+                # with increasing gamma to improve convergence
+                use_gamma_ramp = (
+                    model.enable_bond_slip
+                    and bond_states is not None
+                    and model.bond_gamma_strategy == "ramp_steps"
+                    and model.bond_gamma_ramp_steps > 1
                 )
+
+                if use_gamma_ramp:
+                    # Create gamma sequence: [gamma_min, ..., gamma_max=1.0]
+                    gamma_vals = np.linspace(
+                        float(model.bond_gamma_min),
+                        float(model.bond_gamma_max),
+                        int(model.bond_gamma_ramp_steps),
+                    )
+                    # Ensure gamma=1.0 is included
+                    if gamma_vals[-1] != 1.0:
+                        gamma_vals = np.append(gamma_vals, 1.0)
+
+                    if model.debug_substeps:
+                        print(f"    [bond-gamma] ramp sequence: {gamma_vals}")
+
+                    # Ramp through gammas
+                    q_cur = q_guess_loc
+                    coh_cur = coh_states
+                    mp_cur = mp_states
+                    bond_cur = bond_states
+                    ok_final = False
+
+                    for i_gamma, gamma in enumerate(gamma_vals):
+                        if model.debug_substeps or getattr(model, "debug_bond_gamma", False):
+                            print(f"    [bond-gamma] step={i_gamma+1}/{len(gamma_vals)}, gamma={gamma:.3f}, u={u1*1e3:.3f}mm")
+
+                        ok, q_sol, coh_trial, mp_trial, aux, P, bond_trial = solve_step(
+                            u1,
+                            q_cur,
+                            crack,
+                            dofs_local,
+                            coh_cur,
+                            mp_cur,
+                            bond_cur,
+                            bond_gamma=gamma,
+                        )
+
+                        if not ok:
+                            if model.debug_substeps:
+                                print(f"    [bond-gamma] failed at gamma={gamma:.3f}")
+                            # If a gamma substep fails, abandon this increment (trigger substepping)
+                            ok_final = False
+                            break
+
+                        # Accept this gamma step (use as initial guess for next gamma)
+                        q_cur = q_sol
+                        coh_cur = coh_trial
+                        mp_cur = mp_trial
+                        bond_cur = bond_trial
+                        ok_final = True
+
+                    # Use final result
+                    ok = ok_final
+                    if ok:
+                        q_sol = q_cur
+                        coh_trial = coh_cur
+                        mp_trial = mp_cur
+                        bond_trial = bond_cur
+                else:
+                    # No gamma ramp: single solve_step with gamma=1
+                    if model.debug_substeps:
+                        print(f"    [inner] calling solve_step with u1={u1*1e3:.3f}mm")
+                    ok, q_sol, coh_trial, mp_trial, aux, P, bond_trial = solve_step(
+                        u1,
+                        q_guess_loc,
+                        crack,
+                        dofs_local,
+                        coh_states,
+                        mp_states,
+                        bond_states,
+                        bond_gamma=1.0,
+                    )
+
                 if model.debug_substeps:
                     print(f"    [inner] solve_step returned ok={ok}")
                 if not ok:
