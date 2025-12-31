@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from examples.gutierrez_thesis.run import CASE_REGISTRY, CASE_ALIASES, MESH_PRESETS, resolve_case_id
 from examples.gutierrez_thesis.solver_interface import run_case_solver
+from examples.gutierrez_thesis.history_utils import extract_metrics as extract_metrics_from_history
 
 
 # ============================================================================
@@ -173,52 +174,11 @@ def extract_case_metrics(results: Dict[str, Any]) -> Dict[str, float]:
     """
     history = results.get('history', [])
 
-    if len(history) == 0:
-        return {
-            'P_max_kN': 0.0,
-            'u_at_Pmax_mm': 0.0,
-            'energy_kNmm': 0.0,
-            'num_cracks': 0,
-            'ductility': 0.0,
-        }
+    # Use unified history extraction (handles both numeric and dict formats)
+    metrics = extract_metrics_from_history(history)
 
-    # Extract arrays (history format: [step, u, P, M, ...])
-    steps = np.array([row[0] for row in history])
-    u_arr = np.array([row[1] for row in history])  # [m]
-    P_arr = np.array([row[2] for row in history])  # [N]
-
-    # Convert units
-    u_mm = u_arr * 1e3  # m → mm
-    P_kN = P_arr / 1e3  # N → kN
-
-    # Peak load
-    idx_max = np.argmax(np.abs(P_kN))
-    P_max = np.abs(P_kN[idx_max])
-    u_at_Pmax = np.abs(u_mm[idx_max])
-
-    # Dissipated energy (∫ P du, trapezoidal rule)
-    energy = np.trapz(np.abs(P_kN), u_mm)  # kN·mm
-
-    # Number of cracks (from crack_active flag, if available)
-    # Assuming history row has crack_active at index 9
-    num_cracks = 0
-    if len(history[-1]) > 9:
-        # Count unique crack events
-        crack_flags = [int(row[9]) for row in history]
-        num_cracks = sum(1 for flag in crack_flags if flag > 0)
-
-    # Ductility (u_final / u_at_Pmax)
-    u_final = np.abs(u_mm[-1])
-    ductility = u_final / u_at_Pmax if u_at_Pmax > 1e-9 else 0.0
-
-    metrics = {
-        'P_max_kN': P_max,
-        'u_at_Pmax_mm': u_at_Pmax,
-        'energy_kNmm': energy,
-        'num_cracks': num_cracks,
-        'ductility': ductility,
-        'u_final_mm': u_final,
-    }
+    # Add u_final_mm for compatibility (already in extract_metrics_from_history)
+    # No need to modify, already present
 
     return metrics
 

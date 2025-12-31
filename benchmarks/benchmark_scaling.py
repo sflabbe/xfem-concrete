@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from examples.gutierrez_thesis.run import CASE_REGISTRY, MESH_PRESETS, resolve_case_id
 from examples.gutierrez_thesis.solver_interface import run_case_solver
+from examples.gutierrez_thesis.history_utils import history_to_arrays
 
 
 # ============================================================================
@@ -56,24 +57,36 @@ def compute_energy_residual(results: Dict) -> float:
     if len(history) == 0:
         return 0.0
 
-    # Extract arrays (format: [step, u, P, M, kappa, R, cx, cy, angle, crack_active,
-    #                           W_plastic, W_damage_t, W_damage_c, W_cohesive, W_total])
-    u_arr = np.array([row[1] for row in history])  # [m]
-    P_arr = np.array([row[2] for row in history])  # [N]
+    # Extract arrays (handles both numeric and dict history formats)
+    arrays = history_to_arrays(history)
+    u_arr = arrays['u']  # [m]
+    P_arr = arrays['P']  # [N]
 
     # External work (∫ P du)
+    if len(u_arr) == 0:
+        return 0.0
+
     W_external = np.trapz(np.abs(P_arr), u_arr)  # [J]
 
-    # Internal dissipation (if available in history)
-    if len(history[-1]) > 14:
-        W_total = history[-1][14]  # Final W_total [J]
+    # Internal dissipation (try to extract from extras, otherwise fallback)
+    extras = arrays['extras']
+
+    # Try to get W_total directly (column 14 in old format, or key in dict format)
+    W_total = None
+    if 'W_total' in extras:
+        W_total = extras['W_total'][-1]  # Final value
+    elif 'col_14' in extras:
+        W_total = extras['col_14'][-1]
     else:
         # Fallback: sum individual components
-        W_plastic = history[-1][10] if len(history[-1]) > 10 else 0.0
-        W_damage_t = history[-1][11] if len(history[-1]) > 11 else 0.0
-        W_damage_c = history[-1][12] if len(history[-1]) > 12 else 0.0
-        W_cohesive = history[-1][13] if len(history[-1]) > 13 else 0.0
+        W_plastic = extras.get('W_plastic', extras.get('col_10', np.array([0.0])))[-1]
+        W_damage_t = extras.get('W_damage_t', extras.get('col_11', np.array([0.0])))[-1]
+        W_damage_c = extras.get('W_damage_c', extras.get('col_12', np.array([0.0])))[-1]
+        W_cohesive = extras.get('W_cohesive', extras.get('col_13', np.array([0.0])))[-1]
         W_total = W_plastic + W_damage_t + W_damage_c + W_cohesive
+
+    if W_total is None:
+        W_total = 0.0
 
     # Residual
     if W_external > 1e-12:
