@@ -17,6 +17,7 @@ try:
     import yaml
     import sys
     import os
+    from xfem_clean.utils.numpy_compat import trapezoid
 
     # Add examples to path
     sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -87,7 +88,7 @@ def extract_metrics(history, case_name):
 
     # Dissipated energy (∫ P du, trapezoidal rule)
     if len(u_arr) > 1:
-        energy = np.trapezoid(np.abs(P_arr), u_arr)
+        energy = trapezoid(np.abs(P_arr), u_arr)
         metrics['energy_J'] = abs(energy)
     else:
         metrics['energy_J'] = 0.0

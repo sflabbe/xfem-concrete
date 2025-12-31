@@ -132,6 +132,7 @@ def extract_metrics_from_history(history: List) -> Dict[str, float]:
         Dictionary with metrics (P_max_kN, u_at_Pmax_mm, energy_kNmm, etc.)
     """
     import numpy as np
+    from xfem_clean.utils.numpy_compat import trapezoid
 
     # Convert to arrays
     history_arr = np.array(history)
@@ -152,7 +153,7 @@ def extract_metrics_from_history(history: List) -> Dict[str, float]:
     u_at_Pmax = u_mm[idx_max]
 
     # Energy (∫ P du)
-    energy = np.trapezoid(P_kN, u_mm)
+    energy = trapezoid(P_kN, u_mm)
 
     # Final displacement
     u_final = u_mm[-1]

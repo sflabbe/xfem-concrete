@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Tuple, Dict, Optional
 from scipy.interpolate import interp1d
 import warnings
+from xfem_clean.utils.numpy_compat import trapezoid
 
 
 def check_monotonicity(u: np.ndarray) -> Tuple[bool, str]:
@@ -319,8 +320,8 @@ def compute_error_metrics(sim: pd.DataFrame, ref: pd.DataFrame,
 
     # --- 2. Energy error (∫ P du) ---
     # Compute energies using trapezoidal rule
-    energy_sim = np.trapezoid(P_sim, u_sim)
-    energy_ref = np.trapezoid(P_ref, u_ref)
+    energy_sim = trapezoid(P_sim, u_sim)
+    energy_ref = trapezoid(P_ref, u_ref)
     energy_error_pct = abs(energy_sim - energy_ref) / energy_ref * 100.0 if energy_ref > 0 else 0.0
 
     # --- 3. RMSE over interpolated curves ---

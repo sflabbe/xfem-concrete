@@ -16,6 +16,7 @@ import numpy as np
 from pathlib import Path
 import json
 import csv
+from xfem_clean.utils.numpy_compat import trapezoid
 
 
 @dataclass
@@ -546,7 +547,7 @@ def extract_thesis_metrics(
 
     # Total energy (work done)
     # W = integral(P dδ) ≈ trapezoid
-    total_energy = np.trapezoid(load_history, disp_history)
+    total_energy = trapezoid(load_history, disp_history)
 
     # Extract energy components
     fracture_energy = energy_dict.get("W_fract_tension", 0.0)
