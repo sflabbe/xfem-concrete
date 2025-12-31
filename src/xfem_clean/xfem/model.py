@@ -94,6 +94,12 @@ class XFEMModel:
     steel_EA_min: float = 1e3      # Minimum steel axial stiffness [N] to avoid rigid body mode
     bond_tangent_cap_factor: float = 1e2  # Cap bond tangent at factor × median(diag(K_bulk))
 
+    # Bond-slip continuation parameters (BLOQUE B: convergence improvement)
+    bond_gamma_strategy: str = "ramp_steps"  # "ramp_steps" | "adaptive_on_fail" | "disabled"
+    bond_gamma_ramp_steps: int = 5  # Number of gamma values in ramp (0→1)
+    bond_gamma_min: float = 0.0     # Start gamma (0 = no bond, only steel axial EA)
+    bond_gamma_max: float = 1.0     # End gamma (1 = full bond-slip)
+
     # Dowel action at crack-rebar intersections (Phase 5)
     enable_dowel: bool = False
     dowel_penalty_factor: float = 1.0
