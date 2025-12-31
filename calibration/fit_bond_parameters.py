@@ -30,6 +30,7 @@ except ImportError:
 from validation.compare_curves import load_reference_curve, compute_error_metrics
 from examples.gutierrez_thesis.run import CASE_REGISTRY, resolve_case_id
 from examples.gutierrez_thesis.solver_interface import run_case_solver
+from examples.gutierrez_thesis.history_utils import get_P_u_curve
 from examples.parametric.parametric_study import modify_case_parameter, extract_case_metrics
 
 
@@ -86,13 +87,12 @@ def objective_function(
         print(f"  Solver failed: {e}")
         return 1e9  # Penalize solver failures
 
-    # Extract P-δ curve
+    # Extract P-δ curve (handles both numeric and dict history formats)
     history = results.get('history', [])
     if len(history) == 0:
         return 1e9
 
-    u_sim = np.array([row[1] * 1e3 for row in history])  # m → mm
-    P_sim = np.array([row[2] / 1e3 for row in history])  # N → kN
+    u_sim, P_sim = get_P_u_curve(history)  # Already in mm, kN
 
     # Create simulation dataframe
     import pandas as pd

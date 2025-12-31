@@ -149,9 +149,51 @@ python -m benchmarks.benchmark_scaling \
 
 **Output:** `benchmarks/scaling_summary.csv` (runtime, memory, energy residual)
 
-**Validation:** Energy residual < 1% (W_external ≈ W_total)
-
 **Module:** `benchmarks/benchmark_scaling.py`
+
+### 5. Sensitivity Study (Mesh and Solver Parameters)
+
+Explore sensitivity to mesh size and solver parameters (candidate point density):
+
+```bash
+# Run sensitivity study for Jason case (4PBT CFRP beam)
+python -m examples.sensitivity.sensitivity_study_jason \
+  --mesh coarse,medium --cand 1.0,0.5 --plot
+
+# Quick test with minimal steps
+python -m examples.sensitivity.sensitivity_study_jason --quick
+```
+
+**Output:** `outputs/sensitivity/<case>_summary.csv` (configuration matrix with all metrics)
+
+**Module:** `examples/sensitivity/sensitivity_study_jason.py`
+
+### 6. Crack Width and Steel Force Postprocessing
+
+All simulations now automatically export **crack width profiles** and **steel force distributions** when applicable:
+
+**Crack width profiles** (from cohesive states):
+- `crack_width_profile_crack{k}_final.csv` — (s, x, y, w) along crack path
+- `crack_width_profile_crack{k}_final.png` — Plot of w(s)
+- Metrics: w_max, w_avg
+
+**Steel force profiles** (from bond-slip DOFs):
+- `steel_force_profile_final.csv` — (x, N, sigma) along reinforcement
+- `steel_force_profile_final.png` — Plots of N(x) and σ(x)
+
+These outputs are generated automatically by `postprocess_comprehensive.py` when cohesive states and bond states are available.
+
+**Module:** `examples/gutierrez_thesis/postprocess_comprehensive.py`, `postprocess.py`
+
+### Robustness and Testing
+
+All parametric, calibration, and benchmark tools are now **robust to both single-crack and multicrack history formats** (numeric arrays vs dicts). A unified history extraction interface is provided by `examples/gutierrez_thesis/history_utils.py`.
+
+**Smoke tests** verify that all tools can execute without crashes:
+```bash
+# Run smoke tests (fast)
+python tests/test_tools_smoke.py
+```
 
 ### Reference Data
 

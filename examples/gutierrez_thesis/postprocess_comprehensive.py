@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 import matplotlib.pyplot as plt
+import csv
 
 
 # =============================================================================
@@ -520,10 +521,155 @@ def postprocess_results(
                 final_step = int(history[-1][0])
                 plot_bond_stress_profile(x_mm, tau_MPa, output_dir, final_step)
 
+    # Crack width profiles (if cohesive states available)
+    coh_states = results.get('coh_states', None)
+    if coh_states is not None and cracks_list:
+        from examples.gutierrez_thesis.postprocess import compute_crack_widths_from_cohesive
+
+        crack_widths = compute_crack_widths_from_cohesive(coh_states, cracks_list, nodes, elems)
+
+        # Export crack width profiles
+        for crack_id, width_data in crack_widths.items():
+            if len(width_data) == 0:
+                continue
+
+            # Convert to mm
+            s_mm = np.array([s * 1e3 for s, x, y, w in width_data])
+            x_mm = np.array([x * 1e3 for s, x, y, w in width_data])
+            y_mm = np.array([y * 1e3 for s, x, y, w in width_data])
+            w_mm = np.array([w * 1e3 for s, x, y, w in width_data])
+
+            # Save to CSV
+            csv_file = output_dir / f"crack_width_profile_crack{crack_id}_final.csv"
+            with open(csv_file, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['s_mm', 'x_mm', 'y_mm', 'w_mm'])
+                for i in range(len(s_mm)):
+                    writer.writerow([s_mm[i], x_mm[i], y_mm[i], w_mm[i]])
+            print(f"  Crack width profile #{crack_id} saved: {csv_file.name}")
+
+            # Plot
+            if len(w_mm) > 0:
+                plt.figure(figsize=(10, 4))
+                plt.plot(s_mm, w_mm, 'ro-', markersize=4, linewidth=1.5)
+                plt.xlabel("Position along crack [mm]", fontsize=12)
+                plt.ylabel("Crack width [mm]", fontsize=12)
+                plt.title(f"Crack Width Profile (Crack #{crack_id})", fontsize=14)
+                plt.grid(True, alpha=0.3)
+                plt.tight_layout()
+
+                plot_file = output_dir / f"crack_width_profile_crack{crack_id}_final.png"
+                plt.savefig(plot_file, dpi=150)
+                plt.close()
+
+                # Summary metrics
+                w_max = np.max(w_mm)
+                w_avg = np.mean(w_mm)
+                print(f"    w_max = {w_max:.4f} mm, w_avg = {w_avg:.4f} mm")
+
+    # Steel force profiles (if bond states and rebar segments available)
+    if bond_states is not None:
+        rebar_segs = results.get('rebar_segs', None)
+        dofs = results.get('dofs', None)
+        model = results.get('model', None)
+
+        if rebar_segs is not None and dofs is not None and model is not None:
+            # Compute steel strain from displacement field
+            # For each rebar segment: eps = (u_s(j) - u_s(i)) / L
+            n_seg = rebar_segs.shape[0]
+            x_coords = []
+            N_vals = []
+            sigma_vals = []
+
+            # Get steel properties
+            E_s = model.steel_E  # Pa
+            # Compute cross-sectional area from model
+            if hasattr(model, 'steel_A_total'):
+                A_s = model.steel_A_total  # m^2
+            else:
+                # Fallback: assume 12mm bar
+                d_bar = 0.012  # m
+                A_s = np.pi * (d_bar / 2)**2
+
+            for i in range(n_seg):
+                n1 = int(rebar_segs[i, 0])
+                n2 = int(rebar_segs[i, 1])
+                L0 = rebar_segs[i, 2]  # Segment length (m)
+                cx = rebar_segs[i, 3]  # Center x (m)
+
+                # Get steel DOFs for nodes n1, n2
+                if hasattr(dofs, 'steel_node_to_idx'):
+                    # Map node to steel DOF index
+                    if n1 in dofs.steel_node_to_idx and n2 in dofs.steel_node_to_idx:
+                        idx1 = dofs.steel_node_to_idx[n1]
+                        idx2 = dofs.steel_node_to_idx[n2]
+                        dof1 = dofs.steel_dof_offset + 2 * idx1  # ux_steel
+                        dof2 = dofs.steel_dof_offset + 2 * idx2
+
+                        # Steel displacements
+                        if dof1 < len(u) and dof2 < len(u):
+                            u1 = u[dof1]
+                            u2 = u[dof2]
+
+                            # Axial strain
+                            eps = (u2 - u1) / L0 if L0 > 1e-12 else 0.0
+
+                            # Axial stress
+                            sigma = E_s * eps  # Pa
+
+                            # Axial force
+                            N = sigma * A_s  # N
+
+                            x_coords.append(cx)
+                            N_vals.append(N)
+                            sigma_vals.append(sigma)
+
+            if len(x_coords) > 0:
+                # Convert to engineering units
+                x_mm = np.array(x_coords) * 1e3  # m → mm
+                N_kN = np.array(N_vals) / 1e3  # N → kN
+                sigma_MPa = np.array(sigma_vals) / 1e6  # Pa → MPa
+
+                # Save to CSV
+                csv_file = output_dir / "steel_force_profile_final.csv"
+                with open(csv_file, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['x_mm', 'N_kN', 'sigma_MPa'])
+                    for i in range(len(x_mm)):
+                        writer.writerow([x_mm[i], N_kN[i], sigma_MPa[i]])
+                print(f"  Steel force profile saved: {csv_file.name}")
+
+                # Plot
+                plt.figure(figsize=(10, 6))
+
+                # Subplot 1: Force distribution
+                plt.subplot(2, 1, 1)
+                plt.plot(x_mm, N_kN, 'bo-', markersize=4, linewidth=1.5)
+                plt.ylabel("Axial Force [kN]", fontsize=12)
+                plt.title("Steel Force Distribution", fontsize=14)
+                plt.grid(True, alpha=0.3)
+
+                # Subplot 2: Stress distribution
+                plt.subplot(2, 1, 2)
+                plt.plot(x_mm, sigma_MPa, 'ro-', markersize=4, linewidth=1.5)
+                plt.xlabel("Position along bar [mm]", fontsize=12)
+                plt.ylabel("Axial Stress [MPa]", fontsize=12)
+                plt.grid(True, alpha=0.3)
+
+                plt.tight_layout()
+                plot_file = output_dir / "steel_force_profile_final.png"
+                plt.savefig(plot_file, dpi=150)
+                plt.close()
+
     # VTK export (final step)
     if case_config.outputs.save_vtk:
-        final_step = int(history[-1][0])
-        export_vtk_step(output_dir / "vtk", final_step, nodes, elems, u)
+        if len(history) > 0:
+            # Handle both numeric and dict history formats
+            if isinstance(history[0], dict):
+                final_step = history[-1].get('step', len(history)-1)
+            else:
+                final_step = int(history[-1][0])
+            export_vtk_step(output_dir / "vtk", final_step, nodes, elems, u)
 
     print("\n✓ Postprocessing completed")
     print(f"✓ Outputs saved to: {output_dir}\n")
