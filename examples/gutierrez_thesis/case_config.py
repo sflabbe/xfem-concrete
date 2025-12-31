@@ -78,6 +78,10 @@ class GeometryConfig:
             "use_symmetry": self.use_symmetry,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'GeometryConfig':
+        return cls(**data)
+
 
 # ============================================================================
 # MATERIALS
@@ -114,6 +118,10 @@ class ConcreteConfig:
             "model_type": self.model_type,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ConcreteConfig':
+        return cls(**data)
+
 
 @dataclass
 class SteelConfig:
@@ -139,6 +147,10 @@ class SteelConfig:
             "hardening_modulus": self.hardening_modulus,
             "f_ult": self.f_ult,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SteelConfig':
+        return cls(**data)
 
 
 @dataclass
@@ -167,6 +179,10 @@ class FibreConfig:
             "orientation_deg": self.orientation_deg,
             "volume_fraction_multiplier": self.volume_fraction_multiplier,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'FibreConfig':
+        return cls(**data)
 
 
 # ============================================================================
@@ -204,6 +220,17 @@ class CEBFIPBondLaw:
             "alpha": self.alpha,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'CEBFIPBondLaw':
+        return cls(
+            s1=data['s1'],
+            s2=data['s2'],
+            s3=data['s3'],
+            tau_max=data['tau_max'],
+            tau_f=data['tau_f'],
+            alpha=data.get('alpha', 0.4),
+        )
+
 
 @dataclass
 class BilinearBondLaw:
@@ -228,6 +255,14 @@ class BilinearBondLaw:
             "s2": self.s2,
             "tau1": self.tau1,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'BilinearBondLaw':
+        return cls(
+            s1=data['s1'],
+            s2=data['s2'],
+            tau1=data['tau1'],
+        )
 
 
 @dataclass
@@ -257,6 +292,16 @@ class BanholzerBondLaw:
             "tau2": self.tau2,
             "tau_f": self.tau_f,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'BanholzerBondLaw':
+        return cls(
+            s0=data['s0'],
+            a=data['a'],
+            tau1=data['tau1'],
+            tau2=data['tau2'],
+            tau_f=data['tau_f'],
+        )
 
 
 # ============================================================================
@@ -294,6 +339,18 @@ class RebarLayer:
             "bond_disabled_x_range": self.bond_disabled_x_range,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'RebarLayer':
+        return cls(
+            diameter=data['diameter'],
+            y_position=data['y_position'],
+            n_bars=data['n_bars'],
+            steel=SteelConfig.from_dict(data['steel']),
+            bond_law=CEBFIPBondLaw.from_dict(data['bond_law']),
+            orientation_deg=data.get('orientation_deg', 0.0),
+            bond_disabled_x_range=data.get('bond_disabled_x_range'),
+        )
+
 
 @dataclass
 class FRPSheet:
@@ -322,6 +379,18 @@ class FRPSheet:
             "bond_law": self.bond_law.to_dict(),
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'FRPSheet':
+        return cls(
+            thickness=data['thickness'],
+            width=data['width'],
+            bonded_length=data['bonded_length'],
+            y_position=data['y_position'],
+            E=data['E'],
+            nu=data['nu'],
+            bond_law=BilinearBondLaw.from_dict(data['bond_law']),
+        )
+
 
 @dataclass
 class FibreReinforcement:
@@ -342,6 +411,16 @@ class FibreReinforcement:
             "active_near_crack_only": self.active_near_crack_only,
             "activation_distance": self.activation_distance,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'FibreReinforcement':
+        return cls(
+            fibre=FibreConfig.from_dict(data['fibre']),
+            bond_law=BanholzerBondLaw.from_dict(data['bond_law']),
+            random_seed=data.get('random_seed', 42),
+            active_near_crack_only=data.get('active_near_crack_only', True),
+            activation_distance=data.get('activation_distance', 100.0),
+        )
 
 
 # ============================================================================
@@ -369,6 +448,15 @@ class MonotonicLoading:
             "load_halfwidth": self.load_halfwidth,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'MonotonicLoading':
+        return cls(
+            max_displacement=data['max_displacement'],
+            n_steps=data['n_steps'],
+            load_x_center=data['load_x_center'],
+            load_halfwidth=data['load_halfwidth'],
+        )
+
 
 @dataclass
 class CyclicLoading:
@@ -394,6 +482,16 @@ class CyclicLoading:
             "load_halfwidth": self.load_halfwidth,
             "axial_load": self.axial_load,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'CyclicLoading':
+        return cls(
+            targets=data['targets'],
+            load_x_center=data['load_x_center'],
+            load_halfwidth=data['load_halfwidth'],
+            n_cycles_per_target=data.get('n_cycles_per_target', 1),
+            axial_load=data.get('axial_load'),
+        )
 
 
 # ============================================================================
@@ -422,6 +520,20 @@ class SubdomainConfig:
             "E_override": self.E_override,
             "thickness_override": self.thickness_override,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SubdomainConfig':
+        # Convert list to tuple for ranges if needed
+        x_range = tuple(data['x_range']) if data.get('x_range') else None
+        y_range = tuple(data['y_range']) if data.get('y_range') else None
+        return cls(
+            x_range=x_range,
+            y_range=y_range,
+            element_indices=data.get('element_indices'),
+            material_type=data.get('material_type'),
+            E_override=data.get('E_override'),
+            thickness_override=data.get('thickness_override'),
+        )
 
 
 # ============================================================================
@@ -484,6 +596,33 @@ class OutputConfig:
             "compute_base_moment": self.compute_base_moment,
             "ctod_node_pairs": self.ctod_node_pairs,
         }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'OutputConfig':
+        # Convert ctod_node_pairs list of lists to list of tuples
+        ctod_pairs = data.get('ctod_node_pairs')
+        if ctod_pairs:
+            ctod_pairs = [tuple(p) for p in ctod_pairs]
+        return cls(
+            output_dir=data.get('output_dir', 'outputs'),
+            case_name=data.get('case_name', 'case'),
+            save_load_displacement=data.get('save_load_displacement', True),
+            save_crack_data=data.get('save_crack_data', True),
+            save_energy=data.get('save_energy', True),
+            save_crack_pattern=data.get('save_crack_pattern', True),
+            save_damage_field=data.get('save_damage_field', True),
+            save_deformed_shape=data.get('save_deformed_shape', True),
+            save_metrics=data.get('save_metrics', True),
+            save_vtk=data.get('save_vtk', True),
+            vtk_frequency=data.get('vtk_frequency', 10),
+            compute_CTOD=data.get('compute_CTOD', False),
+            compute_crack_widths=data.get('compute_crack_widths', True),
+            compute_slip_profiles=data.get('compute_slip_profiles', True),
+            compute_bond_profiles=data.get('compute_bond_profiles', True),
+            compute_steel_forces=data.get('compute_steel_forces', True),
+            compute_base_moment=data.get('compute_base_moment', False),
+            ctod_node_pairs=ctod_pairs,
+        )
 
 
 # ============================================================================
@@ -563,6 +702,37 @@ class CaseConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'CaseConfig':
         """Construct from dictionary (inverse of to_dict)"""
-        # TODO: Implement full deserialization
-        # For now, this is a placeholder
-        raise NotImplementedError("Deserialization not yet implemented")
+        # Parse loading based on loading_type
+        loading_data = data['loading']
+        loading_type = loading_data.get('loading_type', 'monotonic')
+        if loading_type == 'monotonic':
+            loading = MonotonicLoading.from_dict(loading_data)
+        elif loading_type == 'cyclic':
+            loading = CyclicLoading.from_dict(loading_data)
+        else:
+            raise ValueError(f"Unknown loading_type: {loading_type}")
+
+        # Parse reinforcement
+        rebar_layers = [RebarLayer.from_dict(r) for r in data.get('rebar_layers', [])]
+        frp_sheets = [FRPSheet.from_dict(f) for f in data.get('frp_sheets', [])]
+        fibres = FibreReinforcement.from_dict(data['fibres']) if data.get('fibres') else None
+
+        # Parse subdomains
+        subdomains = [SubdomainConfig.from_dict(s) for s in data.get('subdomains', [])]
+
+        return cls(
+            case_id=data['case_id'],
+            description=data['description'],
+            geometry=GeometryConfig.from_dict(data['geometry']),
+            concrete=ConcreteConfig.from_dict(data['concrete']),
+            loading=loading,
+            outputs=OutputConfig.from_dict(data['outputs']),
+            rebar_layers=rebar_layers,
+            frp_sheets=frp_sheets,
+            fibres=fibres,
+            subdomains=subdomains,
+            max_steps=data.get('max_steps', 1000),
+            tolerance=data.get('tolerance', 1e-6),
+            use_line_search=data.get('use_line_search', True),
+            use_substepping=data.get('use_substepping', True),
+        )

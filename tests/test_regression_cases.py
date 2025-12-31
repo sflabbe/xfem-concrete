@@ -87,7 +87,7 @@ def extract_metrics(history, case_name):
 
     # Dissipated energy (∫ P du, trapezoidal rule)
     if len(u_arr) > 1:
-        energy = np.trapz(np.abs(P_arr), u_arr)
+        energy = np.trapezoid(np.abs(P_arr), u_arr)
         metrics['energy_J'] = abs(energy)
     else:
         metrics['energy_J'] = 0.0
