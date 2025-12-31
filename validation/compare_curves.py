@@ -147,8 +147,8 @@ def compute_error_metrics(sim: pd.DataFrame, ref: pd.DataFrame,
 
     # --- 2. Energy error (∫ P du) ---
     # Compute energies using trapezoidal rule
-    energy_sim = np.trapz(P_sim, u_sim)
-    energy_ref = np.trapz(P_ref, u_ref)
+    energy_sim = np.trapezoid(P_sim, u_sim)
+    energy_ref = np.trapezoid(P_ref, u_ref)
     energy_error_pct = abs(energy_sim - energy_ref) / energy_ref * 100.0 if energy_ref > 0 else 0.0
 
     # --- 3. RMSE over interpolated curves ---

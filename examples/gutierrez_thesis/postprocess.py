@@ -545,8 +545,8 @@ def extract_thesis_metrics(
     ultimate_displacement = disp_history[-1]
 
     # Total energy (work done)
-    # W = integral(P dδ) ≈ trapz
-    total_energy = np.trapz(load_history, disp_history)
+    # W = integral(P dδ) ≈ trapezoid
+    total_energy = np.trapezoid(load_history, disp_history)
 
     # Extract energy components
     fracture_energy = energy_dict.get("W_fract_tension", 0.0)

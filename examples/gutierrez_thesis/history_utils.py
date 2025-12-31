@@ -180,7 +180,7 @@ def extract_metrics(history: Union[List, np.ndarray]) -> Dict[str, float]:
     u_final = np.abs(u_mm[-1])
 
     # Dissipated energy (∫ P du, trapezoidal rule)
-    energy = np.trapz(np.abs(P_kN), u_mm)  # kN·mm
+    energy = np.trapezoid(np.abs(P_kN), u_mm)  # kN·mm
 
     # Number of cracks (maximum active)
     num_cracks = int(np.max(ncr))
