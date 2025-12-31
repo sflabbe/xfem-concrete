@@ -348,6 +348,7 @@ def assemble_xfem_system_multi(
     enable_bond_slip: bool = False,
     steel_EA: float = 0.0,
     perimeter_total: Optional[float] = None,  # Total perimeter for bond-slip
+    bond_gamma: float = 1.0,  # BLOQUE A: Bond-slip continuation parameter
     # Subdomain support (FASE D)
     subdomain_mgr: Optional[object] = None,
 ):
@@ -784,6 +785,7 @@ def assemble_xfem_system_multi(
             use_numba=use_numba,
             perimeter=perimeter_total,  # Pass explicit perimeter (FASE D)
             segment_mask=segment_mask,  # Pass segment mask (FASE D)
+            bond_gamma=bond_gamma,  # BLOQUE A: Bond-slip continuation parameter
         )
 
         # Add bond-slip contribution to global system
@@ -1137,7 +1139,7 @@ def run_analysis_xfem_multicrack(
 
         return fixed_dict
 
-    def solve_step(u_bar, q_init, coh_states_committed, bulk_states_committed, *, enr_scale: float = 1.0):
+    def solve_step(u_bar, q_init, coh_states_committed, bulk_states_committed, *, enr_scale: float = 1.0, bond_gamma: float = 1.0):
         """Newton solve for one load/displacement level.
 
         Important: cohesive states are *not* mutated inside Newton; we always
@@ -1218,6 +1220,7 @@ def run_analysis_xfem_multicrack(
                 enable_bond_slip=enable_bond_slip,
                 steel_EA=steel_EA,
                 perimeter_total=perimeter_total,  # FASE D
+                bond_gamma=bond_gamma,  # BLOQUE A: Bond-slip continuation parameter
                 # Subdomain support (FASE D)
                 subdomain_mgr=subdomain_mgr,
             )
@@ -1315,6 +1318,7 @@ def run_analysis_xfem_multicrack(
                         enable_bond_slip=enable_bond_slip,
                         steel_EA=steel_EA,
                         perimeter_total=perimeter_total,  # FASE D
+                        bond_gamma=bond_gamma,  # BLOQUE A: Bond-slip continuation parameter
                         # Subdomain support (FASE D)
                         subdomain_mgr=subdomain_mgr,
                     )
@@ -1338,7 +1342,7 @@ def run_analysis_xfem_multicrack(
 
         return False, q, coh_states_committed, bulk_states_committed, last_aux_pos, last_aux_sig, "maxit", model.newton_maxit, last_fint
 
-    def ramp_solve_step(u_bar, q_init, coh_committed, bulk_committed):
+    def ramp_solve_step(u_bar, q_init, coh_committed, bulk_committed, bond_gamma: float = 1.0):
         """Gutierrez-style adaptive ramping/continuation after init/grow.
 
         We solve the same displacement level multiple times while gradually
@@ -1361,7 +1365,7 @@ def run_analysis_xfem_multicrack(
 
         # Always do an initial solve at alpha=a (including a=0)
         ok, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, why, iters, fint_last = solve_step(
-            u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a
+            u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a, bond_gamma=bond_gamma
         )
         if not ok:
             return False, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, why, iters, fint_last
@@ -1370,7 +1374,7 @@ def run_analysis_xfem_multicrack(
         while a < 1.0:
             a_try = min(1.0, a + da)
             ok, q_try, coh_try, bulk_try, aux_pos, aux_sig, why, iters, fint_last = solve_step(
-                u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a_try
+                u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a_try, bond_gamma=bond_gamma
             )
             if ok:
                 a = a_try
