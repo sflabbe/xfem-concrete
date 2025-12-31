@@ -317,7 +317,7 @@ def plot_load_displacement(
     ylabel: str = "Load [kN]",
 ):
     """
-    Generate load-displacement curve.
+    Generate load-displacement curve and save CSV.
 
     Parameters
     ----------
@@ -339,6 +339,16 @@ def plot_load_displacement(
         u_mm = history_arr[:, 1] * 1e3  # Assume m → mm
         P_kN = history_arr[:, 2] / 1e3  # Assume N → kN
 
+    # Save CSV
+    csv_file = output_dir / "load_displacement.csv"
+    with open(csv_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['u_mm', 'P_kN'])
+        for i in range(len(u_mm)):
+            writer.writerow([u_mm[i], P_kN[i]])
+    print(f"  CSV saved: {csv_file.name}")
+
+    # Plot
     plt.figure(figsize=(8, 6))
     plt.plot(u_mm, P_kN, 'b-', linewidth=2)
     plt.xlabel(xlabel, fontsize=12)

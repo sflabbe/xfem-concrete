@@ -170,7 +170,7 @@ def test_bond_law_mapping():
     # Create config bond law
     config_law = CEBFIPBondLaw(
         s1=0.6,  # mm
-        s2=0.6,
+        s2=0.8,  # Must be > s1
         s3=1.0,
         tau_max=10.0,  # MPa
         tau_f=5.0,
