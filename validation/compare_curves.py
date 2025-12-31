@@ -10,6 +10,146 @@ import pandas as pd
 from pathlib import Path
 from typing import Tuple, Dict, Optional
 from scipy.interpolate import interp1d
+import warnings
+
+
+def check_monotonicity(u: np.ndarray) -> Tuple[bool, str]:
+    """
+    Check if displacement array is monotonically increasing.
+
+    Parameters
+    ----------
+    u : np.ndarray
+        Displacement array
+
+    Returns
+    -------
+    is_monotonic : bool
+        True if monotonically increasing
+    message : str
+        Warning message if not monotonic
+    """
+    if len(u) < 2:
+        return True, ""
+
+    # Check if strictly increasing
+    diff = np.diff(u)
+    if np.all(diff > 0):
+        return True, ""
+
+    # Check if non-decreasing (allowing equal values)
+    if np.all(diff >= 0):
+        return True, "Warning: Displacement has repeated values (non-strictly increasing)"
+
+    # Not monotonic
+    n_violations = np.sum(diff < 0)
+    return False, f"Error: Displacement is not monotonic ({n_violations} violations)"
+
+
+def detect_and_convert_units(df: pd.DataFrame, expected_u_unit: str = 'mm',
+                              expected_P_unit: str = 'kN') -> pd.DataFrame:
+    """
+    Detect and convert units if necessary.
+
+    Auto-detects if data is in wrong units (e.g., m instead of mm, N instead of kN)
+    and converts to expected units.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with 'u_mm' and 'P_kN' columns
+    expected_u_unit : str
+        Expected displacement unit ('mm' or 'm')
+    expected_P_unit : str
+        Expected force unit ('kN' or 'N')
+
+    Returns
+    -------
+    df_converted : pd.DataFrame
+        DataFrame with converted units if necessary
+    """
+    df_out = df.copy()
+
+    # Check displacement magnitude
+    u_max = df['u_mm'].max()
+    u_min = df['u_mm'].min()
+
+    # If max displacement is < 0.1, likely in meters instead of mm
+    if u_max < 0.1 and u_max > 0:
+        warnings.warn(
+            f"Displacement magnitude ({u_max:.4f}) suggests units are in meters, not mm. "
+            f"Converting to mm (×1000)."
+        )
+        df_out['u_mm'] = df['u_mm'] * 1000.0
+
+    # Check force magnitude
+    P_max = df['P_kN'].max()
+
+    # If max force is > 10000, likely in N instead of kN
+    if P_max > 10000:
+        warnings.warn(
+            f"Force magnitude ({P_max:.0f}) suggests units are in N, not kN. "
+            f"Converting to kN (÷1000)."
+        )
+        df_out['P_kN'] = df['P_kN'] / 1000.0
+
+    return df_out
+
+
+def is_placeholder_data(df: pd.DataFrame, threshold_points: int = 25,
+                        smoothness_threshold: float = 0.01) -> Tuple[bool, str]:
+    """
+    Detect if reference data is likely a synthetic placeholder.
+
+    Heuristics:
+    - Too few data points (< threshold_points)
+    - Perfectly smooth curve (low variance in 2nd derivative)
+    - Evenly spaced points (constant Δu)
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with 'u_mm' and 'P_kN' columns
+    threshold_points : int
+        Minimum expected points for real digitized data
+    smoothness_threshold : float
+        Threshold for 2nd derivative variance (lower = smoother)
+
+    Returns
+    -------
+    is_placeholder : bool
+        True if data appears to be synthetic
+    reason : str
+        Explanation if placeholder detected
+    """
+    n_points = len(df)
+    u = df['u_mm'].values
+    P = df['P_kN'].values
+
+    reasons = []
+
+    # Check 1: Too few points
+    if n_points < threshold_points:
+        reasons.append(f"Only {n_points} data points (expected ≥{threshold_points} for real data)")
+
+    # Check 2: Perfectly evenly spaced
+    if n_points > 2:
+        du = np.diff(u)
+        du_std = np.std(du)
+        du_mean = np.mean(du)
+        if du_std / du_mean < 0.01:  # Coefficient of variation < 1%
+            reasons.append("Points are perfectly evenly spaced (unlikely for digitized data)")
+
+    # Check 3: Suspiciously smooth (low 2nd derivative variance)
+    if n_points > 3:
+        d2P = np.diff(P, n=2)
+        if np.std(d2P) < smoothness_threshold:
+            reasons.append(f"Curve is suspiciously smooth (2nd derivative std={np.std(d2P):.4f})")
+
+    if reasons:
+        return True, "; ".join(reasons)
+    else:
+        return False, ""
 
 
 def load_simulation_curve(case_id: str, mesh: str = "medium", output_dir: Optional[str] = None) -> pd.DataFrame:
@@ -61,7 +201,7 @@ def load_simulation_curve(case_id: str, mesh: str = "medium", output_dir: Option
     return df
 
 
-def load_reference_curve(case_id: str) -> pd.DataFrame:
+def load_reference_curve(case_id: str, check_quality: bool = True) -> pd.DataFrame:
     """
     Load reference experimental P-δ curve from digitized data.
 
@@ -69,6 +209,8 @@ def load_reference_curve(case_id: str) -> pd.DataFrame:
     ----------
     case_id : str
         Case identifier (e.g., "t5a1", "vvbs3", "sorelli")
+    check_quality : bool
+        If True, perform data quality checks (monotonicity, units, placeholder detection)
 
     Returns
     -------
@@ -80,10 +222,15 @@ def load_reference_curve(case_id: str) -> pd.DataFrame:
     FileNotFoundError
         If reference data file not found
 
+    Warnings
+    --------
+    Emits warnings if data appears to be synthetic/placeholder or has quality issues.
+
     Notes
     -----
     Reference data files should be placed in validation/reference_data/<case_id>.csv
     These are digitized from thesis figures using tools like WebPlotDigitizer.
+    See validation/reference_data/SOURCES.md for data provenance.
     """
     ref_dir = Path(__file__).parent / "reference_data"
     ref_file = ref_dir / f"{case_id}.csv"
@@ -91,7 +238,8 @@ def load_reference_curve(case_id: str) -> pd.DataFrame:
     if not ref_file.exists():
         raise FileNotFoundError(
             f"Reference data not found: {ref_file}\n"
-            f"Expected format: CSV with columns 'u_mm,P_kN'"
+            f"Expected format: CSV with columns 'u_mm,P_kN'\n"
+            f"See validation/reference_data/SOURCES.md for data provenance guidelines."
         )
 
     df = pd.read_csv(ref_file)
@@ -100,6 +248,30 @@ def load_reference_curve(case_id: str) -> pd.DataFrame:
     required_cols = ['u_mm', 'P_kN']
     if not all(col in df.columns for col in required_cols):
         raise ValueError(f"Reference CSV must have columns: {required_cols}")
+
+    if check_quality:
+        # Check monotonicity
+        is_monotonic, mono_msg = check_monotonicity(df['u_mm'].values)
+        if not is_monotonic:
+            warnings.warn(f"Reference data for '{case_id}': {mono_msg}")
+        elif mono_msg:
+            # Non-critical warning (e.g., repeated values)
+            warnings.warn(f"Reference data for '{case_id}': {mono_msg}")
+
+        # Auto-detect and convert units
+        df = detect_and_convert_units(df)
+
+        # Check if placeholder
+        is_placeholder, placeholder_reason = is_placeholder_data(df)
+        if is_placeholder:
+            warnings.warn(
+                f"\n{'='*70}\n"
+                f"WARNING: Reference data for '{case_id}' appears to be SYNTHETIC/PLACEHOLDER\n"
+                f"Reason: {placeholder_reason}\n"
+                f"See validation/reference_data/SOURCES.md for digitization guidelines.\n"
+                f"Validation results may not be meaningful until real experimental data is added.\n"
+                f"{'='*70}"
+            )
 
     return df
 
