@@ -1,0 +1,97 @@
+# Case 10: Cyclic Wall C2
+# Reference: Gutiérrez thesis - Cyclic loading wall test
+
+case_id: "10_wall_c2_cyclic"
+description: "RC wall under cyclic lateral loading (C2)"
+
+geometry:
+  length: 800.0       # mm (base width)
+  height: 2000.0      # mm
+  thickness: 150.0    # mm
+  n_elem_x: 16
+  n_elem_y: 40
+  element_type: "Q4"
+  notch_depth: null
+  notch_x: null
+  use_symmetry: false
+
+concrete:
+  E: 28000.0          # MPa
+  nu: 0.2
+  f_c: 28.0           # MPa
+  f_t: 2.7            # MPa
+  G_f: 0.090          # N/mm
+  eps_cu: -0.0035
+  model_type: "cdp_full"
+
+loading:
+  loading_type: "cyclic"
+  max_displacement: 30.0   # mm (peak amplitude)
+  n_steps: 120
+  n_cycles: 5
+  load_x_center: 400.0     # mm (wall top center)
+  load_halfwidth: 100.0    # mm
+
+outputs:
+  output_dir: "outputs/wall_c2_cyclic"
+  case_name: "wall_c2"
+  save_load_displacement: true
+  save_crack_data: true
+  save_energy: true
+  save_crack_pattern: true
+  save_damage_field: true
+  save_base_moment: true
+  save_metrics: true
+  compute_base_moment: true
+
+rebar_layers:
+  # Vertical rebars (distributed)
+  - diameter: 10.0       # mm
+    y_position: 1000.0   # mm (mid-height)
+    n_bars: 8
+    orientation_deg: 90.0  # Vertical
+    bond_disabled_x_range: null
+    steel:
+      E: 200000.0
+      nu: 0.3
+      f_y: 500.0
+      f_u: 600.0
+      hardening_modulus: 2000.0
+    bond_law:
+      law_type: "ceb_fip"
+      s1: 0.8
+      s2: 1.6
+      s3: 10.0
+      tau_max: 11.0
+      tau_f: 2.0
+      alpha: 0.4
+
+  # Horizontal rebars (confinement)
+  - diameter: 8.0        # mm
+    y_position: 500.0    # mm
+    n_bars: 10
+    orientation_deg: 0.0   # Horizontal
+    bond_disabled_x_range: null
+    steel:
+      E: 200000.0
+      nu: 0.3
+      f_y: 500.0
+      f_u: 600.0
+      hardening_modulus: 2000.0
+    bond_law:
+      law_type: "ceb_fip"
+      s1: 0.7
+      s2: 1.4
+      s3: 9.0
+      tau_max: 12.0
+      tau_f: 2.0
+      alpha: 0.4
+
+frp_sheets: []
+fibres: null
+subdomains: []
+
+max_steps: 1200
+tolerance: 1.0e-6
+use_line_search: true
+use_substepping: true

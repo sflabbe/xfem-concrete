@@ -1,0 +1,83 @@
+# Case 08: VVBS3 Beam with CFRP Strengthening
+# Reference: Gutiérrez thesis - FRP-strengthened beam validation
+
+case_id: "08_beam_3pb_vvbs3_cfrp"
+description: "3PB beam VVBS3 with external CFRP sheet"
+
+geometry:
+  length: 3000.0      # mm
+  height: 300.0       # mm
+  thickness: 150.0    # mm
+  n_elem_x: 60
+  n_elem_y: 12
+  element_type: "Q4"
+  notch_depth: null
+  notch_x: null
+  use_symmetry: false
+
+concrete:
+  E: 28000.0          # MPa
+  nu: 0.2
+  f_c: 30.0           # MPa
+  f_t: 2.9            # MPa
+  G_f: 0.095          # N/mm
+  eps_cu: -0.0035
+  model_type: "cdp_full"
+
+loading:
+  loading_type: "monotonic"
+  max_displacement: 12.0   # mm
+  n_steps: 80
+  load_x_center: 1500.0    # mm (midspan)
+  load_halfwidth: 50.0     # mm
+
+outputs:
+  output_dir: "outputs/vvbs3_cfrp"
+  case_name: "vvbs3"
+  save_load_displacement: true
+  save_crack_data: true
+  save_energy: true
+  save_crack_pattern: true
+  save_damage_field: true
+  save_metrics: true
+
+rebar_layers:
+  # Bottom rebar (2Ø12)
+  - diameter: 12.0       # mm
+    y_position: 30.0     # mm from bottom
+    n_bars: 2
+    orientation_deg: 0.0
+    bond_disabled_x_range: null
+    steel:
+      E: 200000.0
+      nu: 0.3
+      f_y: 500.0
+      f_u: 600.0
+      hardening_modulus: 2000.0
+    bond_law:
+      law_type: "ceb_fip"
+      s1: 0.8
+      s2: 1.6
+      s3: 10.0
+      tau_max: 11.0
+      tau_f: 2.0
+      alpha: 0.4
+
+frp_sheets:
+  # CFRP sheet at soffit
+  - material_type: "cfrp"
+    thickness: 0.165     # mm
+    width: 100.0         # mm
+    E_frp: 230000.0      # MPa
+    f_frp: 3800.0        # MPa
+    bond_length: 2500.0  # mm
+    position_y: 0.0      # mm (bottom surface)
+    debond_mode: "cohesive"
+
+fibres: null
+subdomains: []
+
+max_steps: 800
+tolerance: 1.0e-6
+use_line_search: true
+use_substepping: true
