@@ -940,7 +940,7 @@ def _bond_slip_assembly_numba(
     n_seg = segs.shape[0]
 
     f = np.zeros(ndof, dtype=np.float64)
-    max_entries = n_seg * 32  # 8 (bond interface) + 16 (steel axial) + margin
+    max_entries = n_seg * 96  # 64 (bond 8x8 full Jacobian) + 16 (steel axial) + margin
     rows = np.empty(max_entries, dtype=np.int64)
     cols = np.empty(max_entries, dtype=np.int64)
     data = np.empty(max_entries, dtype=np.float64)
@@ -1101,33 +1101,114 @@ def _bond_slip_assembly_numba(
         f[dof_c2x] += 0.5 * Fx_c
         f[dof_c2y] += 0.5 * Fy_c
 
-        # Stiffness contribution: K = dtau_ds * perimeter * L0 * (t ⊗ t)
+        # Stiffness contribution: K_seg = K_bond * g ⊗ g^T (full 8x8 segment Jacobian)
+        # where:
+        #   K_bond = dtau_ds * perimeter * L0
+        #   g = [∂s/∂u] = [-t/2, -t/2, +t/2, +t/2] for [concrete_n1, concrete_n2, steel_n1, steel_n2]
+        #   t = [cx, cy] is the bar tangent vector
+        #
+        # This gives the CONSISTENT TANGENT that couples steel ↔ concrete DOFs
+        # (fixes Newton convergence issues from previous diagonal-only placeholder)
+
         K_bond = dtau_ds * perimeter * L0
 
-        # Directional stiffness matrix (only tangential component)
-        Kxx = K_bond * cx * cx
-        Kxy = K_bond * cx * cy
-        Kyy = K_bond * cy * cy
+        # Gradient vector components (scaled by 0.5 for midpoint averaging)
+        # Concrete node 1: -0.5 * t
+        g_c1x = -0.5 * cx
+        g_c1y = -0.5 * cy
+        # Concrete node 2: -0.5 * t
+        g_c2x = -0.5 * cx
+        g_c2y = -0.5 * cy
+        # Steel node 1: +0.5 * t
+        g_s1x = +0.5 * cx
+        g_s1y = +0.5 * cy
+        # Steel node 2: +0.5 * t
+        g_s2x = +0.5 * cx
+        g_s2y = +0.5 * cy
 
-        # Coupling between steel and concrete DOFs (schematic; simplified here)
-        # Full implementation requires proper assembly over all 8 DOFs
+        # Assemble full 8x8 block: K_seg[i,j] = K_bond * g[i] * g[j]
+        # This is the outer product g ⊗ g^T
+        # Each row-column pair contributes one entry
+        if entry_idx + 64 < max_entries:
+            # Row 1: concrete node 1, x-direction
+            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_c1x * g_c1x; entry_idx += 1
+            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_c1x * g_c1y; entry_idx += 1
+            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_c1x * g_c2x; entry_idx += 1
+            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_c1x * g_c2y; entry_idx += 1
+            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_c1x * g_s1x; entry_idx += 1
+            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_c1x * g_s1y; entry_idx += 1
+            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_c1x * g_s2x; entry_idx += 1
+            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_c1x * g_s2y; entry_idx += 1
 
-        # For brevity: add diagonal penalty (correct implementation needs off-diagonal terms)
-        # This is a placeholder; full derivation yields block matrix structure
+            # Row 2: concrete node 1, y-direction
+            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_c1y * g_c1x; entry_idx += 1
+            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_c1y * g_c1y; entry_idx += 1
+            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_c1y * g_c2x; entry_idx += 1
+            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_c1y * g_c2y; entry_idx += 1
+            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_c1y * g_s1x; entry_idx += 1
+            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_c1y * g_s1y; entry_idx += 1
+            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_c1y * g_s2x; entry_idx += 1
+            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_c1y * g_s2y; entry_idx += 1
 
-        # Example: diagonal terms (simplified)
-        if entry_idx + 8 < max_entries:
-            # Steel DOFs (positive stiffness)
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1x; data[entry_idx] = 0.25 * Kxx; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1y; data[entry_idx] = 0.25 * Kyy; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2x; data[entry_idx] = 0.25 * Kxx; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2y; data[entry_idx] = 0.25 * Kyy; entry_idx += 1
+            # Row 3: concrete node 2, x-direction
+            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_c2x * g_c1x; entry_idx += 1
+            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_c2x * g_c1y; entry_idx += 1
+            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_c2x * g_c2x; entry_idx += 1
+            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_c2x * g_c2y; entry_idx += 1
+            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_c2x * g_s1x; entry_idx += 1
+            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_c2x * g_s1y; entry_idx += 1
+            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_c2x * g_s2x; entry_idx += 1
+            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_c2x * g_s2y; entry_idx += 1
 
-            # Concrete DOFs (positive stiffness, opposite direction)
-            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_c1x; data[entry_idx] = 0.25 * Kxx; entry_idx += 1
-            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_c1y; data[entry_idx] = 0.25 * Kyy; entry_idx += 1
-            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c2x; data[entry_idx] = 0.25 * Kxx; entry_idx += 1
-            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c2y; data[entry_idx] = 0.25 * Kyy; entry_idx += 1
+            # Row 4: concrete node 2, y-direction
+            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_c2y * g_c1x; entry_idx += 1
+            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_c2y * g_c1y; entry_idx += 1
+            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_c2y * g_c2x; entry_idx += 1
+            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_c2y * g_c2y; entry_idx += 1
+            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_c2y * g_s1x; entry_idx += 1
+            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_c2y * g_s1y; entry_idx += 1
+            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_c2y * g_s2x; entry_idx += 1
+            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_c2y * g_s2y; entry_idx += 1
+
+            # Row 5: steel node 1, x-direction
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_s1x * g_c1x; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_s1x * g_c1y; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_s1x * g_c2x; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_s1x * g_c2y; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_s1x * g_s1x; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_s1x * g_s1y; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s1x * g_s2x; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s1x * g_s2y; entry_idx += 1
+
+            # Row 6: steel node 1, y-direction
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_s1y * g_c1x; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_s1y * g_c1y; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_s1y * g_c2x; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_s1y * g_c2y; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_s1y * g_s1x; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_s1y * g_s1y; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s1y * g_s2x; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s1y * g_s2y; entry_idx += 1
+
+            # Row 7: steel node 2, x-direction
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_s2x * g_c1x; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_s2x * g_c1y; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_s2x * g_c2x; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_s2x * g_c2y; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_s2x * g_s1x; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_s2x * g_s1y; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s2x * g_s2x; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s2x * g_s2y; entry_idx += 1
+
+            # Row 8: steel node 2, y-direction
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_s2y * g_c1x; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_s2y * g_c1y; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_s2y * g_c2x; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_s2y * g_c2y; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_s2y * g_s1x; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_s2y * g_s1y; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s2y * g_s2x; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s2y * g_s2y; entry_idx += 1
 
         # Steel axial stiffness (if steel_EA > 0)
         if steel_EA > 0.0 and entry_idx + 16 < max_entries:
