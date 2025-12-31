@@ -955,6 +955,7 @@ def _bond_slip_assembly_numba(
     alpha = bond_params[5]
     perimeter = bond_params[6]  # π * d_bar
     dtau_max = bond_params[7] if bond_params.shape[0] > 7 else 1e20  # Tangent cap (Priority #1)
+    gamma = bond_params[8] if bond_params.shape[0] > 8 else 1.0  # BLOQUE 3: Continuation parameter
 
     entry_idx = 0
 
@@ -1103,14 +1104,16 @@ def _bond_slip_assembly_numba(
 
         # Stiffness contribution: K_seg = K_bond * g ⊗ g^T (full 8x8 segment Jacobian)
         # where:
-        #   K_bond = dtau_ds * perimeter * L0
+        #   K_bond = gamma * dtau_ds * perimeter * L0  (BLOQUE 3: gamma scaling for continuation)
         #   g = [∂s/∂u] = [-t/2, -t/2, +t/2, +t/2] for [concrete_n1, concrete_n2, steel_n1, steel_n2]
         #   t = [cx, cy] is the bar tangent vector
         #
         # This gives the CONSISTENT TANGENT that couples steel ↔ concrete DOFs
         # (fixes Newton convergence issues from previous diagonal-only placeholder)
+        #
+        # Gamma continuation: start with gamma=0 (no bond), ramp to gamma=1 (full bond)
 
-        K_bond = dtau_ds * perimeter * L0
+        K_bond = gamma * dtau_ds * perimeter * L0
 
         # Gradient vector components (scaled by 0.5 for midpoint averaging)
         # Concrete node 1: -0.5 * t
@@ -1262,6 +1265,7 @@ def assemble_bond_slip(
     enable_validation: bool = True,  # Part A1: Enable preflight checks
     perimeter: Optional[float] = None,  # Explicit perimeter for robustness
     segment_mask: Optional[np.ndarray] = None,  # Mask to disable bond in specific segments
+    bond_gamma: float = 1.0,  # BLOQUE 3: Continuation parameter for bond-slip activation
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Assemble bond-slip interface forces and stiffness.
 
@@ -1292,6 +1296,11 @@ def assemble_bond_slip(
     segment_mask : np.ndarray, optional
         Boolean mask [n_seg] where True = bond disabled for that segment.
         Useful for "empty element" regions in pullout tests.
+    bond_gamma : float, optional
+        Continuation parameter for bond-slip activation [0, 1]. Default: 1.0.
+        Scales the bond tangent stiffness: K_bond = gamma * k_τ.
+        Use gamma < 1 for easier initial convergence, then ramp up to 1.
+        Gamma=0 → no bond (only steel axial), Gamma=1 → full bond.
 
     Returns
     -------
@@ -1339,6 +1348,7 @@ def assemble_bond_slip(
             bond_law.alpha,
             perimeter,
             dtau_max,
+            bond_gamma,  # BLOQUE 3: Continuation parameter
         ], dtype=float)
 
     if use_numba and NUMBA_AVAILABLE:
@@ -1454,6 +1464,7 @@ def assemble_bond_slip(
             bond_states=bond_states,
             steel_EA=steel_EA,
             perimeter=perimeter,  # Pass computed perimeter
+            bond_gamma=bond_gamma,  # BLOQUE 3: Pass gamma to Python fallback
         )
 
     return f_bond, K_bond, bond_states_new
@@ -1481,6 +1492,7 @@ def _bond_slip_assembly_python(
     bond_states: BondSlipStateArrays,
     steel_EA: float = 0.0,
     perimeter: float = None,
+    bond_gamma: float = 1.0,  # BLOQUE 3: Continuation parameter
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Pure Python fallback for bond-slip assembly (for debugging).
 
@@ -1582,8 +1594,8 @@ def _bond_slip_assembly_python(
         f_bond[dof_c2x] += 0.5 * Fx_c
         f_bond[dof_c2y] += 0.5 * Fy_c
 
-        # Stiffness
-        K_bond = dtau_ds * perimeter * L0
+        # Stiffness (with gamma continuation scaling, BLOQUE 3)
+        K_bond = bond_gamma * dtau_ds * perimeter * L0
         Kxx = K_bond * cx * cx
         Kxy = K_bond * cx * cy
         Kyy = K_bond * cy * cy
