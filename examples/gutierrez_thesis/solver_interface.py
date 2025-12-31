@@ -608,6 +608,9 @@ def run_case_solver(
     case: CaseConfig,
     mesh_factor: float = 1.0,
     enable_postprocess: bool = True,
+    max_steps: Optional[int] = None,
+    return_bundle: bool = True,
+    output_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run XFEM solver for a thesis case.
@@ -620,6 +623,12 @@ def run_case_solver(
         Mesh refinement factor (1.0 = default)
     enable_postprocess : bool
         Enable comprehensive postprocessing (CSV, PNG outputs)
+    max_steps : int, optional
+        Override number of steps (if None, use case.loading.n_steps)
+    return_bundle : bool
+        If True, return comprehensive bundle (default). If False, minimal dict.
+    output_dir : str, optional
+        Override output directory (if None, use case.outputs.output_dir)
 
     Returns
     -------
@@ -662,6 +671,14 @@ def run_case_solver(
         u_targets = None  # Will use linspace in solver
     else:
         raise NotImplementedError(f"Unsupported loading type: {type(case.loading)}")
+
+    # Override nsteps if max_steps provided (for regression tests)
+    if max_steps is not None:
+        nsteps = max_steps
+
+    # Override output_dir if provided (for regression tests)
+    if output_dir is not None:
+        case.outputs.output_dir = output_dir
 
     # Create cohesive law (if using cohesive cracks)
     # For pull-out tests without cracks, we still need a cohesive law object
