@@ -59,15 +59,34 @@ Each reference dataset is classified as:
 When digitizing experimental curves:
 
 1. **Use WebPlotDigitizer** (https://automeris.io/WebPlotDigitizer/)
-2. **Extract at least 20-30 points** to capture curve shape accurately
-3. **Record metadata**:
+   - Upload figure image (PDF, PNG, JPG)
+   - Set axes: define X (displacement) and Y (force) axes with units
+   - Extract points: click along curve (aim for 25+ points, focus on peak and post-peak regions)
+   - Export as CSV
+
+2. **Import and clean with provided script**:
+   ```bash
+   cd validation/reference_data
+   python import_webplotdigitizer.py --input raw_data/case.csv --output case.csv --case case_id --interactive
+   ```
+   The script will:
+   - Auto-detect and convert units (m→mm, N→kN)
+   - Remove duplicates and sort by displacement
+   - Validate monotonicity
+   - Generate metadata template for this SOURCES.md file
+
+3. **Record metadata** (prompted by --interactive flag):
    - Exact figure number and page
    - Paper DOI or thesis chapter
    - Date of digitization
    - Digitization software/method
-4. **Verify units**: Ensure u_mm and P_kN (convert if necessary)
-5. **Check monotonicity**: Displacement should be monotonically increasing
-6. **Update this file** with complete provenance information
+
+4. **Verify quality**:
+   - Check that curve shape matches original figure
+   - Ensure at least 20-30 points (preferably 30-50 for complex curves)
+   - Verify displacement is monotonically increasing
+
+5. **Update this file** with complete provenance information (copy from generated template)
 
 ## Data Validation
 
@@ -81,11 +100,24 @@ The `validation/compare_curves.py` script will:
 
 To replace synthetic data with real digitized curves:
 
-1. Digitize experimental curve following guidelines above
-2. Save as CSV with `u_mm,P_kN` columns
-3. Update status in this file from SYNTHETIC to REAL
-4. Add complete source metadata (figure, page, DOI, date)
-5. Commit changes with message: `data(validation): replace [case] with digitized experimental data`
+1. **Digitize** experimental curve following guidelines above
+2. **Import** using `import_webplotdigitizer.py` script (see Digitization Guidelines)
+3. **Update** status in this file from SYNTHETIC to REAL
+4. **Add** complete source metadata (figure, page, DOI, date) - use generated template
+5. **Test** validation: `pytest tests/test_validation_curves.py::test_validate_<case>_coarse -v`
+6. **Commit** changes: `git add <case>.csv && git commit -m "data(validation): replace <case> with digitized experimental data"`
+
+## Import Pipeline Tools
+
+Located in `validation/reference_data/`:
+
+- **import_webplotdigitizer.py**: Main import script
+  - Auto-detects units and converts to standard format (mm, kN)
+  - Cleans data (removes duplicates, sorts, validates)
+  - Generates metadata template
+  - Usage: `python import_webplotdigitizer.py --input raw.csv --output case.csv --case case_id --interactive`
+
+- **SOURCES.md** (this file): Provenance documentation for all reference datasets
 
 ## Contact
 
