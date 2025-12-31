@@ -19,9 +19,15 @@ from typing import Optional, Dict, Callable
 from examples.gutierrez_thesis.cases.case_01_pullout_lettow import create_case_01
 from examples.gutierrez_thesis.cases.case_02_sspot_frp import create_case_02
 from examples.gutierrez_thesis.cases.case_03_tensile_stn12 import create_case_03
-from examples.gutierrez_thesis.cases.case_04_beam_3pb_t5a1 import create_case_04
+from examples.gutierrez_thesis.cases.case_04_beam_3pb_t5a1 import create_case_04  # Legacy
+from examples.gutierrez_thesis.cases.case_04a_beam_3pb_t5a1_bosco import create_case_04a
+from examples.gutierrez_thesis.cases.case_04b_beam_3pb_t6a1_bosco import create_case_04b
 from examples.gutierrez_thesis.cases.case_05_wall_c1_cyclic import create_case_05
 from examples.gutierrez_thesis.cases.case_06_fibre_tensile import create_case_06
+from examples.gutierrez_thesis.cases.case_07_beam_4pb_jason_4pbt import create_case_07
+from examples.gutierrez_thesis.cases.case_08_beam_3pb_vvbs3_cfrp import create_case_08
+from examples.gutierrez_thesis.cases.case_09_beam_4pb_fibres_sorelli import create_case_09
+from examples.gutierrez_thesis.cases.case_10_wall_c2_cyclic import create_case_10
 
 
 # ============================================================================
@@ -32,9 +38,15 @@ CASE_REGISTRY: Dict[str, Callable] = {
     "01_pullout_lettow": create_case_01,
     "02_sspot_frp": create_case_02,
     "03_tensile_stn12": create_case_03,
-    "04_beam_3pb_t5a1": create_case_04,
+    "04_beam_3pb_t5a1": create_case_04,  # Legacy (keep for compatibility)
+    "04a_beam_3pb_t5a1_bosco": create_case_04a,
+    "04b_beam_3pb_t6a1_bosco": create_case_04b,
     "05_wall_c1_cyclic": create_case_05,
     "06_fibre_tensile": create_case_06,
+    "07_beam_4pb_jason_4pbt": create_case_07,
+    "08_beam_3pb_vvbs3_cfrp": create_case_08,
+    "09_beam_4pb_fibres_sorelli": create_case_09,
+    "10_wall_c2_cyclic": create_case_10,
 }
 
 CASE_ALIASES = {
@@ -47,15 +59,28 @@ CASE_ALIASES = {
     # Tensile
     "stn12": "03_tensile_stn12",
     "tensile": "03_tensile_stn12",
-    # Beams
+    # Beams (legacy)
     "beam": "04_beam_3pb_t5a1",
     "3pb": "04_beam_3pb_t5a1",
-    "t5a1": "04_beam_3pb_t5a1",
+    # BOSCO beams
+    "t5a1": "04a_beam_3pb_t5a1_bosco",
+    "bosco_t5a1": "04a_beam_3pb_t5a1_bosco",
+    "t6a1": "04b_beam_3pb_t6a1_bosco",
+    "bosco_t6a1": "04b_beam_3pb_t6a1_bosco",
+    # Jason 4PB
+    "jason": "07_beam_4pb_jason_4pbt",
+    "4pb": "07_beam_4pb_jason_4pbt",
+    # CFRP
+    "vvbs3": "08_beam_3pb_vvbs3_cfrp",
+    "cfrp": "08_beam_3pb_vvbs3_cfrp",
+    # Sorelli fibres
+    "sorelli": "09_beam_4pb_fibres_sorelli",
     # Walls
     "wall": "05_wall_c1_cyclic",
     "c1": "05_wall_c1_cyclic",
+    "c2": "10_wall_c2_cyclic",
     "cyclic": "05_wall_c1_cyclic",
-    # Fibres
+    # Fibres (tensile)
     "fibre": "06_fibre_tensile",
     "fiber": "06_fibre_tensile",
 }

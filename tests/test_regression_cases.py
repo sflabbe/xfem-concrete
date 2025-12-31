@@ -25,8 +25,14 @@ try:
     from examples.gutierrez_thesis.cases.case_02_sspot_frp import create_case_02
     from examples.gutierrez_thesis.cases.case_03_tensile_stn12 import create_case_03
     from examples.gutierrez_thesis.cases.case_04_beam_3pb_t5a1 import create_case_04
+    from examples.gutierrez_thesis.cases.case_04a_beam_3pb_t5a1_bosco import create_case_04a
+    from examples.gutierrez_thesis.cases.case_04b_beam_3pb_t6a1_bosco import create_case_04b
     from examples.gutierrez_thesis.cases.case_05_wall_c1_cyclic import create_case_05
     from examples.gutierrez_thesis.cases.case_06_fibre_tensile import create_case_06
+    from examples.gutierrez_thesis.cases.case_07_beam_4pb_jason_4pbt import create_case_07
+    from examples.gutierrez_thesis.cases.case_08_beam_3pb_vvbs3_cfrp import create_case_08
+    from examples.gutierrez_thesis.cases.case_09_beam_4pb_fibres_sorelli import create_case_09
+    from examples.gutierrez_thesis.cases.case_10_wall_c2_cyclic import create_case_10
     from examples.gutierrez_thesis.solver_interface import run_case_solver
 
 except ImportError as e:
@@ -179,8 +185,14 @@ CASE_CREATORS = {
     'case_02_sspot_frp': create_case_02,
     'case_03_tensile_stn12': create_case_03,
     'case_04_beam_3pb_t5a1': create_case_04,
+    'case_04a_beam_3pb_t5a1_bosco': create_case_04a,
+    'case_04b_beam_3pb_t6a1_bosco': create_case_04b,
     'case_05_wall_c1_cyclic': create_case_05,
     'case_06_fibre_tensile': create_case_06,
+    'case_07_beam_4pb_jason_4pbt': create_case_07,
+    'case_08_beam_3pb_vvbs3_cfrp': create_case_08,
+    'case_09_beam_4pb_fibres_sorelli': create_case_09,
+    'case_10_wall_c2_cyclic': create_case_10,
 }
 
 
@@ -190,10 +202,17 @@ CASE_CREATORS = {
     "case_02_sspot_frp",
     "case_03_tensile_stn12",
     "case_04_beam_3pb_t5a1",
+    "case_04a_beam_3pb_t5a1_bosco",
+    "case_04b_beam_3pb_t6a1_bosco",
     "case_05_wall_c1_cyclic",
     "case_06_fibre_tensile",
+    "case_07_beam_4pb_jason_4pbt",
+    "case_08_beam_3pb_vvbs3_cfrp",
+    "case_09_beam_4pb_fibres_sorelli",
+    "case_10_wall_c2_cyclic",
 ])
 @pytest.mark.parametrize("mesh", ["coarse"])  # Start with coarse only
+@pytest.mark.slow  # Mark as slow test (can be skipped in CI)
 def test_regression_case(case_id, mesh):
     """
     Run regression test for a specific case and mesh density.
@@ -280,3 +299,33 @@ def test_case_05_coarse():
 def test_case_06_coarse():
     """Regression test: Case 06 Fibre Tensile (coarse mesh)"""
     test_regression_case("case_06_fibre_tensile", "coarse")
+
+
+def test_case_04a_coarse():
+    """Regression test: Case 04a BOSCO T5A1 (coarse mesh)"""
+    test_regression_case("case_04a_beam_3pb_t5a1_bosco", "coarse")
+
+
+def test_case_04b_coarse():
+    """Regression test: Case 04b BOSCO T6A1 (coarse mesh)"""
+    test_regression_case("case_04b_beam_3pb_t6a1_bosco", "coarse")
+
+
+def test_case_07_coarse():
+    """Regression test: Case 07 Jason 4PB (coarse mesh)"""
+    test_regression_case("case_07_beam_4pb_jason_4pbt", "coarse")
+
+
+def test_case_08_coarse():
+    """Regression test: Case 08 VVBS3 CFRP (coarse mesh)"""
+    test_regression_case("case_08_beam_3pb_vvbs3_cfrp", "coarse")
+
+
+def test_case_09_coarse():
+    """Regression test: Case 09 Sorelli Fibres (coarse mesh)"""
+    test_regression_case("case_09_beam_4pb_fibres_sorelli", "coarse")
+
+
+def test_case_10_coarse():
+    """Regression test: Case 10 Wall C2 (coarse mesh)"""
+    test_regression_case("case_10_wall_c2_cyclic", "coarse")
