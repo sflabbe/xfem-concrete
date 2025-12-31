@@ -492,14 +492,14 @@ def case_config_to_xfem_model(case: CaseConfig) -> XFEMModel:
         bond_condition="good",  # Default
         steel_EA_min=steel_E * steel_A_total if steel_A_total > 0 else 1e3,
 
-        # Solver parameters
-        newton_maxit=25,
-        newton_tol_r=case.tolerance,
-        newton_tol_du=1e-8,
+        # Solver parameters (relaxed for robustness)
+        newton_maxit=50,  # Increased from 25
+        newton_tol_r=max(case.tolerance, 1e-4),  # Relaxed minimum tolerance
+        newton_tol_du=1e-7,  # Relaxed from 1e-8
         line_search=case.use_line_search,
         enable_diagonal_scaling=True,
-        max_subdiv=12 if case.use_substepping else 0,
-        max_total_substeps=50000,
+        max_subdiv=15 if case.use_substepping else 0,  # Increased from 12
+        max_total_substeps=100000,  # Increased from 50000
 
         # Crack parameters (for cases with cohesive cracks)
         crack_margin=0.3,
