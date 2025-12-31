@@ -97,7 +97,7 @@ MESH_PRESETS = {
 # SOLVER INTERFACE
 # ============================================================================
 
-def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, cli_args=None):
+def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enable_postprocess: bool = True, cli_args=None):
     """
     Run a single case with the XFEM solver.
 
@@ -161,7 +161,7 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, cli_a
         from examples.gutierrez_thesis.solver_interface import run_case_solver
         from examples.gutierrez_thesis.postprocess_comprehensive import postprocess_results
 
-        results = run_case_solver(case_config, mesh_factor=mesh_factor)
+        results = run_case_solver(case_config, mesh_factor=mesh_factor, enable_postprocess=enable_postprocess)
 
         # Save results
         print("\nSaving results...")
@@ -312,6 +312,11 @@ Examples:
         type=str,
         help="Override output directory"
     )
+    parser.add_argument(
+        "--no-post",
+        action="store_true",
+        help="Disable postprocessing (skip CSV/PNG generation)"
+    )
 
     args = parser.parse_args()
 
@@ -352,7 +357,8 @@ Examples:
             print("Supported formats: .yaml, .yml, .json")
             sys.exit(1)
 
-        run_case(case_config, mesh_factor, args.dry_run, cli_args=args)
+        enable_post = not args.no_post
+        run_case(case_config, mesh_factor, args.dry_run, enable_postprocess=enable_post, cli_args=args)
 
     # Run cases from registry
     elif args.case.lower() == "all":
@@ -363,7 +369,8 @@ Examples:
 
         for case_id, factory in CASE_REGISTRY.items():
             case_config = factory()
-            run_case(case_config, mesh_factor, args.dry_run, cli_args=args)
+            enable_post = not args.no_post
+        run_case(case_config, mesh_factor, args.dry_run, enable_postprocess=enable_post, cli_args=args)
 
     else:
         # Run single case
@@ -373,7 +380,8 @@ Examples:
 
         factory = CASE_REGISTRY[case_id]
         case_config = factory()
-        run_case(case_config, mesh_factor, args.dry_run, cli_args=args)
+        enable_post = not args.no_post
+        run_case(case_config, mesh_factor, args.dry_run, enable_postprocess=enable_post, cli_args=args)
 
 
 if __name__ == "__main__":
