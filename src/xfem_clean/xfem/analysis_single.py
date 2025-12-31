@@ -432,7 +432,9 @@ def run_analysis_xfem(
                 steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
                 rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
                 bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
-                bond_gamma=bond_gamma,  # BLOQUE A: Bond-slip continuation parameter
+                bond_gamma=bond_gamma,  # BLOQUE B: Bond-slip continuation parameter
+                bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,  # BLOQUE C
+                bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,  # BLOQUE C
                 subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
             )
             if model.debug_newton:
@@ -557,7 +559,9 @@ def run_analysis_xfem(
                         steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
                         rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
                         bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
-                        bond_gamma=bond_gamma,  # BLOQUE A: Bond-slip continuation parameter
+                        bond_gamma=bond_gamma,  # BLOQUE B: Bond-slip continuation parameter
+                        bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,  # BLOQUE C
+                        bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,  # BLOQUE C
                         subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
                     )
                     # Perfect bond rebar (only if bond-slip disabled)

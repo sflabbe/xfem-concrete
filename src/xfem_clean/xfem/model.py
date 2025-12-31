@@ -100,6 +100,10 @@ class XFEMModel:
     bond_gamma_min: float = 0.0     # Start gamma (0 = no bond, only steel axial EA)
     bond_gamma_max: float = 1.0     # End gamma (1 = full bond-slip)
 
+    # Bond-slip tangent regularization (BLOQUE C: stabilization near s≈0)
+    bond_k_cap: Optional[float] = None  # Cap dtau/ds [Pa/m] (None = no cap)
+    bond_s_eps: float = 0.0             # Smooth regularization epsilon [m] (0 = disabled)
+
     # Dowel action at crack-rebar intersections (Phase 5)
     enable_dowel: bool = False
     dowel_penalty_factor: float = 1.0

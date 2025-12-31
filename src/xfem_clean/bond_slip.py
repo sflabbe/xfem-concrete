@@ -1265,7 +1265,9 @@ def assemble_bond_slip(
     enable_validation: bool = True,  # Part A1: Enable preflight checks
     perimeter: Optional[float] = None,  # Explicit perimeter for robustness
     segment_mask: Optional[np.ndarray] = None,  # Mask to disable bond in specific segments
-    bond_gamma: float = 1.0,  # BLOQUE 3: Continuation parameter for bond-slip activation
+    bond_gamma: float = 1.0,  # BLOQUE B: Continuation parameter for bond-slip activation
+    bond_k_cap: Optional[float] = None,  # BLOQUE C: Cap dtau/ds [Pa/m] (None = no cap)
+    bond_s_eps: float = 0.0,  # BLOQUE C: Smooth regularization epsilon [m]
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Assemble bond-slip interface forces and stiffness.
 
@@ -1301,6 +1303,12 @@ def assemble_bond_slip(
         Scales the bond tangent stiffness: K_bond = gamma * k_τ.
         Use gamma < 1 for easier initial convergence, then ramp up to 1.
         Gamma=0 → no bond (only steel axial), Gamma=1 → full bond.
+    bond_k_cap : float, optional
+        Cap dtau/ds to this value [Pa/m]. None = no capping.
+        Prevents excessively stiff tangent near s≈0.
+    bond_s_eps : float, optional
+        Smoothing epsilon [m]. If > 0, evaluates slip as s_eff = sqrt(s^2 + eps^2).
+        Regularizes tangent near s≈0.
 
     Returns
     -------
@@ -1573,7 +1581,21 @@ def _bond_slip_assembly_python(
 
         # Bond stress
         s_max = max(bond_states.s_max[i], abs(s))
-        tau, dtau_ds = bond_law.tau_and_tangent(s, s_max)
+
+        # BLOQUE C: Optional slip smoothing (regularization near s≈0)
+        s_eval = s
+        if bond_s_eps > 0.0:
+            # Evaluate tau at smoothed slip: s_eff = sqrt(s^2 + eps^2)
+            s_abs = abs(s)
+            s_sign = 1.0 if s >= 0 else -1.0
+            s_eff = math.sqrt(s_abs**2 + bond_s_eps**2)
+            s_eval = s_sign * s_eff
+
+        tau, dtau_ds = bond_law.tau_and_tangent(s_eval, s_max)
+
+        # BLOQUE C: Optional tangent capping (prevent excessive stiffness)
+        if bond_k_cap is not None and dtau_ds > bond_k_cap:
+            dtau_ds = bond_k_cap
 
         # Bond force
         F_bond = tau * perimeter * L0
