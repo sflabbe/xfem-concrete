@@ -84,6 +84,82 @@ case_06_fibre_tensile:
     crack_opening_mm: [0.0, 10.0]
     energy_J: [0.01, 5000.0]
 
+case_04a_beam_3pb_t5a1_bosco:
+  coarse:
+    P_max_kN: [10.0, 2000.0]    # Peak load [kN]
+    u_at_Pmax_mm: [0.5, 50.0]   # Midspan deflection at peak [mm]
+    energy_J: [10.0, 50000.0]
+    num_cracks: [1, 30]
+  medium:
+    P_max_kN: [10.0, 2000.0]
+    u_at_Pmax_mm: [0.5, 50.0]
+    energy_J: [10.0, 50000.0]
+    num_cracks: [1, 30]
+
+case_04b_beam_3pb_t6a1_bosco:
+  coarse:
+    P_max_kN: [20.0, 3000.0]    # Peak load (higher than T5A1 due to 8Ø12) [kN]
+    u_at_Pmax_mm: [0.5, 50.0]   # Midspan deflection at peak [mm]
+    energy_J: [20.0, 70000.0]
+    num_cracks: [1, 30]
+  medium:
+    P_max_kN: [20.0, 3000.0]
+    u_at_Pmax_mm: [0.5, 50.0]
+    energy_J: [20.0, 70000.0]
+    num_cracks: [1, 30]
+
+case_07_beam_4pb_jason_4pbt:
+  coarse:
+    P_max_kN: [5.0, 1500.0]     # Peak load [kN]
+    u_at_Pmax_mm: [0.2, 30.0]   # Deflection at peak [mm]
+    energy_J: [5.0, 30000.0]
+    num_cracks: [1, 25]
+  medium:
+    P_max_kN: [5.0, 1500.0]
+    u_at_Pmax_mm: [0.2, 30.0]
+    energy_J: [5.0, 30000.0]
+    num_cracks: [1, 25]
+
+case_08_beam_3pb_vvbs3_cfrp:
+  coarse:
+    P_max_kN: [20.0, 3000.0]    # Peak load (enhanced by CFRP) [kN]
+    u_at_Pmax_mm: [0.5, 50.0]   # Midspan deflection at peak [mm]
+    energy_J: [20.0, 80000.0]
+    num_cracks: [1, 25]
+  medium:
+    P_max_kN: [20.0, 3000.0]
+    u_at_Pmax_mm: [0.5, 50.0]
+    energy_J: [20.0, 80000.0]
+    num_cracks: [1, 25]
+
+case_09_beam_4pb_fibres_sorelli:
+  coarse:
+    P_max_kN: [0.01, 50.0]      # Peak load (small specimen) [kN]
+    u_at_Pmax_mm: [0.01, 5.0]   # Deflection at peak [mm]
+    P_tail_kN: [0.001, 20.0]    # Post-peak fibre contribution [kN]
+    energy_J: [0.001, 100.0]
+    num_cracks: [1, 5]
+  medium:
+    P_max_kN: [0.01, 50.0]
+    u_at_Pmax_mm: [0.01, 5.0]
+    P_tail_kN: [0.001, 20.0]
+    energy_J: [0.001, 100.0]
+    num_cracks: [1, 5]
+
+case_10_wall_c2_cyclic:
+  coarse:
+    P_max_kN: [10.0, 5000.0]    # Peak lateral force [kN]
+    u_at_Pmax_mm: [1.0, 100.0]  # Lateral displacement at peak [mm]
+    energy_J: [10.0, 120000.0]  # Cumulative dissipated energy [J]
+    num_cracks: [0, 60]
+    num_cycles: [1, 100]        # Number of load cycles completed
+  medium:
+    P_max_kN: [10.0, 5000.0]
+    u_at_Pmax_mm: [1.0, 100.0]
+    energy_J: [10.0, 120000.0]
+    num_cracks: [0, 60]
+    num_cycles: [1, 100]
+
 # Notes:
 # - Ranges are intentionally conservative (wide) for initial smoke testing
 # - Tighten ranges as experimental/analytical benchmarks become available
