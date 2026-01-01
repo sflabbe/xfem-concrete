@@ -673,7 +673,10 @@ class BanholzerBondLaw:
 class DowelActionModel:
     """Dowel action model for transverse stress-opening relationship.
 
-    Based on Brenna et al. model (Eqs. 3.62-3.68 in dissertation).
+    Based on thesis equations 3.62-3.68 (Brenna et al. model).
+
+    This model captures the transverse (normal) stress between steel and concrete
+    at crack intersections due to dowel action.
 
     Parameters
     ----------
@@ -681,36 +684,29 @@ class DowelActionModel:
         Bar diameter [m]
     f_c : float
         Concrete compressive strength [Pa]
-    E_s : float
-        Steel Young's modulus [Pa]
 
     Notes
     -----
-    The radial stress-opening relationship is:
-        σ_r(w) = σ_r_max * (1 - exp(-k_d * w / d_bar))
+    The model uses MPa and mm internally for numerical stability, following
+    the thesis formulation. All inputs/outputs are converted to SI units (Pa, m).
 
-    where:
-        σ_r_max = k_c * sqrt(f_c)  (maximum radial stress)
-        k_c ≈ 0.8 (calibration constant)
-        k_d ≈ 50 (shape parameter)
+    Equations (thesis Eqs. 3.62–3.68):
+    (1) sigma(w) = ω̃ * k0 * w
+    (2) k0 = 599.96 * fc^0.75 / phi
+    (3) ω̃ = [ 1.5 * ( a + sqrt( d^2 * (40*w*phi - b)^2 + c^2 ) ) ]^(-4/3)
+    (4) a = 0.59 - 0.0110*fc
+    (5) b = 0.0075*fc - 0.23
+    (6) c = 0.0038*fc + 0.44
+    (7) d = 0.0025*fc + 0.58
+
+    where fc is in MPa, phi is in mm, w is in mm.
     """
 
-    d_bar: float
-    f_c: float
-    E_s: float = 200e9
+    d_bar: float  # [m]
+    f_c: float    # [Pa]
 
-    def __post_init__(self):
-        """Initialize dowel parameters."""
-        # Calibration constants (from Brenna et al.)
-        self.k_c = 0.8  # Radial stress coefficient
-        self.k_d = 50.0  # Shape parameter for exponential
-
-        # Maximum radial stress
-        f_c_mpa = self.f_c / 1e6
-        self.sigma_r_max = self.k_c * math.sqrt(f_c_mpa) * 1e6  # Convert back to Pa
-
-    def sigma_r_and_tangent(self, w: float) -> Tuple[float, float]:
-        """Compute radial stress and tangent stiffness.
+    def sigma_and_tangent(self, w: float) -> Tuple[float, float]:
+        """Compute dowel stress and tangent stiffness.
 
         Parameters
         ----------
@@ -719,25 +715,75 @@ class DowelActionModel:
 
         Returns
         -------
-        sigma_r : float
-            Radial stress [Pa]
-        dsigma_r_dw : float
+        sigma : float
+            Dowel stress [Pa]
+        dsigma_dw : float
             Tangent stiffness [Pa/m]
 
         Notes
         -----
-        From Eq. 3.62-3.68:
-            σ_r = σ_r_max * (1 - exp(-k_d * w / d_bar))
-            dσ_r/dw = σ_r_max * (k_d / d_bar) * exp(-k_d * w / d_bar)
+        Uses thesis equations 3.62-3.68 with internal MPa/mm units for stability.
         """
-        w_abs = abs(w)
+        # Convert to thesis units (MPa, mm)
+        fc_mpa = self.f_c / 1e6  # Pa → MPa
+        phi_mm = self.d_bar * 1e3  # m → mm
+        w_mm = abs(w) * 1e3  # m → mm (use absolute value for opening)
 
-        # Exponential model
-        exp_term = math.exp(-self.k_d * w_abs / self.d_bar)
-        sigma_r = self.sigma_r_max * (1.0 - exp_term)
-        dsigma_r_dw = self.sigma_r_max * (self.k_d / self.d_bar) * exp_term
+        # Eq. 3.62-3.68 coefficients (MPa units)
+        a = 0.59 - 0.0110 * fc_mpa
+        b = 0.0075 * fc_mpa - 0.23
+        c = 0.0038 * fc_mpa + 0.44
+        d = 0.0025 * fc_mpa + 0.58
 
-        return float(sigma_r), float(dsigma_r_dw)
+        # Eq. 3.62: k0 (initial stiffness) [MPa/mm]
+        k0 = 599.96 * (fc_mpa ** 0.75) / phi_mm
+
+        # Eq. 3.63: Compute ω̃ (reduction factor)
+        # X = 40*w*phi - b
+        X = 40.0 * w_mm * phi_mm - b
+
+        # S = sqrt(d^2 * X^2 + c^2)
+        S = math.sqrt(d**2 * X**2 + c**2)
+
+        # Y = 1.5 * (a + S)
+        Y = 1.5 * (a + S)
+
+        # ω̃ = Y^(-4/3)
+        omega = Y ** (-4.0/3.0)
+
+        # Eq. 3.62: sigma = ω̃ * k0 * w [MPa]
+        sigma_mpa = omega * k0 * w_mm
+
+        # Derivative: dσ/dw = k0 * (ω̃ + w * dω̃/dw)
+        # dS/dw = (d^2 * X / S) * dX/dw
+        # dX/dw = 40*phi
+        dX_dw = 40.0 * phi_mm  # [dimensionless, since w in mm]
+
+        if S > 1e-14:
+            dS_dw = (d**2 * X / S) * dX_dw
+        else:
+            dS_dw = 0.0
+
+        # dY/dw = 1.5 * dS/dw
+        dY_dw = 1.5 * dS_dw
+
+        # dω̃/dw = (-4/3) * Y^(-7/3) * dY/dw
+        if Y > 1e-14:
+            domega_dw = (-4.0/3.0) * (Y ** (-7.0/3.0)) * dY_dw
+        else:
+            domega_dw = 0.0
+
+        # dσ/dw = k0 * (ω̃ + w * dω̃/dw) [MPa/mm]
+        dsigma_dw_mpa_mm = k0 * (omega + w_mm * domega_dw)
+
+        # Convert back to SI units (Pa, m)
+        sigma_pa = sigma_mpa * 1e6  # MPa → Pa
+        dsigma_dw_pa_m = dsigma_dw_mpa_mm * 1e9  # MPa/mm → Pa/m
+
+        # Handle sign (w can be negative for compression, but model is for opening only)
+        sign = 1.0 if w >= 0.0 else -1.0
+
+        return sign * float(sigma_pa), float(dsigma_dw_pa_m)
 
 
 # ------------------------------------------------------------------------------
@@ -940,6 +986,9 @@ def assemble_bond_slip(
     bond_gamma: float = 1.0,  # BLOQUE B: Continuation parameter for bond-slip activation
     bond_k_cap: Optional[float] = None,  # BLOQUE C: Cap dtau/ds [Pa/m] (None = no cap)
     bond_s_eps: float = 0.0,  # BLOQUE C: Smooth regularization epsilon [m]
+    # Dowel action parameters (P4)
+    enable_dowel: bool = False,  # Enable dowel action (transverse)
+    dowel_model: Optional[DowelActionModel] = None,  # Dowel action constitutive model
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Assemble bond-slip interface forces and stiffness.
 
@@ -981,6 +1030,11 @@ def assemble_bond_slip(
     bond_s_eps : float, optional
         Smoothing epsilon [m]. If > 0, evaluates slip as s_eff = sqrt(s^2 + eps^2).
         Regularizes tangent near s≈0.
+    enable_dowel : bool, optional
+        Enable dowel action (transverse stress perpendicular to bar). Default: False.
+    dowel_model : DowelActionModel, optional
+        Dowel action constitutive model. Required if enable_dowel=True.
+        If None and enable_dowel=True, creates default model from bond_law params.
 
     Returns
     -------
@@ -997,6 +1051,20 @@ def assemble_bond_slip(
     # NOTE: Numba kernel expects BondSlipModelCode2010-like parameters (tau_max, s1, s2, etc.)
     # If bond_law doesn't have these attributes, will automatically fall back to Python.
     # This allows using Numba with compatible bond laws without hardcoding type checks.
+
+    # Dowel action setup (P4)
+    if enable_dowel and dowel_model is None:
+        # Create default dowel model from bond_law parameters
+        if hasattr(bond_law, 'd_bar') and hasattr(bond_law, 'f_cm'):
+            dowel_model = DowelActionModel(d_bar=bond_law.d_bar, f_c=bond_law.f_cm)
+        else:
+            raise ValueError(
+                "enable_dowel=True requires dowel_model or bond_law with d_bar and f_cm attributes"
+            )
+
+    # Note: Numba kernel does not yet support dowel action; force Python fallback
+    if enable_dowel:
+        use_numba = False
 
     # Compute perimeter (explicit parameter takes precedence)
     if perimeter is None:
@@ -1076,6 +1144,11 @@ def assemble_bond_slip(
 
         # Call Numba kernel (from dedicated module with cache=True)
         try:
+            # Prepare segment_mask for Numba (needs to be None or contiguous bool array)
+            segment_mask_numba = None
+            if segment_mask is not None:
+                segment_mask_numba = np.ascontiguousarray(segment_mask, dtype=np.bool_)
+
             f_bond, rows, cols, data, s_curr = bond_slip_assembly_kernel(
                 u_total,
                 steel_segments,
@@ -1083,6 +1156,7 @@ def assemble_bond_slip(
                 bond_params,
                 s_max_hist,
                 steel_EA,
+                segment_mask_numba,
             )
         except Exception as e:
             # Enhanced error reporting for kernel failures
@@ -1093,43 +1167,9 @@ def assemble_bond_slip(
                 f"Original error: {str(e)}"
             ) from e
 
-        # Apply segment mask (disable bond for masked segments)
-        if segment_mask is not None:
-            # Zero out forces and stiffness for disabled segments
-            # This is done by zeroing the forces and removing stiffness entries
-            # For simplicity, we zero forces in f_bond and rebuild K_bond with masked segments
-            for i in range(n_seg):
-                if segment_mask[i]:  # True = disabled
-                    # Zero slip in disabled segments
-                    s_curr[i] = 0.0
-                    # Note: K and f already computed; we'll zero them out per-segment
-                    # This is inefficient but simple; TODO: pass mask to kernel for efficiency
-
+        # Build sparse K_bond matrix from COO triplets
+        # Masked segments are already skipped in the kernel, so no post-processing needed
         K_bond = sp.csr_matrix((data, (rows, cols)), shape=(ndof_total, ndof_total))
-
-        # Apply segment mask to force vector
-        if segment_mask is not None:
-            # Zero forces for disabled segments
-            # Map segment → DOFs and zero them
-            for i in range(n_seg):
-                if segment_mask[i]:
-                    # Get nodes for this segment
-                    n1 = int(steel_segments[i, 0])
-                    n2 = int(steel_segments[i, 1])
-                    # Zero concrete and steel forces for these nodes
-                    # Concrete DOFs
-                    f_bond[2 * n1] = 0.0
-                    f_bond[2 * n1 + 1] = 0.0
-                    f_bond[2 * n2] = 0.0
-                    f_bond[2 * n2 + 1] = 0.0
-                    # Steel DOFs
-                    if steel_dof_map is not None:
-                        if steel_dof_map[n1, 0] >= 0:
-                            f_bond[steel_dof_map[n1, 0]] = 0.0
-                            f_bond[steel_dof_map[n1, 1]] = 0.0
-                        if steel_dof_map[n2, 0] >= 0:
-                            f_bond[steel_dof_map[n2, 0]] = 0.0
-                            f_bond[steel_dof_map[n2, 1]] = 0.0
 
         # Update states (trial)
         bond_states_new = BondSlipStateArrays(
@@ -1153,6 +1193,9 @@ def assemble_bond_slip(
             bond_k_cap=bond_k_cap,  # BLOQUE C: Pass tangent cap
             bond_s_eps=bond_s_eps,  # BLOQUE C: Pass smoothing epsilon
             segment_mask=segment_mask,  # Pass segment mask for disabled segments
+            # Dowel action (P4)
+            enable_dowel=enable_dowel,
+            dowel_model=dowel_model,
         )
 
     return f_bond, K_bond, bond_states_new
@@ -1184,6 +1227,9 @@ def _bond_slip_assembly_python(
     bond_k_cap: Optional[float] = None,  # BLOQUE C: Cap dtau/ds
     bond_s_eps: float = 0.0,  # BLOQUE C: Smooth regularization epsilon
     segment_mask: Optional[np.ndarray] = None,  # Mask to disable bond in specific segments
+    # Dowel action (P4)
+    enable_dowel: bool = False,
+    dowel_model: Optional[DowelActionModel] = None,
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Pure Python fallback for bond-slip assembly (for debugging).
 
@@ -1289,7 +1335,7 @@ def _bond_slip_assembly_python(
         # Bond force
         F_bond = tau * perimeter * L0
 
-        # Distribute to nodes
+        # Distribute bond force to nodes (tangential direction)
         Fx_s = F_bond * cx
         Fy_s = F_bond * cy
         Fx_c = -Fx_s
@@ -1304,6 +1350,40 @@ def _bond_slip_assembly_python(
         f_bond[dof_c1y] += 0.5 * Fy_c
         f_bond[dof_c2x] += 0.5 * Fx_c
         f_bond[dof_c2y] += 0.5 * Fy_c
+
+        # Dowel action (P4): transverse stress perpendicular to bar
+        if enable_dowel and dowel_model is not None:
+            # Normal direction (perpendicular to bar): n = (-cy, cx)
+            nx = -cy
+            ny = cx
+
+            # Opening (normal relative displacement): w = du·n
+            w = du_x * nx + du_y * ny
+
+            # Use max(w, 0) to avoid strange behavior in compression
+            w_pos = max(w, 0.0)
+
+            # Compute dowel stress and tangent
+            sigma_dowel, dsigma_dw = dowel_model.sigma_and_tangent(w_pos)
+
+            # Convert traction to force: F = sigma * perimeter * L0
+            F_dowel = sigma_dowel * perimeter * L0
+
+            # Distribute to nodes (normal direction)
+            Fx_dowel_s = F_dowel * nx
+            Fy_dowel_s = F_dowel * ny
+            Fx_dowel_c = -Fx_dowel_s
+            Fy_dowel_c = -Fy_dowel_s
+
+            f_bond[dof_s1x] += 0.5 * Fx_dowel_s
+            f_bond[dof_s1y] += 0.5 * Fy_dowel_s
+            f_bond[dof_s2x] += 0.5 * Fx_dowel_s
+            f_bond[dof_s2y] += 0.5 * Fy_dowel_s
+
+            f_bond[dof_c1x] += 0.5 * Fx_dowel_c
+            f_bond[dof_c1y] += 0.5 * Fy_dowel_c
+            f_bond[dof_c2x] += 0.5 * Fx_dowel_c
+            f_bond[dof_c2y] += 0.5 * Fy_dowel_c
 
         # Stiffness (with gamma continuation scaling, BLOQUE 3)
         # Full 8×8 consistent tangent: K_seg = K_bond * g ⊗ g^T
@@ -1340,6 +1420,40 @@ def _bond_slip_assembly_python(
                 rows.append(dofs[a])
                 cols.append(dofs[b])
                 data.append(K_bond * g[a] * g[b])
+
+        # Dowel stiffness (P4): K_dowel = (dsigma_dw * perimeter * L0) * (g_w ⊗ g_w)
+        if enable_dowel and dowel_model is not None:
+            # Gradient of opening w wrt DOFs: g_w = [∂w/∂u]
+            # w = du·n where n = (-cy, cx) and du = u_s - u_c
+            # Concrete node 1: -0.5 * n
+            g_w_c1x = -0.5 * nx
+            g_w_c1y = -0.5 * ny
+            # Concrete node 2: -0.5 * n
+            g_w_c2x = -0.5 * nx
+            g_w_c2y = -0.5 * ny
+            # Steel node 1: +0.5 * n
+            g_w_s1x = +0.5 * nx
+            g_w_s1y = +0.5 * ny
+            # Steel node 2: +0.5 * n
+            g_w_s2x = +0.5 * nx
+            g_w_s2y = +0.5 * ny
+
+            # Dowel stiffness scalar
+            K_dowel = dsigma_dw * perimeter * L0
+
+            # Gradient list for dowel
+            g_w = [g_w_c1x, g_w_c1y, g_w_c2x, g_w_c2y, g_w_s1x, g_w_s1y, g_w_s2x, g_w_s2y]
+
+            # Assemble dowel stiffness block (8×8 outer product)
+            for a in range(8):
+                if dofs[a] < 0:
+                    continue
+                for b in range(8):
+                    if dofs[b] < 0:
+                        continue
+                    rows.append(dofs[a])
+                    cols.append(dofs[b])
+                    data.append(K_dowel * g_w[a] * g_w[b])
 
         # Add steel axial stiffness if requested
         if steel_EA > 0.0:
