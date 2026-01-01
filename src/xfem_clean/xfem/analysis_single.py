@@ -470,6 +470,9 @@ def run_analysis_xfem(
                     print(
                         f"    [newton] converged(res) it={it+1:02d} ||rhs||={norm_r:.3e} u={u_target*1e3:.3f}mm"
                     )
+                # P0.2: Reset residual history on convergence
+                if hasattr(solve_step, '_residual_history'):
+                    solve_step._residual_history = []
                 # Apply trial history updates as a *patch* (Phase-1) or as
                 # direct dict updates (legacy).
                 if isinstance(coh_committed, CohesiveStateArrays):
@@ -514,12 +517,42 @@ def run_analysis_xfem(
                 if not np.all(np.isfinite(du_f)):
                     du_f = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)[0]
             norm_du = float(np.linalg.norm(du_f))
+
+            # P0.2 FIX: Improved stagnation detection - avoid false positives
+            # Track residual history to distinguish true stagnation from small steps
+            if not hasattr(solve_step, '_residual_history'):
+                solve_step._residual_history = []
+            solve_step._residual_history.append(norm_r)
+
             if norm_du < float(model.newton_tol_du):
-                if model.debug_newton:
-                    print(
-                        f"    [newton] stagnated      it={it+1:02d} ||du||={norm_du:.3e} ||rhs||={norm_r:.3e} u={u_target*1e3:.3f}mm"
-                    )
-                return False, q, coh_committed, mp_committed, aux, 0.0, bond_states
+                # Small ||ΔU|| detected - check if residual is still decreasing
+                M = 3  # Check last M iterations for progress
+                if len(solve_step._residual_history) >= M:
+                    # Compare current residual to M iterations ago
+                    r_old = solve_step._residual_history[-M]
+                    r_reduction_factor = r_old / max(1e-30, norm_r)
+                    min_reduction = 1.05  # Require at least 5% reduction over M steps
+
+                    if r_reduction_factor < min_reduction:
+                        # True stagnation: residual not decreasing
+                        if model.debug_newton:
+                            print(
+                                f"    [newton] stagnated(true) it={it+1:02d} ||du||={norm_du:.3e} ||rhs||={norm_r:.3e} reduction={r_reduction_factor:.2f} u={u_target*1e3:.3f}mm"
+                            )
+                        solve_step._residual_history = []  # Reset for next step
+                        return False, q, coh_committed, mp_committed, aux, 0.0, bond_states
+                    else:
+                        # False stagnation: residual still decreasing, continue
+                        if model.debug_newton:
+                            print(
+                                f"    [newton] small ||du|| but residual decreasing (reduction={r_reduction_factor:.2f}), continuing..."
+                            )
+                else:
+                    # Not enough history yet, continue (give it a chance)
+                    if model.debug_newton:
+                        print(
+                            f"    [newton] small ||du|| but insufficient history, continuing..."
+                        )
 
             if model.line_search:
                 q0 = q.copy()
@@ -601,6 +634,9 @@ def run_analysis_xfem(
 
         if model.debug_substeps:
             print(f"    [newton] failed(maxit) u={u_target*1e3:.3f}mm")
+        # P0.2: Reset residual history on failure (max iterations)
+        if hasattr(solve_step, '_residual_history'):
+            solve_step._residual_history = []
         return False, q, coh_committed, mp_committed, aux, 0.0, bond_committed
 
     def curvature_mid(q_full: np.ndarray) -> float:
