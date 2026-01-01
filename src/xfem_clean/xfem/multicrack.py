@@ -24,6 +24,7 @@ from xfem_clean.fem.q4 import q4_shape
 from xfem_clean.fem.mesh import structured_quad_mesh
 from xfem_clean.fem.bcs import apply_dirichlet
 from xfem_clean.rebar import prepare_rebar_segments, rebar_contrib
+from xfem_clean.junction import detect_crack_coalescence, arrest_secondary_crack_at_junction
 
 from xfem_clean.xfem.geometry import XFEMCrack, clip_segment_to_bbox
 from xfem_clean.xfem.material import plane_stress_C
@@ -1605,6 +1606,23 @@ def run_analysis_xfem_multicrack(
                                 f"[crack] grow #{idx+1} tip=({c.tip_x:.4f},{c.tip_y:.4f}) "
                                 f"angle={c.angle_deg:.1f}° s1={s1/1e6:.3f}MPa"
                             )
+                            changed = True
+
+                    # ---- Junction detection (P0: crack coalescence) ----
+                    # After crack growth, check if any cracks have coalesced
+                    tol_merge = getattr(model, "junction_merge_tolerance", 0.01)  # 10mm default
+                    junctions = detect_crack_coalescence(cracks, nodes, elems, tol_merge=tol_merge)
+
+                    if junctions:
+                        for junc in junctions:
+                            print(
+                                f"[junction] detected: crack#{junc.secondary_crack_id+1} → "
+                                f"crack#{junc.main_crack_id+1} at ({junc.junction_point[0]:.4f},{junc.junction_point[1]:.4f}) "
+                                f"in elem#{junc.element_id}"
+                            )
+                            # Arrest secondary crack at junction
+                            arrest_secondary_crack_at_junction(junc, cracks)
+                            print(f"[junction] arrested crack#{junc.secondary_crack_id+1}, added junction enrichment")
                             changed = True
 
                     if not changed:

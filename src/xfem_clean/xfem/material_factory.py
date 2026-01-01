@@ -14,6 +14,10 @@ from xfem_clean.constitutive import (
     ConcreteCDP,
     ConcreteCDPReal,
 )
+from xfem_clean.compression_damage import (
+    ConcreteCompressionModel,
+    get_default_compression_model,
+)
 from xfem_clean.xfem.model import XFEMModel
 from xfem_clean.xfem.cdp_calibration import apply_cdp_generator_calibration
 
@@ -104,6 +108,24 @@ def make_bulk_material(model: XFEMModel):
             lch=float(model.lch),
             phi_deg=float(model.cdp_phi_deg),
             H=float(model.cdp_H),
+        )
+
+    if bm == "compression-damage":
+        # P1: Compression damage model per thesis Eq. (3.44-3.46)
+        # Parabolic stress-strain up to peak, then constant plateau (no softening)
+        f_c_mpa = float(model.fc) / 1e6  # Convert Pa to MPa
+
+        # Check if user provided custom parameters
+        if hasattr(model, "compression_eps_c1") and model.compression_eps_c1 is not None:
+            eps_c1 = float(model.compression_eps_c1)
+        else:
+            # Default: Model Code 2010 formula εc1 ≈ 0.7 * fc^0.31 / 1000
+            eps_c1 = 0.0022  # Default for fc ~ 30 MPa
+
+        return ConcreteCompressionModel(
+            f_c=float(model.fc),
+            eps_c1=eps_c1,
+            E_0=float(model.E),
         )
 
     raise ValueError(f"Unknown bulk_material='{model.bulk_material}'")
