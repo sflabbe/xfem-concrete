@@ -161,7 +161,7 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
         from examples.gutierrez_thesis.solver_interface import run_case_solver
         from examples.gutierrez_thesis.postprocess_comprehensive import postprocess_results
 
-        results = run_case_solver(case_config, mesh_factor=mesh_factor, enable_postprocess=enable_postprocess)
+        results = run_case_solver(case_config, mesh_factor=mesh_factor, enable_postprocess=enable_postprocess, cli_args=cli_args)
 
         # Save results
         print("\nSaving results...")
@@ -316,6 +316,19 @@ Examples:
         "--no-post",
         action="store_true",
         help="Disable postprocessing (skip CSV/PNG generation)"
+    )
+
+    # Numba acceleration control (mutually exclusive)
+    numba_group = parser.add_mutually_exclusive_group()
+    numba_group.add_argument(
+        "--use-numba",
+        action="store_true",
+        help="Force enable Numba acceleration (override model default)"
+    )
+    numba_group.add_argument(
+        "--no-numba",
+        action="store_true",
+        help="Force disable Numba acceleration (override model default)"
     )
 
     args = parser.parse_args()

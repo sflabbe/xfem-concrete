@@ -2,6 +2,7 @@
 
 Verifies that the 8x8 bond-slip tangent has off-diagonal steel↔concrete coupling.
 This test ensures that the consistent Newton tangent is correctly implemented.
+Tests both Numba kernel and Python fallback implementations.
 """
 import numpy as np
 import pytest
@@ -12,7 +13,8 @@ from xfem_clean.bond_slip import (
 )
 
 
-def test_bond_jacobian_has_steel_concrete_coupling():
+@pytest.mark.parametrize("use_numba", [True, False], ids=["numba", "python"])
+def test_bond_jacobian_has_steel_concrete_coupling(use_numba):
     """Verify bond Jacobian has non-zero off-diagonal steel↔concrete terms."""
 
     # Setup: 1 segment, 2 nodes (each has both concrete and steel DOFs)
@@ -58,7 +60,7 @@ def test_bond_jacobian_has_steel_concrete_coupling():
         bond_states=bond_states,
         steel_dof_map=steel_dof_map,
         steel_EA=steel_EA,
-        use_numba=True,  # Use Numba version which has full 8x8 coupling
+        use_numba=use_numba,  # Test both Numba and Python fallback
         perimeter=np.pi * 0.016,  # Explicit perimeter
         bond_gamma=1.0,
     )
@@ -95,9 +97,15 @@ def test_bond_jacobian_has_steel_concrete_coupling():
         "Check bond_slip.py tangent assembly."
     )
 
-    print(f"✓ Bond Jacobian has steel↔concrete coupling (max |K_sc| = {np.max(np.abs(K_steel_concrete)):.2e})")
-    print(f"✓ Bond Jacobian is symmetric (||K - K^T|| = {symmetry_error:.2e})")
+    mode = "Numba" if use_numba else "Python"
+    print(f"✓ [{mode}] Bond Jacobian has steel↔concrete coupling (max |K_sc| = {np.max(np.abs(K_steel_concrete)):.2e})")
+    print(f"✓ [{mode}] Bond Jacobian is symmetric (||K - K^T|| = {symmetry_error:.2e})")
 
 
 if __name__ == "__main__":
-    test_bond_jacobian_has_steel_concrete_coupling()
+    print("Testing bond-slip Jacobian coupling in both modes...")
+    print("\n=== Testing with Numba ===")
+    test_bond_jacobian_has_steel_concrete_coupling(use_numba=True)
+    print("\n=== Testing with Python fallback ===")
+    test_bond_jacobian_has_steel_concrete_coupling(use_numba=False)
+    print("\n✅ All tests passed!")

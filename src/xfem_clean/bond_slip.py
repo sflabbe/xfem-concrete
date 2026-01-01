@@ -23,8 +23,11 @@ import scipy.sparse as sp
 try:
     from numba import njit, prange
     NUMBA_AVAILABLE = True
+    # Import optimized kernel from dedicated module (cache=True for faster startup)
+    from xfem_clean.numba.kernels_bond_slip import bond_slip_assembly_kernel
 except Exception:
     NUMBA_AVAILABLE = False
+    bond_slip_assembly_kernel = None  # Will use Python fallback
     def njit(*args, **kwargs):
         def wrap(f):
             return f
@@ -915,342 +918,11 @@ def validate_bond_inputs(
 # ------------------------------------------------------------------------------
 # Bond-Slip Assembly (Numba-accelerated)
 # ------------------------------------------------------------------------------
+# NOTE: The Numba kernel has been moved to xfem_clean/numba/kernels_bond_slip.py
+#       for better organization and to enable cache=True for faster startup.
+#       See bond_slip_assembly_kernel() in that module.
 
-@njit(cache=False, boundscheck=True)  # Part A3: Enable boundscheck for debugging
-def _bond_slip_assembly_numba(
-    u_total: np.ndarray,        # [ndof_total] displacement vector
-    segs: np.ndarray,           # [n_seg, 5]: [n1, n2, L0, cx, cy]
-    steel_dof_map: np.ndarray,  # [nnode, 2]: node → steel DOF indices
-    bond_params: np.ndarray,    # [tau_max, s1, s2, s3, tau_f, alpha, perimeter, dtau_max]
-    s_max_hist: np.ndarray,     # [n_seg] history
-    steel_EA: float = 0.0,      # E * A for steel (if > 0, adds axial stiffness)
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Assemble bond-slip interface contribution (Numba kernel).
-
-    Returns
-    -------
-    f_int : np.ndarray
-        Internal force vector [ndof_total]
-    rows, cols, data : np.ndarray
-        Triplets for stiffness matrix
-    s_current : np.ndarray
-        Current slip values [n_seg]
-    """
-    ndof = u_total.shape[0]
-    n_seg = segs.shape[0]
-
-    f = np.zeros(ndof, dtype=np.float64)
-    max_entries = n_seg * 96  # 64 (bond 8x8 full Jacobian) + 16 (steel axial) + margin
-    rows = np.empty(max_entries, dtype=np.int64)
-    cols = np.empty(max_entries, dtype=np.int64)
-    data = np.empty(max_entries, dtype=np.float64)
-    s_current = np.zeros(n_seg, dtype=np.float64)
-
-    # Unpack bond parameters
-    tau_max = bond_params[0]
-    s1 = bond_params[1]
-    s2 = bond_params[2]
-    s3 = bond_params[3]
-    tau_f = bond_params[4]
-    alpha = bond_params[5]
-    perimeter = bond_params[6]  # π * d_bar
-    dtau_max = bond_params[7] if bond_params.shape[0] > 7 else 1e20  # Tangent cap (Priority #1)
-    gamma = bond_params[8] if bond_params.shape[0] > 8 else 1.0  # BLOQUE 3: Continuation parameter
-
-    entry_idx = 0
-
-    for i in range(n_seg):  # Changed from prange due to entry_idx conflict
-        # Node IDs
-        n1 = int(segs[i, 0])
-        n2 = int(segs[i, 1])
-        L0 = segs[i, 2]
-        cx = segs[i, 3]
-        cy = segs[i, 4]
-
-        # Concrete DOFs
-        dof_c1x = 2 * n1
-        dof_c1y = 2 * n1 + 1
-        dof_c2x = 2 * n2
-        dof_c2y = 2 * n2 + 1
-
-        # Steel DOFs (sparse mapping via steel_dof_map)
-        dof_s1x = int(steel_dof_map[n1, 0])
-        dof_s1y = int(steel_dof_map[n1, 1])
-        dof_s2x = int(steel_dof_map[n2, 0])
-        dof_s2y = int(steel_dof_map[n2, 1])
-
-        # Displacements
-        u_c1x = u_total[dof_c1x]
-        u_c1y = u_total[dof_c1y]
-        u_c2x = u_total[dof_c2x]
-        u_c2y = u_total[dof_c2y]
-
-        u_s1x = u_total[dof_s1x]
-        u_s1y = u_total[dof_s1y]
-        u_s2x = u_total[dof_s2x]
-        u_s2y = u_total[dof_s2y]
-
-        # Average slip along segment (simplified: use midpoint)
-        u_c_mid_x = 0.5 * (u_c1x + u_c2x)
-        u_c_mid_y = 0.5 * (u_c1y + u_c2y)
-        u_s_mid_x = 0.5 * (u_s1x + u_s2x)
-        u_s_mid_y = 0.5 * (u_s1y + u_s2y)
-
-        # Relative displacement (steel - concrete)
-        du_x = u_s_mid_x - u_c_mid_x
-        du_y = u_s_mid_y - u_c_mid_y
-
-        # Slip in bar direction (tangential)
-        s = du_x * cx + du_y * cy
-        s_current[i] = s
-
-        # Bond stress (with history)
-        s_abs = abs(s)
-        s_max = max(s_max_hist[i], s_abs)
-        sign = 1.0 if s >= 0.0 else -1.0
-
-        # Simplified C1-continuous regularization for s -> 0 singularity (Priority #1)
-        # Use s_reg = 0.5 * s1 as threshold (increased from 0.1 to improve conditioning)
-        # At s_reg=500μm: k_bond≈6e6 N/m (10x smaller than steel, 1e5x smaller than concrete)
-        s_reg = 0.5 * s1
-
-        # Simpler C1-continuous approach:
-        # 1) For s <= s_reg: τ(s) = k0 * s (linear)
-        # 2) For s > s_reg: τ(s) = τ_max * (s/s1)^α (original power law)
-        #
-        # Match dτ/ds at s_reg for C1 continuity:
-        # k0 = τ_max * α / s1 * (s_reg/s1)^(α-1)
-        #
-        # This ensures:
-        # - τ is continuous (may have small jump, but acceptable)
-        # - dτ/ds is continuous (C1)
-        # - k0 is finite for all α > 0
-
-        k0 = tau_max * alpha / s1 * ((s_reg / s1) ** (alpha - 1.0))  # Tangent stiffness at s_reg
-
-        # Envelope evaluation (inline for Numba)
-        if s_abs >= s_max - 1e-14:
-            # Loading envelope
-            if s_abs <= s1:
-                if s_abs < s_reg:
-                    # Regularized linear branch (C1-continuous at s_reg)
-                    tau_abs = k0 * s_abs
-                    dtau_abs = k0
-                else:
-                    # Original power law (matches derivative at s_reg)
-                    ratio = s_abs / s1
-                    tau_abs = tau_max * (ratio ** alpha)
-                    dtau_abs = tau_max * alpha / s1 * (ratio ** (alpha - 1.0))
-            elif s_abs <= s2:
-                tau_abs = tau_max
-                dtau_abs = 0.0
-            elif s_abs <= s3:
-                tau_abs = tau_max - (tau_max - tau_f) * (s_abs - s2) / (s3 - s2)
-                dtau_abs = -(tau_max - tau_f) / (s3 - s2)
-            else:
-                tau_abs = tau_f
-                dtau_abs = 0.0
-        else:
-            # Unloading: secant
-            tau_env, _ = 0.0, 0.0
-            if s_max <= s1:
-                tau_env = tau_max * (s_max / s1) ** alpha if s_max > 1e-16 else 0.0
-            elif s_max <= s2:
-                tau_env = tau_max
-            elif s_max <= s3:
-                tau_env = tau_max - (tau_max - tau_f) * (s_max - s2) / (s3 - s2)
-            else:
-                tau_env = tau_f
-
-            if s_max > 1e-14:
-                tau_abs = tau_env * (s_abs / s_max)
-                dtau_abs = tau_env / s_max
-            else:
-                tau_abs = 0.0
-                dtau_abs = 0.0
-
-        tau = sign * tau_abs
-        dtau_ds = dtau_abs
-
-        # Tangent capping (numerical stabilization, Priority #1)
-        # NOTE: dtau_max passed as parameter; set to large value (1e20) if no capping desired
-        # In practice, set dtau_max = bond_tangent_cap_factor * median(diag(K_bulk))
-        # This prevents bond stiffness from dominating and causing ill-conditioning
-        if dtau_ds > dtau_max:
-            dtau_ds = dtau_max
-
-        # Bond force (distributed over segment length)
-        F_bond = tau * perimeter * L0
-
-        # Distribute to nodes (simplified: equal split)
-        # Force on steel (in bar direction)
-        Fx_s = F_bond * cx
-        Fy_s = F_bond * cy
-
-        # Newton's third law: force on concrete is opposite
-        Fx_c = -Fx_s
-        Fy_c = -Fy_s
-
-        # Distribute equally to segment ends
-        f[dof_s1x] += 0.5 * Fx_s
-        f[dof_s1y] += 0.5 * Fy_s
-        f[dof_s2x] += 0.5 * Fx_s
-        f[dof_s2y] += 0.5 * Fy_s
-
-        f[dof_c1x] += 0.5 * Fx_c
-        f[dof_c1y] += 0.5 * Fy_c
-        f[dof_c2x] += 0.5 * Fx_c
-        f[dof_c2y] += 0.5 * Fy_c
-
-        # Stiffness contribution: K_seg = K_bond * g ⊗ g^T (full 8x8 segment Jacobian)
-        # where:
-        #   K_bond = gamma * dtau_ds * perimeter * L0  (BLOQUE 3: gamma scaling for continuation)
-        #   g = [∂s/∂u] = [-t/2, -t/2, +t/2, +t/2] for [concrete_n1, concrete_n2, steel_n1, steel_n2]
-        #   t = [cx, cy] is the bar tangent vector
-        #
-        # This gives the CONSISTENT TANGENT that couples steel ↔ concrete DOFs
-        # (fixes Newton convergence issues from previous diagonal-only placeholder)
-        #
-        # Gamma continuation: start with gamma=0 (no bond), ramp to gamma=1 (full bond)
-
-        K_bond = gamma * dtau_ds * perimeter * L0
-
-        # Gradient vector components (scaled by 0.5 for midpoint averaging)
-        # Concrete node 1: -0.5 * t
-        g_c1x = -0.5 * cx
-        g_c1y = -0.5 * cy
-        # Concrete node 2: -0.5 * t
-        g_c2x = -0.5 * cx
-        g_c2y = -0.5 * cy
-        # Steel node 1: +0.5 * t
-        g_s1x = +0.5 * cx
-        g_s1y = +0.5 * cy
-        # Steel node 2: +0.5 * t
-        g_s2x = +0.5 * cx
-        g_s2y = +0.5 * cy
-
-        # Assemble full 8x8 block: K_seg[i,j] = K_bond * g[i] * g[j]
-        # This is the outer product g ⊗ g^T
-        # Each row-column pair contributes one entry
-        if entry_idx + 64 < max_entries:
-            # Row 1: concrete node 1, x-direction
-            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_c1x * g_c1x; entry_idx += 1
-            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_c1x * g_c1y; entry_idx += 1
-            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_c1x * g_c2x; entry_idx += 1
-            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_c1x * g_c2y; entry_idx += 1
-            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_c1x * g_s1x; entry_idx += 1
-            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_c1x * g_s1y; entry_idx += 1
-            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_c1x * g_s2x; entry_idx += 1
-            rows[entry_idx] = dof_c1x; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_c1x * g_s2y; entry_idx += 1
-
-            # Row 2: concrete node 1, y-direction
-            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_c1y * g_c1x; entry_idx += 1
-            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_c1y * g_c1y; entry_idx += 1
-            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_c1y * g_c2x; entry_idx += 1
-            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_c1y * g_c2y; entry_idx += 1
-            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_c1y * g_s1x; entry_idx += 1
-            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_c1y * g_s1y; entry_idx += 1
-            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_c1y * g_s2x; entry_idx += 1
-            rows[entry_idx] = dof_c1y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_c1y * g_s2y; entry_idx += 1
-
-            # Row 3: concrete node 2, x-direction
-            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_c2x * g_c1x; entry_idx += 1
-            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_c2x * g_c1y; entry_idx += 1
-            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_c2x * g_c2x; entry_idx += 1
-            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_c2x * g_c2y; entry_idx += 1
-            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_c2x * g_s1x; entry_idx += 1
-            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_c2x * g_s1y; entry_idx += 1
-            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_c2x * g_s2x; entry_idx += 1
-            rows[entry_idx] = dof_c2x; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_c2x * g_s2y; entry_idx += 1
-
-            # Row 4: concrete node 2, y-direction
-            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_c2y * g_c1x; entry_idx += 1
-            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_c2y * g_c1y; entry_idx += 1
-            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_c2y * g_c2x; entry_idx += 1
-            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_c2y * g_c2y; entry_idx += 1
-            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_c2y * g_s1x; entry_idx += 1
-            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_c2y * g_s1y; entry_idx += 1
-            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_c2y * g_s2x; entry_idx += 1
-            rows[entry_idx] = dof_c2y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_c2y * g_s2y; entry_idx += 1
-
-            # Row 5: steel node 1, x-direction
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_s1x * g_c1x; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_s1x * g_c1y; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_s1x * g_c2x; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_s1x * g_c2y; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_s1x * g_s1x; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_s1x * g_s1y; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s1x * g_s2x; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s1x * g_s2y; entry_idx += 1
-
-            # Row 6: steel node 1, y-direction
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_s1y * g_c1x; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_s1y * g_c1y; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_s1y * g_c2x; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_s1y * g_c2y; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_s1y * g_s1x; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_s1y * g_s1y; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s1y * g_s2x; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s1y * g_s2y; entry_idx += 1
-
-            # Row 7: steel node 2, x-direction
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_s2x * g_c1x; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_s2x * g_c1y; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_s2x * g_c2x; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_s2x * g_c2y; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_s2x * g_s1x; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_s2x * g_s1y; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s2x * g_s2x; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s2x * g_s2y; entry_idx += 1
-
-            # Row 8: steel node 2, y-direction
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_c1x; data[entry_idx] = K_bond * g_s2y * g_c1x; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_c1y; data[entry_idx] = K_bond * g_s2y * g_c1y; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_c2x; data[entry_idx] = K_bond * g_s2y * g_c2x; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_c2y; data[entry_idx] = K_bond * g_s2y * g_c2y; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1x; data[entry_idx] = K_bond * g_s2y * g_s1x; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_s2y * g_s1y; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s2y * g_s2x; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s2y * g_s2y; entry_idx += 1
-
-        # Steel axial stiffness (if steel_EA > 0)
-        if steel_EA > 0.0 and entry_idx + 16 < max_entries:
-            K_steel = steel_EA / L0
-            Kxx_s = K_steel * cx * cx
-            Kxy_s = K_steel * cx * cy
-            Kyy_s = K_steel * cy * cy
-
-            # Steel bar stiffness: K = (EA/L) * [c⊗c, -c⊗c; -c⊗c, c⊗c]
-            # Node 1 - Node 1 (positive)
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1x; data[entry_idx] = Kxx_s; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1y; data[entry_idx] = Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1x; data[entry_idx] = Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1y; data[entry_idx] = Kyy_s; entry_idx += 1
-
-            # Node 2 - Node 2 (positive)
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2x; data[entry_idx] = Kxx_s; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2y; data[entry_idx] = Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2x; data[entry_idx] = Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2y; data[entry_idx] = Kyy_s; entry_idx += 1
-
-            # Node 1 - Node 2 (negative)
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2x; data[entry_idx] = -Kxx_s; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2y; data[entry_idx] = -Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2x; data[entry_idx] = -Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2y; data[entry_idx] = -Kyy_s; entry_idx += 1
-
-            # Node 2 - Node 1 (negative)
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1x; data[entry_idx] = -Kxx_s; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1y; data[entry_idx] = -Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1x; data[entry_idx] = -Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1y; data[entry_idx] = -Kyy_s; entry_idx += 1
-
-    # Trim arrays
-    rows_out = rows[:entry_idx]
-    cols_out = cols[:entry_idx]
-    data_out = data[:entry_idx]
-
-    return f, rows_out, cols_out, data_out, s_current
+# Legacy kernel removed - now imported from dedicated module
 
 
 def assemble_bond_slip(
@@ -1322,11 +994,9 @@ def assemble_bond_slip(
     n_seg = steel_segments.shape[0]
     ndof_total = u_total.shape[0]
 
-    # Detect bond law type and force Python fallback for BilinearBondLaw and BanholzerBondLaw
-    # (Numba kernel only supports BondSlipModelCode2010 parameters)
-    bond_law_class_name = type(bond_law).__name__
-    if bond_law_class_name in ('BilinearBondLaw', 'BanholzerBondLaw'):
-        use_numba = False  # Force Python fallback for these bond law types
+    # NOTE: Numba kernel expects BondSlipModelCode2010-like parameters (tau_max, s1, s2, etc.)
+    # If bond_law doesn't have these attributes, will automatically fall back to Python.
+    # This allows using Numba with compatible bond laws without hardcoding type checks.
 
     # Compute perimeter (explicit parameter takes precedence)
     if perimeter is None:
@@ -1340,26 +1010,33 @@ def assemble_bond_slip(
                 "  2. Use a bond_law with d_bar attribute (e.g., BondSlipModelCode2010)"
             )
 
-    # Only create bond_params if using Numba (BondSlipModelCode2010 only)
+    # Try to create bond_params if using Numba
+    # If bond_law doesn't have required attributes, will fall back to Python
+    bond_params = None
     if use_numba and NUMBA_AVAILABLE:
-        # Tangent capping for numerical stability (Priority #1)
-        # dtau_max is typically set to bond_tangent_cap_factor * median(diag(K_bulk))
-        # For now, use a large value (no capping); caller can override via bond_law
-        dtau_max = getattr(bond_law, 'dtau_max', 1e20)  # Default: no cap
+        try:
+            # Tangent capping for numerical stability (Priority #1)
+            # dtau_max is typically set to bond_tangent_cap_factor * median(diag(K_bulk))
+            # For now, use a large value (no capping); caller can override via bond_law
+            dtau_max = getattr(bond_law, 'dtau_max', 1e20)  # Default: no cap
 
-        bond_params = np.array([
-            bond_law.tau_max,
-            bond_law.s1,
-            bond_law.s2,
-            bond_law.s3,
-            bond_law.tau_f,
-            bond_law.alpha,
-            perimeter,
-            dtau_max,
-            bond_gamma,  # BLOQUE 3: Continuation parameter
-        ], dtype=float)
+            bond_params = np.array([
+                bond_law.tau_max,
+                bond_law.s1,
+                bond_law.s2,
+                bond_law.s3,
+                bond_law.tau_f,
+                bond_law.alpha,
+                perimeter,
+                dtau_max,
+                bond_gamma,  # BLOQUE 3: Continuation parameter
+            ], dtype=float)
+        except AttributeError:
+            # Bond law doesn't have required attributes (e.g., BilinearBondLaw, BanholzerBondLaw)
+            # Fall back to Python assembly which works with any bond law via tau_and_tangent()
+            use_numba = False
 
-    if use_numba and NUMBA_AVAILABLE:
+    if use_numba and NUMBA_AVAILABLE and bond_params is not None:
         # Use sparse DOF mapping if provided, else legacy dense mapping
         if steel_dof_map is None:
             # Legacy: assume dense contiguous steel DOFs
@@ -1397,9 +1074,9 @@ def assemble_bond_slip(
                     f"Traceback:\n{tb}"
                 ) from e
 
-        # Call Numba kernel
+        # Call Numba kernel (from dedicated module with cache=True)
         try:
-            f_bond, rows, cols, data, s_curr = _bond_slip_assembly_numba(
+            f_bond, rows, cols, data, s_curr = bond_slip_assembly_kernel(
                 u_total,
                 steel_segments,
                 steel_dof_map,
@@ -1475,6 +1152,7 @@ def assemble_bond_slip(
             bond_gamma=bond_gamma,  # BLOQUE 3: Pass gamma to Python fallback
             bond_k_cap=bond_k_cap,  # BLOQUE C: Pass tangent cap
             bond_s_eps=bond_s_eps,  # BLOQUE C: Pass smoothing epsilon
+            segment_mask=segment_mask,  # Pass segment mask for disabled segments
         )
 
     return f_bond, K_bond, bond_states_new
@@ -1505,6 +1183,7 @@ def _bond_slip_assembly_python(
     bond_gamma: float = 1.0,  # BLOQUE 3: Continuation parameter
     bond_k_cap: Optional[float] = None,  # BLOQUE C: Cap dtau/ds
     bond_s_eps: float = 0.0,  # BLOQUE C: Smooth regularization epsilon
+    segment_mask: Optional[np.ndarray] = None,  # Mask to disable bond in specific segments
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Pure Python fallback for bond-slip assembly (for debugging).
 
@@ -1525,6 +1204,12 @@ def _bond_slip_assembly_python(
         perimeter = math.pi * bond_law.d_bar
 
     for i in range(n_seg):
+        # Skip disabled segments (segment_mask[i] == True means disabled)
+        if segment_mask is not None and segment_mask[i]:
+            # Set slip to zero for disabled segments (no forces, no stiffness)
+            s_current[i] = 0.0
+            continue
+
         # Extract segment data
         n1 = int(steel_segments[i, 0])
         n2 = int(steel_segments[i, 1])
@@ -1621,15 +1306,40 @@ def _bond_slip_assembly_python(
         f_bond[dof_c2y] += 0.5 * Fy_c
 
         # Stiffness (with gamma continuation scaling, BLOQUE 3)
+        # Full 8×8 consistent tangent: K_seg = K_bond * g ⊗ g^T
+        # where g = [∂s/∂u] is the gradient of slip with respect to DOFs
+        # This matches the Numba kernel implementation and provides proper steel↔concrete coupling
         K_bond = bond_gamma * dtau_ds * perimeter * L0
-        Kxx = K_bond * cx * cx
-        Kxy = K_bond * cx * cy
-        Kyy = K_bond * cy * cy
 
-        # Diagonal terms (simplified)
-        rows.extend([dof_s1x, dof_s1y, dof_s2x, dof_s2y, dof_c1x, dof_c1y, dof_c2x, dof_c2y])
-        cols.extend([dof_s1x, dof_s1y, dof_s2x, dof_s2y, dof_c1x, dof_c1y, dof_c2x, dof_c2y])
-        data.extend([0.25 * Kxx, 0.25 * Kyy, 0.25 * Kxx, 0.25 * Kyy, 0.25 * Kxx, 0.25 * Kyy, 0.25 * Kxx, 0.25 * Kyy])
+        # Gradient vector components (scaled by 0.5 for midpoint averaging)
+        # Concrete node 1: -0.5 * t
+        g_c1x = -0.5 * cx
+        g_c1y = -0.5 * cy
+        # Concrete node 2: -0.5 * t
+        g_c2x = -0.5 * cx
+        g_c2y = -0.5 * cy
+        # Steel node 1: +0.5 * t
+        g_s1x = +0.5 * cx
+        g_s1y = +0.5 * cy
+        # Steel node 2: +0.5 * t
+        g_s2x = +0.5 * cx
+        g_s2y = +0.5 * cy
+
+        # Build DOF list and gradient list for outer product
+        dofs = [dof_c1x, dof_c1y, dof_c2x, dof_c2y, dof_s1x, dof_s1y, dof_s2x, dof_s2y]
+        g = [g_c1x, g_c1y, g_c2x, g_c2y, g_s1x, g_s1y, g_s2x, g_s2y]
+
+        # Assemble full 8×8 block: K_seg[a,b] = K_bond * g[a] * g[b]
+        # Skip entries where DOF is negative (marker for unassigned/disabled DOFs)
+        for a in range(8):
+            if dofs[a] < 0:
+                continue
+            for b in range(8):
+                if dofs[b] < 0:
+                    continue
+                rows.append(dofs[a])
+                cols.append(dofs[b])
+                data.append(K_bond * g[a] * g[b])
 
         # Add steel axial stiffness if requested
         if steel_EA > 0.0:
