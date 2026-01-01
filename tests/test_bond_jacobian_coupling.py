@@ -5,7 +5,7 @@ This test ensures that the consistent Newton tangent is correctly implemented.
 """
 import numpy as np
 import pytest
-from src.xfem_clean.bond_slip import (
+from xfem_clean.bond_slip import (
     assemble_bond_slip,
     BondSlipModelCode2010,
     BondSlipStateArrays,
@@ -15,34 +15,36 @@ from src.xfem_clean.bond_slip import (
 def test_bond_jacobian_has_steel_concrete_coupling():
     """Verify bond Jacobian has non-zero off-diagonal steel↔concrete terms."""
 
-    # Setup: 1 segment, 2 concrete nodes + 2 steel nodes
-    # Nodes: 0,1 = concrete, 2,3 = steel (in reality, all share same coords for simplicity)
-    # Segment: [n1=2, n2=3, L0=0.1, cx=1.0, cy=0.0]  (horizontal bar)
+    # Setup: 1 segment, 2 nodes (each has both concrete and steel DOFs)
+    # Segment references nodes 0,1
+    # Concrete DOFs are computed as 2*n (so node 0→DOFs 0,1; node 1→DOFs 2,3)
+    # Steel DOFs are mapped explicitly (node 0→DOFs 4,5; node 1→DOFs 6,7)
+    # Segment: [n1=0, n2=1, L0=0.1, cx=1.0, cy=0.0]  (horizontal bar)
     steel_segments = np.array([
-        [2, 3, 0.1, 1.0, 0.0]  # [n1, n2, L0, cx, cy]
+        [0, 1, 0.1, 1.0, 0.0]  # [n1, n2, L0, cx, cy]
     ], dtype=float)
 
-    # DOF mapping: nodes 0,1 = concrete (DOFs 0-3), nodes 2,3 = steel (DOFs 4-7)
-    nnode = 4
+    # DOF mapping: nodes 0,1 → steel DOFs 4-7
+    nnode = 2
     steel_dof_map = np.full((nnode, 2), -1, dtype=int)
-    steel_dof_map[2, :] = [4, 5]  # node 2 -> steel DOFs 4,5
-    steel_dof_map[3, :] = [6, 7]  # node 3 -> steel DOFs 6,7
+    steel_dof_map[0, :] = [4, 5]  # node 0 -> steel DOFs 4,5
+    steel_dof_map[1, :] = [6, 7]  # node 1 -> steel DOFs 6,7
 
     # Total DOFs: 8 (4 concrete + 4 steel)
     ndof_total = 8
     u_total = np.zeros(ndof_total, dtype=float)
-    # Apply small displacement to steel node 2 in x-direction to trigger bond
-    u_total[4] = 1e-4  # steel node 2, x-direction
+    # Apply small displacement to steel node 0 in x-direction to trigger bond
+    u_total[4] = 1e-4  # steel node 0, x-direction (DOF 4)
 
     # Bond law
     bond_law = BondSlipModelCode2010(
         d_bar=0.016,  # 16mm rebar
-        fc=30e6,      # 30 MPa concrete
+        f_cm=30e6,    # 30 MPa concrete
         condition="good",
     )
 
     # Bond states
-    bond_states = BondSlipStateArrays(n_seg=1)
+    bond_states = BondSlipStateArrays.zeros(n_segments=1)
 
     # Steel properties
     steel_EA = 200e9 * (np.pi * 0.008**2)  # E*A for 16mm rebar
@@ -56,7 +58,7 @@ def test_bond_jacobian_has_steel_concrete_coupling():
         bond_states=bond_states,
         steel_dof_map=steel_dof_map,
         steel_EA=steel_EA,
-        use_numba=False,  # Use Python fallback for simplicity
+        use_numba=True,  # Use Numba version which has full 8x8 coupling
         perimeter=np.pi * 0.016,  # Explicit perimeter
         bond_gamma=1.0,
     )

@@ -1435,7 +1435,68 @@ def run_analysis_xfem_multicrack(
             du = ub - ua
             print(f"[substep] lvl={lvl:02d} u0={ua*1e3:5.3f}mm -> u1={ub*1e3:5.3f}mm  du={du*1e3:5.3f}mm  ncr={len([c for c in cracks if c.active])}")
 
-            ok, q_sol, coh_trial, bulk_trial, aux_pos, aux_sig, why, iters, fint_last = solve_step(ub, q_start, coh_comm, bulk_comm)
+            # BLOQUE 4: Bond-slip gamma continuation (multicrack)
+            # If bond-slip is enabled and gamma ramping is active, solve multiple times
+            # with increasing gamma to improve convergence (same as single-crack solver)
+            use_gamma_ramp = (
+                enable_bond_slip
+                and bond_states is not None
+                and model.bond_gamma_strategy == "ramp_steps"
+                and model.bond_gamma_ramp_steps > 1
+            )
+
+            if use_gamma_ramp:
+                # Create gamma sequence: [gamma_min, ..., gamma_max=1.0]
+                gamma_vals = np.linspace(
+                    float(model.bond_gamma_min),
+                    float(model.bond_gamma_max),
+                    int(model.bond_gamma_ramp_steps),
+                )
+                # Ensure gamma=1.0 is included
+                if gamma_vals[-1] != 1.0:
+                    gamma_vals = np.append(gamma_vals, 1.0)
+
+                if getattr(model, "debug_substeps", False):
+                    print(f"    [bond-gamma] ramp sequence: {gamma_vals}")
+
+                # Ramp through gammas
+                q_cur = q_start
+                coh_cur = coh_comm
+                bulk_cur = bulk_comm
+                ok_final = False
+
+                for i_gamma, gamma in enumerate(gamma_vals):
+                    if getattr(model, "debug_substeps", False) or getattr(model, "debug_bond_gamma", False):
+                        print(f"    [bond-gamma] step={i_gamma+1}/{len(gamma_vals)}, gamma={gamma:.3f}, u={ub*1e3:.3f}mm")
+
+                    ok, q_sol, coh_trial, bulk_trial, aux_pos, aux_sig, why, iters, fint_last = solve_step(
+                        ub, q_cur, coh_cur, bulk_cur, bond_gamma=gamma
+                    )
+
+                    if not ok:
+                        if getattr(model, "debug_substeps", False):
+                            print(f"    [bond-gamma] failed at gamma={gamma:.3f}")
+                        # If a gamma substep fails, abandon this increment (trigger substepping)
+                        ok_final = False
+                        break
+
+                    # Accept this gamma step (use as initial guess for next gamma)
+                    q_cur = q_sol
+                    coh_cur = coh_trial
+                    bulk_cur = bulk_trial
+                    ok_final = True
+
+                # Use final result
+                ok = ok_final
+                if ok:
+                    q_sol = q_cur
+                    coh_trial = coh_cur
+                    bulk_trial = bulk_cur
+            else:
+                # No gamma ramp: single solve_step with gamma=1.0 (default)
+                ok, q_sol, coh_trial, bulk_trial, aux_pos, aux_sig, why, iters, fint_last = solve_step(
+                    ub, q_start, coh_comm, bulk_comm, bond_gamma=1.0
+                )
             if ok:
                 print(f"    [newton] converged({why}) it={iters:02d} ||rhs||=OK u={ub*1e3:.3f}mm")
 
