@@ -611,6 +611,7 @@ def run_case_solver(
     max_steps: Optional[int] = None,
     return_bundle: bool = True,
     output_dir: Optional[str] = None,
+    cli_args=None,  # CLI arguments for overrides (e.g., --use-numba)
 ) -> Dict[str, Any]:
     """
     Run XFEM solver for a thesis case.
@@ -644,6 +645,15 @@ def run_case_solver(
 
     # Create model
     model = case_config_to_xfem_model(case)
+
+    # Apply CLI overrides for Numba
+    if cli_args is not None:
+        if hasattr(cli_args, 'use_numba') and cli_args.use_numba:
+            model.use_numba = True
+            print("Override: use_numba = True (via --use-numba)")
+        elif hasattr(cli_args, 'no_numba') and cli_args.no_numba:
+            model.use_numba = False
+            print("Override: use_numba = False (via --no-numba)")
 
     # Apply mesh factor
     nx = int(case.geometry.n_elem_x * mesh_factor)

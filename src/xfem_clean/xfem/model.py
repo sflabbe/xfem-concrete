@@ -123,7 +123,8 @@ class XFEMModel:
     max_total_substeps: int = 50000  # Anti-hang: abort if total substeps exceeds this limit
 
     # Optional Numba acceleration (Phase 2/3)
-    use_numba: bool = False
+    # None = auto-detect (use if available), True/False = explicit override
+    use_numba: Optional[bool] = None
 
     # crack controls
     crack_margin: float = 0.3
@@ -196,6 +197,14 @@ class XFEMModel:
 
     def __post_init__(self):
         """Backwards-compatible parameter normalization."""
+
+        # Auto-detect Numba availability if not explicitly set
+        if self.use_numba is None:
+            try:
+                from xfem_clean.numba.utils import NUMBA_AVAILABLE
+                self.use_numba = NUMBA_AVAILABLE
+            except Exception:
+                self.use_numba = False
 
         # Normalize bulk material selector
         bm = (self.bulk_material or "elastic").strip().lower()
