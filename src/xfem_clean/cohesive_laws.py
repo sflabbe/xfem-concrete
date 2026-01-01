@@ -213,6 +213,198 @@ def cohesive_update(law: CohesiveLaw, delta: float, st: CohesiveState, visc_damp
     return T, k_alg, st2
 
 
+# -----------------------------
+# Mixed-mode cohesive law (Mode I + Mode II)
+# -----------------------------
+
+def cohesive_update_mixed(
+    law: CohesiveLaw,
+    delta_n: float,
+    delta_t: float,
+    st: CohesiveState,
+    visc_damp: float = 0.0
+) -> Tuple[np.ndarray, np.ndarray, CohesiveState]:
+    """Update mixed-mode cohesive traction and tangent (P3 implementation).
+
+    Mixed-mode formulation per model spec:
+    - Effective separation: δ_eff = sqrt((δ_n_pos)² + β(δ_t)²)
+    - Damage: d(g_max) where g_max = max(previous, δ_eff)
+    - Tractions: t_n = (1-d) K_n δ_n_pos, t_t = (1-d) K_t δ_t
+    - Tangent: 2x2 matrix with cross-coupling
+
+    Parameters
+    ----------
+    law : CohesiveLaw
+        Must have mode="mixed" and mixed-mode parameters set
+    delta_n : float
+        Normal opening (positive = opening) [m]
+    delta_t : float
+        Tangential slip (signed) [m]
+    st : CohesiveState
+        Committed state (delta_max stores g_max)
+    visc_damp : float
+        Viscous damping parameter
+
+    Returns
+    -------
+    t : np.ndarray
+        Traction vector [t_n, t_t] [Pa]
+    K : np.ndarray
+        2x2 tangent matrix [[dtn_ddn, dtn_ddt], [dtt_ddn, dtt_ddt]] [Pa/m]
+    st2 : CohesiveState
+        Updated trial state
+
+    Notes
+    -----
+    Unilateral opening: only δ_n_pos = max(δ_n, 0) contributes to normal traction.
+    Compression (δ_n < 0) gives zero normal traction but tangential may be active.
+    """
+    # Check mode
+    if law.mode.lower() != "mixed":
+        raise ValueError(f"cohesive_update_mixed requires mode='mixed', got mode='{law.mode}'")
+
+    # Parameters
+    Kn = float(law.Kn)
+    Kt = float(law.Kt) if law.Kt > 0 else Kn
+    ft = float(law.ft)
+    tau_max = float(law.tau_max) if law.tau_max > 0 else ft
+    Gf_I = float(law.Gf)
+    Gf_II = float(law.Gf_II) if law.Gf_II > 0 else Gf_I
+    k_res = float(law.kres_factor) * Kn
+
+    # Unilateral opening
+    delta_n_pos = max(0.0, float(delta_n))
+    delta_t_val = float(delta_t)
+
+    # Effective separation parameter beta (ratio of stiffnesses)
+    beta = Kt / max(1e-30, Kn)
+
+    # Critical separations
+    delta0_n = ft / max(1e-30, Kn)
+    deltaf_n = 2.0 * Gf_I / max(1e-30, ft)
+    delta0_t = tau_max / max(1e-30, Kt)
+    deltaf_t = 2.0 * Gf_II / max(1e-30, tau_max)
+
+    # Effective critical separations (simplified: use normal mode)
+    delta0_eff = delta0_n
+    deltaf_eff = deltaf_n
+
+    # Compute effective separation
+    delta_eff = math.sqrt(delta_n_pos**2 + beta * delta_t_val**2)
+
+    # History: g_max = max(previous, current)
+    g_old = float(st.delta_max)  # Note: reusing delta_max field for g_max
+    g_max = max(g_old, delta_eff)
+
+    # --- Elastic regime (no damage) ---
+    if g_max <= delta0_eff + 1e-18:
+        # No damage
+        d = 0.0
+        t_n = Kn * delta_n_pos
+        t_t = Kt * delta_t_val
+
+        # Tangent (elastic, with unilateral for normal)
+        if delta_n > 0:
+            dtn_ddn = Kn
+        else:
+            dtn_ddn = 0.0  # Compression: no normal traction
+        dtn_ddt = 0.0
+        dtt_ddn = 0.0
+        dtt_ddt = Kt
+
+        t = np.array([t_n, t_t], dtype=float)
+        K_mat = np.array([[dtn_ddn, dtn_ddt], [dtt_ddn, dtt_ddt]], dtype=float)
+        st2 = CohesiveState(delta_max=g_max, damage=d)
+        return t, K_mat, st2
+
+    # --- Softening regime ---
+    # Bilinear damage evolution
+    if g_max >= deltaf_eff:
+        d = 1.0  # Fully damaged
+    else:
+        d = (g_max - delta0_eff) / max(1e-30, (deltaf_eff - delta0_eff))
+        d = min(1.0, max(0.0, d))
+
+    # Envelope tractions at g_max (using damage parameter)
+    T_env_n = ft * (1.0 - d)
+    T_env_t = tau_max * (1.0 - d)
+
+    # Secant stiffnesses (for unloading/reloading behavior like Mode I)
+    k_sec_n = T_env_n / max(1e-15, g_max)
+    k_sec_t = T_env_t / max(1e-15, g_max)
+
+    # Cap at initial stiffness
+    k_sec_n = min(k_sec_n, Kn)
+    k_sec_t = min(k_sec_t, Kt)
+
+    # Apply residual stiffness floor
+    k_alg_n = max(k_sec_n, k_res)
+    k_alg_t = max(k_sec_t, k_res * Kt / max(1e-30, Kn))  # Scale residual by stiffness ratio
+
+    # Tractions using secant stiffness (matches Mode I formulation)
+    t_n = k_alg_n * delta_n_pos
+    t_t = k_alg_t * delta_t_val
+
+    # --- Tangent matrix (consistent with secant stiffness formulation) ---
+    # Tangent for t_n = k_alg_n(g) * delta_n_pos, t_t = k_alg_t(g) * delta_t_val
+    # Need derivatives of (k_alg * delta) w.r.t. delta_n and delta_t
+
+    # dd/dg = 1 / (deltaf - delta0) for delta0 < g < deltaf
+    if delta0_eff < g_max < deltaf_eff:
+        dd_dg = 1.0 / max(1e-30, (deltaf_eff - delta0_eff))
+    else:
+        dd_dg = 0.0
+
+    # ∂g/∂δ_n and ∂g/∂δ_t
+    if delta_eff > 1e-18:
+        if delta_n > 0:
+            dg_ddn = delta_n_pos / delta_eff
+        else:
+            dg_ddn = 0.0  # Compression: g doesn't increase with negative δ_n
+        dg_ddt = beta * delta_t_val / delta_eff
+    else:
+        dg_ddn = 0.0
+        dg_ddt = 0.0
+
+    # ∂k_alg_n/∂g and ∂k_alg_t/∂g
+    # k_alg_n = ft * (1-d) / g => dk_alg_n/dg = -ft/g * dd/dg - k_alg_n/g
+    # k_alg_t = tau_max * (1-d) / g => dk_alg_t/dg = -tau_max/g * dd/dg - k_alg_t/g
+    if g_max > 1e-18:
+        dk_alg_n_dg = -ft / g_max * dd_dg - k_alg_n / g_max
+        dk_alg_t_dg = -tau_max / g_max * dd_dg - k_alg_t / g_max
+    else:
+        dk_alg_n_dg = 0.0
+        dk_alg_t_dg = 0.0
+
+    # Tangent components (with unilateral)
+    if delta_n > 0:
+        # dtn/ddn = dk_alg_n/dg * dg/ddn * delta_n_pos + k_alg_n
+        dtn_ddn = dk_alg_n_dg * dg_ddn * delta_n_pos + k_alg_n
+        # dtn/ddt = dk_alg_n/dg * dg/ddt * delta_n_pos
+        dtn_ddt = dk_alg_n_dg * dg_ddt * delta_n_pos
+    else:
+        # Compression: no normal traction or tangent
+        dtn_ddn = 0.0
+        dtn_ddt = 0.0
+
+    # dtt/ddn = dk_alg_t/dg * dg/ddn * delta_t
+    dtt_ddn = dk_alg_t_dg * dg_ddn * delta_t_val
+    # dtt/ddt = dk_alg_t/dg * dg/ddt * delta_t + k_alg_t
+    dtt_ddt = dk_alg_t_dg * dg_ddt * delta_t_val + k_alg_t
+
+    t = np.array([t_n, t_t], dtype=float)
+    K_mat = np.array([[dtn_ddn, dtn_ddt], [dtt_ddn, dtt_ddt]], dtype=float)
+
+    st2 = CohesiveState(delta_max=g_max, damage=d)
+    return t, K_mat, st2
+
+
+# Keep original Mode I function for backward compatibility
+def cohesive_update_mode_I(law: CohesiveLaw, delta: float, st: CohesiveState, visc_damp: float = 0.0) -> Tuple[float, float, CohesiveState]:
+    """Alias for cohesive_update (Mode I only) for clarity."""
+    return cohesive_update(law, delta, st, visc_damp)
+
+
 def cohesive_fracture_energy(law: CohesiveLaw, delta_max: float, n_quad: int = 256) -> float:
     """Return dissipated fracture energy per unit area [J/m^2] at a cohesive point.
 
