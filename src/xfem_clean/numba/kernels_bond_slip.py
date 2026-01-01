@@ -371,12 +371,31 @@ def bond_slip_assembly_kernel(
             rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s2y * g_s2x; entry_idx += 1
             rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s2y * g_s2y; entry_idx += 1
 
-        # Steel axial stiffness (if steel_EA > 0)
+        # Steel axial stiffness and internal force (if steel_EA > 0)
+        # CRITICAL FIX (Task A): Add missing steel axial internal force
         if steel_EA > 0.0 and entry_idx + 16 < max_entries:
             K_steel = steel_EA / L0
             Kxx_s = K_steel * cx * cx
             Kxy_s = K_steel * cx * cy
             Kyy_s = K_steel * cy * cy
+
+            # Compute steel axial displacement (du = u2 - u1)
+            du_steel_x = u_s2x - u_s1x
+            du_steel_y = u_s2y - u_s1y
+
+            # Axial elongation in bar direction: axial = du · c
+            axial = du_steel_x * cx + du_steel_y * cy
+
+            # Axial force: N = (EA/L) * axial
+            N_steel = K_steel * axial
+
+            # Internal force contribution: f = N * c at each node
+            # Node 1: f1 = -N * c (compression if pulled)
+            # Node 2: f2 = +N * c (tension if pulled)
+            f[dof_s1x] += -N_steel * cx
+            f[dof_s1y] += -N_steel * cy
+            f[dof_s2x] += +N_steel * cx
+            f[dof_s2y] += +N_steel * cy
 
             # Steel bar stiffness: K = (EA/L) * [c⊗c, -c⊗c; -c⊗c, c⊗c]
             # Node 1 - Node 1 (positive)
