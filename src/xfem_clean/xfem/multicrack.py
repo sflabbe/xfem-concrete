@@ -795,15 +795,16 @@ def assemble_xfem_system_multi(
         bond_disabled_x_range = getattr(model, 'bond_disabled_x_range', None)
         if bond_disabled_x_range is not None and rebar_segs is not None:
             # Mask segments in the disabled x-range
+            # segment_mask[i] = True means bond is DISABLED for segment i
             n_seg = rebar_segs.shape[0]
-            segment_mask = np.ones(n_seg, dtype=bool)
+            segment_mask = np.zeros(n_seg, dtype=bool)  # Initialize to False (bond enabled)
             x_min, x_max = bond_disabled_x_range
             for i in range(n_seg):
                 n1 = int(rebar_segs[i, 0])
                 n2 = int(rebar_segs[i, 1])
                 x_mid = 0.5 * (nodes[n1, 0] + nodes[n2, 0])
                 if x_min <= x_mid <= x_max:
-                    segment_mask[i] = False  # Disable bond in this segment
+                    segment_mask[i] = True  # Disable bond in this segment (True = disabled)
 
         f_bond, K_bond, bond_updates = assemble_bond_slip(
             u_total=q,

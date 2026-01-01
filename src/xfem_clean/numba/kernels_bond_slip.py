@@ -35,6 +35,7 @@ def bond_slip_assembly_kernel(
     bond_params: np.ndarray,    # [tau_max, s1, s2, s3, tau_f, alpha, perimeter, dtau_max, gamma]
     s_max_hist: np.ndarray,     # [n_seg] history
     steel_EA: float = 0.0,      # E * A for steel (if > 0, adds axial stiffness)
+    segment_mask: np.ndarray = None,  # [n_seg] bool: True = bond disabled for segment
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Assemble bond-slip interface contribution (Numba kernel).
 
@@ -65,6 +66,9 @@ def bond_slip_assembly_kernel(
         Maximum historical slip [n_seg]
     steel_EA : float, optional
         Steel axial stiffness E*A [N]. If > 0, adds truss element.
+    segment_mask : np.ndarray, optional
+        Boolean mask [n_seg] where True = bond disabled for that segment.
+        If None, all segments are active.
 
     Returns
     -------
@@ -82,6 +86,7 @@ def bond_slip_assembly_kernel(
       where g = [∂s/∂u] is the slip gradient (see implementation).
     * Regularization: For s < s_reg = 0.5*s1, uses linear branch to avoid
       singular tangent at s=0 (C1-continuous transition).
+    * Masked segments (segment_mask[i] == True) contribute zero force and stiffness.
     """
     ndof = u_total.shape[0]
     n_seg = segs.shape[0]
@@ -107,6 +112,12 @@ def bond_slip_assembly_kernel(
     entry_idx = 0
 
     for i in range(n_seg):  # Serial (not prange) due to entry_idx
+        # Skip masked segments (bond disabled)
+        if segment_mask is not None and segment_mask[i]:
+            # Set slip to zero for disabled segments (no forces, no stiffness)
+            s_current[i] = 0.0
+            continue
+
         # Node IDs
         n1 = int(segs[i, 0])
         n2 = int(segs[i, 1])

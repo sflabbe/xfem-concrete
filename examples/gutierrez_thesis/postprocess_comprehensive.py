@@ -259,7 +259,7 @@ def export_vtk_step(
     elems : np.ndarray
         Element connectivity [nelem, 4]
     u : np.ndarray
-        Displacement vector (m)
+        Displacement vector (m) - full DOF vector including enrichment and steel DOFs
     crack_data : dict, optional
         Crack pattern data
     """
@@ -269,10 +269,15 @@ def export_vtk_step(
     nnode = nodes.shape[0]
     nelem = elems.shape[0]
 
+    # Extract concrete node displacements from full DOF vector
+    # u_total includes: concrete (2*nnode), enrichment, steel
+    # We only need the first 2*nnode entries for VTK export
+    u_conc = u[: 2*nnode]
+
     # Deformed coordinates
     coords_def = nodes.copy()
-    coords_def[:, 0] += u[0::2]
-    coords_def[:, 1] += u[1::2]
+    coords_def[:, 0] += u_conc[0::2]
+    coords_def[:, 1] += u_conc[1::2]
 
     with open(vtk_file, 'w') as f:
         # Header
@@ -299,8 +304,8 @@ def export_vtk_step(
         f.write(f"\nPOINT_DATA {nnode}\n")
         f.write("VECTORS displacement float\n")
         for i in range(nnode):
-            ux = u[2 * i]
-            uy = u[2 * i + 1]
+            ux = u_conc[2 * i]
+            uy = u_conc[2 * i + 1]
             f.write(f"{ux:.6e} {uy:.6e} 0.0\n")
 
     print(f"  VTK exported: {vtk_file.name}")
