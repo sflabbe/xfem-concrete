@@ -26,12 +26,30 @@ class CohesiveLaw:
     # Critical crack opening w_c (softening branch length). If <=0 and law=reinhardt, computed from Gf/ft.
     wcrit: float = 0.0
 
+    # P2: Mixed-mode parameters (Mode I + Mode II)
+    mode: str = "I"  # "I" (Mode I only, default) or "mixed" (Mode I + Mode II)
+    # Shear strength (for mixed mode)
+    tau_max: float = 0.0  # If 0, defaults to ft
+    # Shear penalty stiffness (for mixed mode)
+    Kt: float = 0.0  # If 0, defaults to Kn
+    # Mode II fracture energy
+    Gf_II: float = 0.0  # If 0, defaults to Gf (Mode I)
+
     def __post_init__(self) -> None:
         if self.law.lower().startswith("rein") and self.wcrit <= 0.0:
             # Choose w_c such that:  ∫_0^{w_c} t(w) dw = Gf, with t(w)=ft*f(w/w_c)
             # => w_c = Gf / (ft * ∫_0^1 f(x) dx)
             I = self._reinhardt_I(self.c1, self.c2)
             self.wcrit = float(self.Gf / (max(1e-30, self.ft) * max(1e-30, I)))
+
+        # P2: Set defaults for mixed-mode parameters
+        if self.mode.lower() == "mixed":
+            if self.tau_max <= 0.0:
+                self.tau_max = self.ft  # Default: shear strength = tensile strength
+            if self.Kt <= 0.0:
+                self.Kt = self.Kn  # Default: shear stiffness = normal stiffness
+            if self.Gf_II <= 0.0:
+                self.Gf_II = self.Gf  # Default: Mode II fracture energy = Mode I
 
     @staticmethod
     def _reinhardt_I(c1: float, c2: float, n: int = 4096) -> float:

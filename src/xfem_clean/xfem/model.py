@@ -226,8 +226,8 @@ class XFEMModel:
             "cdp-lite2": "cdp-lite",
         }
         bm = aliases.get(bm, bm)
-        if bm not in ("elastic", "dp", "cdp", "cdp-lite"):
-            raise ValueError(f"Unknown bulk_material='{self.bulk_material}'. Use 'elastic', 'dp', 'cdp' or 'cdp-lite'.")
+        if bm not in ("elastic", "dp", "cdp", "cdp-lite", "compression-damage"):
+            raise ValueError(f"Unknown bulk_material='{self.bulk_material}'. Use 'elastic', 'dp', 'cdp', 'cdp-lite', or 'compression-damage'.")
         self.bulk_material = bm
 
 
