@@ -4,11 +4,12 @@
 
 **Purpose**: This document tracks the implementation status of all thesis cases from Chapter 5 and the sensitivity studies, mapping each to the current codebase and identifying feature gaps.
 
-**Last Updated**: 2026-01-01 (Post-Audit)
+**Last Updated**: 2026-01-01 (Post-Audit + P3 Implementation)
 
 **Audit Status**: ✅ **COMPREHENSIVE AUDIT COMPLETED**
-- 2 critical bugs fixed (P0.1, P0.2)
-- 2 features found working (junction, compression damage) - parity matrix was incorrect
+- 2 critical bugs fixed (P0.1 unilateral, P0.2 stagnation)
+- 1 new feature implemented (P3 mixed-mode cohesive)
+- 2 features found working (P1 junction, P2 compression) - parity matrix was incorrect
 - All 12 thesis cases verified implemented
 - See `docs/AUDIT_REPORT_2026-01-01.md` for full details
 
@@ -19,8 +20,9 @@
 ### Overall Status (Post-Audit)
 
 - **Chapter 5 Cases**: 12/12 cases implemented ✅
-- **Critical Bugs Fixed**: 2 (unilateral opening, stagnation detection) ✅
-- **Remaining Gaps**: 2 (mixed-mode cohesive, dowel action wiring) - non-critical
+- **Critical Bugs Fixed**: 2 (P0.1 unilateral opening, P0.2 stagnation detection) ✅
+- **New Features**: 1 (P3 mixed-mode cohesive law) ✅
+- **Remaining Gaps**: 1 (P4 dowel action - not wired, documented as inactive) - non-critical
 
 ### Priority Gaps (UPDATED 2026-01-01 after audit)
 
@@ -30,7 +32,7 @@
 | **P0.2** | Stagnation false positives | ✅ **FIXED** (commit de72e18) | Was causing unnecessary Newton failures |
 | **P1** | Junction enrichment integration | ✅ **ALREADY WIRED** (multicrack.py:1614-1626) | ~~Parity matrix was incorrect - feature is ACTIVE~~ |
 | **P2** | Compression damage model | ✅ **ALREADY SELECTABLE** (bulk_material="compression-damage") | ~~Parity matrix was incorrect - option exists~~ |
-| **P3** | Mixed-mode cohesive law | ⚠️ Partial (data structure exists, logic missing) | Missing shear traction softening from thesis |
+| **P3** | Mixed-mode cohesive law | ✅ **IMPLEMENTED** (commit c6fc125) | Full Mode I+II with 2x2 tangent, 7 tests passing |
 | **P4** | Dowel action for embedded bars | ⚠️ Implemented but not wired | Functions exist but never called - recommend documenting as "not active" |
 
 ---

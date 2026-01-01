@@ -42,15 +42,20 @@ I performed a comprehensive audit of your XFEM concrete fracture repository agai
 **Bond-Slip Coupling Matrix**
 - Status: ✅ **CORRECT** - full 8×8 outer product (not diagonal)
 
-### ⚠️ Remaining Gaps (Non-Critical)
+### ✅ Additional Implementations
 
 **Mixed-Mode Cohesive (P3)**
-- Data structure exists, but logic not implemented
-- Large effort (~100 lines), deferred to future work
+- Status: ✅ **IMPLEMENTED** (commit `c6fc125`)
+- Full Mode I + Mode II formulation with 2x2 tangent matrix
+- 7 comprehensive tests (all passing)
+- Secant stiffness approach for Mode I parity
+
+### ⚠️ Remaining Gaps (Non-Critical)
 
 **Dowel Action (P4)**
 - Fully implemented as functions, but never called
-- Recommendation: Document as "not active" (safer than incomplete wiring)
+- Status: ✅ **DOCUMENTED** - see `docs/DOWEL_ACTION_STATUS.md`
+- Recommendation: Leave inactive (most cases unaffected)
 
 ---
 
@@ -63,7 +68,8 @@ I performed a comprehensive audit of your XFEM concrete fracture repository agai
 
 **Test Coverage:**
 - Baseline: `pytest tests/test_smoke.py` → 2/2 PASS ✅
-- New: `tests/test_cohesive_unilateral_opening.py` → 4/4 PASS ✅
+- P0.1: `tests/test_cohesive_unilateral_opening.py` → 4/4 PASS ✅
+- P3: `tests/test_mixed_mode_cohesive_p3.py` → 7/7 PASS ✅
 - Smoke run: Case 01 runs successfully ✅
 
 ---
@@ -73,9 +79,11 @@ I performed a comprehensive audit of your XFEM concrete fracture repository agai
 1. **`docs/AUDIT_REPORT_2026-01-01.md`** - Comprehensive final report
 2. **`docs/audit/physics_audit_findings.md`** - Detailed technical findings
 3. **`docs/thesis_parity.md`** - Updated with corrections
-4. **2 Commits with Fixes:**
-   - `f729fda`: Cohesive unilateral opening fix + tests
-   - `de72e18`: Stagnation detection fix
+4. **`docs/DOWEL_ACTION_STATUS.md`** - P4 documentation
+5. **3 Commits with Fixes:**
+   - `f729fda`: P0.1 - Cohesive unilateral opening fix + 4 tests
+   - `de72e18`: P0.2 - Stagnation detection fix
+   - `c6fc125`: P3 - Mixed-mode cohesive implementation + 7 tests
 
 ---
 
@@ -83,15 +91,17 @@ I performed a comprehensive audit of your XFEM concrete fracture repository agai
 
 | File | Change | Status |
 |------|--------|--------|
-| `src/xfem_clean/cohesive_laws.py` | P0.1: Unilateral opening | ✅ |
+| `src/xfem_clean/cohesive_laws.py` | P0.1: Unilateral opening<br>P3: Mixed-mode function | ✅ |
 | `src/xfem_clean/numba/kernels_cohesive.py` | P0.1: Numba kernel fix | ✅ |
 | `src/xfem_clean/xfem/analysis_single.py` | P0.2: Stagnation detection | ✅ |
-| `tests/test_cohesive_unilateral_opening.py` | New test file | ✅ |
+| `tests/test_cohesive_unilateral_opening.py` | P0.1: 4 tests | ✅ |
+| `tests/test_mixed_mode_cohesive_p3.py` | P3: 7 tests | ✅ |
 | `docs/AUDIT_REPORT_2026-01-01.md` | Final report | ✅ |
 | `docs/audit/physics_audit_findings.md` | Technical audit | ✅ |
-| `docs/thesis_parity.md` | Corrections | ✅ |
+| `docs/thesis_parity.md` | Corrections + P3 update | ✅ |
+| `docs/DOWEL_ACTION_STATUS.md` | P4: Documentation | ✅ |
 
-**Total:** 7 files changed, 1000+ lines of documentation + fixes
+**Total:** 9 files changed, 1500+ lines of documentation + fixes
 
 ---
 
@@ -100,11 +110,11 @@ I performed a comprehensive audit of your XFEM concrete fracture repository agai
 **High Priority (Recommended):**
 1. Review and merge this branch
 2. Test with full case suite on medium/fine meshes
-3. Verify cyclic wall cases (C1, C2) benefit from unilateral fix
+3. Verify cyclic wall cases (C1, C2) benefit from P0.1/P0.2 fixes
+4. Test mixed-mode cohesive (P3) on shear-dominated cases
 
 **Medium Priority (Optional):**
-4. Implement mixed-mode cohesive (if shear failure modes needed)
-5. Wire dowel action (or document as inactive)
+5. Wire dowel action (currently documented as inactive)
 6. Fix VTK postprocessing shape mismatch (non-critical)
 
 **Low Priority (Future Work):**
@@ -143,4 +153,4 @@ For questions or issues with this audit:
 
 **Audit Completed:** 2026-01-01
 **Branch Ready:** `claude/xfem-audit-refactor-MWP9x`
-**Recommendation:** ✅ Ready to merge (2 critical bugs fixed, tests passing)
+**Recommendation:** ✅ Ready to merge (P0.1 + P0.2 critical bugs fixed, P3 mixed-mode implemented, all tests passing)
