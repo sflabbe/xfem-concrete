@@ -644,4 +644,16 @@ If you use this code, please cite:
 
 ---
 
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+### Third-party Licenses
+
+This repository includes third-party code with separate licenses:
+
+- **CDP Generator**: MIT License (see [LICENSES/CDP_GENERATOR_LICENSE](LICENSES/CDP_GENERATOR_LICENSE))
+
+---
+
 For archived documentation, see `docs/archive/`.
