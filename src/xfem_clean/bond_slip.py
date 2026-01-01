@@ -994,11 +994,9 @@ def assemble_bond_slip(
     n_seg = steel_segments.shape[0]
     ndof_total = u_total.shape[0]
 
-    # Detect bond law type and force Python fallback for BilinearBondLaw and BanholzerBondLaw
-    # (Numba kernel only supports BondSlipModelCode2010 parameters)
-    bond_law_class_name = type(bond_law).__name__
-    if bond_law_class_name in ('BilinearBondLaw', 'BanholzerBondLaw'):
-        use_numba = False  # Force Python fallback for these bond law types
+    # NOTE: Numba kernel expects BondSlipModelCode2010-like parameters (tau_max, s1, s2, etc.)
+    # If bond_law doesn't have these attributes, will automatically fall back to Python.
+    # This allows using Numba with compatible bond laws without hardcoding type checks.
 
     # Compute perimeter (explicit parameter takes precedence)
     if perimeter is None:
@@ -1012,26 +1010,33 @@ def assemble_bond_slip(
                 "  2. Use a bond_law with d_bar attribute (e.g., BondSlipModelCode2010)"
             )
 
-    # Only create bond_params if using Numba (BondSlipModelCode2010 only)
+    # Try to create bond_params if using Numba
+    # If bond_law doesn't have required attributes, will fall back to Python
+    bond_params = None
     if use_numba and NUMBA_AVAILABLE:
-        # Tangent capping for numerical stability (Priority #1)
-        # dtau_max is typically set to bond_tangent_cap_factor * median(diag(K_bulk))
-        # For now, use a large value (no capping); caller can override via bond_law
-        dtau_max = getattr(bond_law, 'dtau_max', 1e20)  # Default: no cap
+        try:
+            # Tangent capping for numerical stability (Priority #1)
+            # dtau_max is typically set to bond_tangent_cap_factor * median(diag(K_bulk))
+            # For now, use a large value (no capping); caller can override via bond_law
+            dtau_max = getattr(bond_law, 'dtau_max', 1e20)  # Default: no cap
 
-        bond_params = np.array([
-            bond_law.tau_max,
-            bond_law.s1,
-            bond_law.s2,
-            bond_law.s3,
-            bond_law.tau_f,
-            bond_law.alpha,
-            perimeter,
-            dtau_max,
-            bond_gamma,  # BLOQUE 3: Continuation parameter
-        ], dtype=float)
+            bond_params = np.array([
+                bond_law.tau_max,
+                bond_law.s1,
+                bond_law.s2,
+                bond_law.s3,
+                bond_law.tau_f,
+                bond_law.alpha,
+                perimeter,
+                dtau_max,
+                bond_gamma,  # BLOQUE 3: Continuation parameter
+            ], dtype=float)
+        except AttributeError:
+            # Bond law doesn't have required attributes (e.g., BilinearBondLaw, BanholzerBondLaw)
+            # Fall back to Python assembly which works with any bond law via tau_and_tangent()
+            use_numba = False
 
-    if use_numba and NUMBA_AVAILABLE:
+    if use_numba and NUMBA_AVAILABLE and bond_params is not None:
         # Use sparse DOF mapping if provided, else legacy dense mapping
         if steel_dof_map is None:
             # Legacy: assume dense contiguous steel DOFs
