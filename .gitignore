@@ -43,6 +43,13 @@ Thumbs.db
 *.png
 *.pdf
 *.vtk
+*.csv
 outputs/
 results/
 tests/tmp/
+benchmarks/results/
+calibration/results/
+validation/outputs/
+
+# VTK outputs
+vtk/
