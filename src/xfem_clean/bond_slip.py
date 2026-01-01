@@ -1473,6 +1473,8 @@ def assemble_bond_slip(
             steel_EA=steel_EA,
             perimeter=perimeter,  # Pass computed perimeter
             bond_gamma=bond_gamma,  # BLOQUE 3: Pass gamma to Python fallback
+            bond_k_cap=bond_k_cap,  # BLOQUE C: Pass tangent cap
+            bond_s_eps=bond_s_eps,  # BLOQUE C: Pass smoothing epsilon
         )
 
     return f_bond, K_bond, bond_states_new
@@ -1501,6 +1503,8 @@ def _bond_slip_assembly_python(
     steel_EA: float = 0.0,
     perimeter: float = None,
     bond_gamma: float = 1.0,  # BLOQUE 3: Continuation parameter
+    bond_k_cap: Optional[float] = None,  # BLOQUE C: Cap dtau/ds
+    bond_s_eps: float = 0.0,  # BLOQUE C: Smooth regularization epsilon
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Pure Python fallback for bond-slip assembly (for debugging).
 
