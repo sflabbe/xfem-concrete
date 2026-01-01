@@ -89,6 +89,10 @@ def cohesive_update_values_numba(
         Algorithmic tangent/secant stiffness used in modified Newton
     delta_max_new : float
     damage_new : float
+
+    IMPORTANT: Unilateral opening behavior (P0.1 fix)
+    - Only positive opening (δ > 0) contributes to damage
+    - Compression (δ < 0) returns zero traction
     """
 
     law_id = int(params[0] + 0.5)
@@ -102,7 +106,12 @@ def cohesive_update_values_numba(
     c2 = float(params[8])
     wc = float(params[9])
 
-    delta_abs = abs(delta)
+    # P0.1 FIX: Unilateral opening - only positive opening contributes to damage
+    if delta <= 0.0:
+        # Crack is closed or in compression - no cohesive traction
+        return 0.0, k_res, float(delta_max_old), float(damage_old)
+
+    delta_abs = delta  # Since delta > 0 here
     dm_old = float(delta_max_old)
     dm = dm_old
     if delta_abs > dm:

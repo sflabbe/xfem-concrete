@@ -94,6 +94,10 @@ def cohesive_update(law: CohesiveLaw, delta: float, st: CohesiveState, visc_damp
         * bilinear: linear drop to 0 at δf
         * reinhardt: Reinhardt/Gutiérrez curve in terms of crack opening w = |δ| - δ0
     - Unloading/reloading: straight line through the origin with secant stiffness at the max opening.
+
+    IMPORTANT: Unilateral opening behavior (P0.1 fix)
+    - Only positive opening (δ > 0) contributes to damage
+    - Compression (δ < 0) returns zero traction (crack closes freely, no cohesive resistance)
     """
     Kn = float(law.Kn)
     ft = float(law.ft)
@@ -102,9 +106,18 @@ def cohesive_update(law: CohesiveLaw, delta: float, st: CohesiveState, visc_damp
     k_cap = float(law.kcap_factor) * Kn
 
     delta = float(delta)
-    delta_abs = abs(delta)
 
-    # History (irreversible max opening)
+    # P0.1 FIX: Unilateral opening - only positive opening contributes to damage
+    # Compression (delta < 0) should return zero traction (crack closes freely)
+    if delta <= 0.0:
+        # Crack is closed or in compression - no cohesive traction
+        # Use residual stiffness to avoid singularity, but no damage accumulation
+        st2 = CohesiveState(delta_max=float(st.delta_max), damage=float(st.damage))
+        return 0.0, k_res, st2
+
+    delta_abs = delta  # Since delta > 0 here, delta_abs = delta
+
+    # History (irreversible max opening - only from positive opening)
     dm_old = float(st.delta_max)
     dm = max(dm_old, delta_abs)
 
