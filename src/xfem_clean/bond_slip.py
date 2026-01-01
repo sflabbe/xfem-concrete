@@ -1475,6 +1475,7 @@ def assemble_bond_slip(
             bond_gamma=bond_gamma,  # BLOQUE 3: Pass gamma to Python fallback
             bond_k_cap=bond_k_cap,  # BLOQUE C: Pass tangent cap
             bond_s_eps=bond_s_eps,  # BLOQUE C: Pass smoothing epsilon
+            segment_mask=segment_mask,  # Pass segment mask for disabled segments
         )
 
     return f_bond, K_bond, bond_states_new
@@ -1505,6 +1506,7 @@ def _bond_slip_assembly_python(
     bond_gamma: float = 1.0,  # BLOQUE 3: Continuation parameter
     bond_k_cap: Optional[float] = None,  # BLOQUE C: Cap dtau/ds
     bond_s_eps: float = 0.0,  # BLOQUE C: Smooth regularization epsilon
+    segment_mask: Optional[np.ndarray] = None,  # Mask to disable bond in specific segments
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Pure Python fallback for bond-slip assembly (for debugging).
 
@@ -1525,6 +1527,12 @@ def _bond_slip_assembly_python(
         perimeter = math.pi * bond_law.d_bar
 
     for i in range(n_seg):
+        # Skip disabled segments (segment_mask[i] == True means disabled)
+        if segment_mask is not None and segment_mask[i]:
+            # Set slip to zero for disabled segments (no forces, no stiffness)
+            s_current[i] = 0.0
+            continue
+
         # Extract segment data
         n1 = int(steel_segments[i, 0])
         n2 = int(steel_segments[i, 1])
@@ -1621,15 +1629,40 @@ def _bond_slip_assembly_python(
         f_bond[dof_c2y] += 0.5 * Fy_c
 
         # Stiffness (with gamma continuation scaling, BLOQUE 3)
+        # Full 8×8 consistent tangent: K_seg = K_bond * g ⊗ g^T
+        # where g = [∂s/∂u] is the gradient of slip with respect to DOFs
+        # This matches the Numba kernel implementation and provides proper steel↔concrete coupling
         K_bond = bond_gamma * dtau_ds * perimeter * L0
-        Kxx = K_bond * cx * cx
-        Kxy = K_bond * cx * cy
-        Kyy = K_bond * cy * cy
 
-        # Diagonal terms (simplified)
-        rows.extend([dof_s1x, dof_s1y, dof_s2x, dof_s2y, dof_c1x, dof_c1y, dof_c2x, dof_c2y])
-        cols.extend([dof_s1x, dof_s1y, dof_s2x, dof_s2y, dof_c1x, dof_c1y, dof_c2x, dof_c2y])
-        data.extend([0.25 * Kxx, 0.25 * Kyy, 0.25 * Kxx, 0.25 * Kyy, 0.25 * Kxx, 0.25 * Kyy, 0.25 * Kxx, 0.25 * Kyy])
+        # Gradient vector components (scaled by 0.5 for midpoint averaging)
+        # Concrete node 1: -0.5 * t
+        g_c1x = -0.5 * cx
+        g_c1y = -0.5 * cy
+        # Concrete node 2: -0.5 * t
+        g_c2x = -0.5 * cx
+        g_c2y = -0.5 * cy
+        # Steel node 1: +0.5 * t
+        g_s1x = +0.5 * cx
+        g_s1y = +0.5 * cy
+        # Steel node 2: +0.5 * t
+        g_s2x = +0.5 * cx
+        g_s2y = +0.5 * cy
+
+        # Build DOF list and gradient list for outer product
+        dofs = [dof_c1x, dof_c1y, dof_c2x, dof_c2y, dof_s1x, dof_s1y, dof_s2x, dof_s2y]
+        g = [g_c1x, g_c1y, g_c2x, g_c2y, g_s1x, g_s1y, g_s2x, g_s2y]
+
+        # Assemble full 8×8 block: K_seg[a,b] = K_bond * g[a] * g[b]
+        # Skip entries where DOF is negative (marker for unassigned/disabled DOFs)
+        for a in range(8):
+            if dofs[a] < 0:
+                continue
+            for b in range(8):
+                if dofs[b] < 0:
+                    continue
+                rows.append(dofs[a])
+                cols.append(dofs[b])
+                data.append(K_bond * g[a] * g[b])
 
         # Add steel axial stiffness if requested
         if steel_EA > 0.0:
