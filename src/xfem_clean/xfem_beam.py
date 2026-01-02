@@ -773,7 +773,14 @@ def bulk_internal_force(nodes: np.ndarray, elems: np.ndarray, mat: CDPMaterial, 
 
         fe = np.zeros(8, dtype=float)
         for igp, (xi, eta) in enumerate(gauss):
-            B, detJ = element_B_detJ(xi, eta, xe)
+            # Use precomputed B and detJ if available
+            if precomp is not None:
+                B_all, detJ_all = precomp
+                B = B_all[e, igp]
+                detJ = float(detJ_all[e, igp])
+            else:
+                B, detJ = element_B_detJ(xi, eta, xe)
+
             eps = B @ ue
             sig_nom, st, rank = cdp_update(eps, states_committed[e][igp], mat)
 
@@ -1065,7 +1072,8 @@ def _hht_try_step(model: Model,
 
     Returns:
         (ok, u_np1, v_np1, acc_np1, f_int_np1, states_comm_np1, gp_sig_nom_last, gp_rank_last, P_internal,
-         psi_bulk_np1, K_bulk_np1, C_np1) where last 3 are only valid if track_energy=True and ok=True
+         psi_bulk_np1, f_d_np1, f_m_np1, K_bulk_np1, C_np1)
+        where energy-related quantities are only valid if track_energy=True and ok=True
     """
     alpha = float(model.hht_alpha)
     gamma = 0.5 - alpha
@@ -1100,6 +1108,7 @@ def _hht_try_step(model: Model,
 
     gp_sig_nom_last = None
     gp_rank_last = None
+    psi_bulk_it = 0.0
 
     for it in range(model.newton_maxit):
         # kinematics from current u_it
@@ -1107,8 +1116,10 @@ def _hht_try_step(model: Model,
         v_it = v_n + dt * ((1.0 - gamma) * acc_n + gamma * acc_it)
 
         # internal forces + trial states (nonlinear)
-        f_bulk, states_trial, gp_sig_nom, gp_rank, _ = bulk_internal_force(
-            nodes, elems, model.cdp, u_it, states_comm, thickness=model.b, precomp=precomp
+        # Compute psi_bulk if tracking energy (no extra cost, same Gauss loop)
+        f_bulk, states_trial, gp_sig_nom, gp_rank, psi_bulk_it = bulk_internal_force(
+            nodes, elems, model.cdp, u_it, states_comm, thickness=model.b, precomp=precomp,
+            compute_psi_bulk=track_energy
         )
         f_rb, K_rb = rebar_contrib(
             nodes, rebar_segs, u_it, model.steel_A_total,
@@ -1150,15 +1161,12 @@ def _hht_try_step(model: Model,
             f_int_np1 = f_int.copy()
             P_internal = -sum(f_int_np1[d] for d in load_dofs)
 
-            # Compute energy quantities if requested
-            psi_bulk_np1 = 0.0
-            if track_energy:
-                _, _, _, _, psi_bulk_np1 = bulk_internal_force(
-                    nodes, elems, model.cdp, u_it, states_comm, thickness=model.b,
-                    precomp=precomp, compute_psi_bulk=True
-                )
+            # Energy quantities (already computed in last iteration, no extra work)
+            psi_bulk_np1 = psi_bulk_it if track_energy else 0.0
+            f_d_np1 = f_d.copy() if track_energy else np.zeros_like(f_d)
+            f_m_np1 = f_m.copy() if track_energy else np.zeros_like(f_m)
 
-            return True, u_it, v_np1, acc_np1, f_int_np1, states_comm, gp_sig_nom_last, gp_rank_last, float(P_internal), psi_bulk_np1, K_bulk, C
+            return True, u_it, v_np1, acc_np1, f_int_np1, states_comm, gp_sig_nom_last, gp_rank_last, float(P_internal), psi_bulk_np1, f_d_np1, f_m_np1, K_bulk, C
 
         du_f = spla.spsolve(K_ff, rhs)
         norm_du = float(np.linalg.norm(du_f))
@@ -1171,15 +1179,12 @@ def _hht_try_step(model: Model,
             f_int_np1 = f_int.copy()
             P_internal = -sum(f_int_np1[d] for d in load_dofs)
 
-            # Compute energy quantities if requested
-            psi_bulk_np1 = 0.0
-            if track_energy:
-                _, _, _, _, psi_bulk_np1 = bulk_internal_force(
-                    nodes, elems, model.cdp, u_it, states_comm, thickness=model.b,
-                    precomp=precomp, compute_psi_bulk=True
-                )
+            # Energy quantities (already computed in last iteration, no extra work)
+            psi_bulk_np1 = psi_bulk_it if track_energy else 0.0
+            f_d_np1 = f_d.copy() if track_energy else np.zeros_like(f_d)
+            f_m_np1 = f_m.copy() if track_energy else np.zeros_like(f_m)
 
-            return True, u_it, v_np1, acc_np1, f_int_np1, states_comm, gp_sig_nom_last, gp_rank_last, float(P_internal), psi_bulk_np1, K_bulk, C
+            return True, u_it, v_np1, acc_np1, f_int_np1, states_comm, gp_sig_nom_last, gp_rank_last, float(P_internal), psi_bulk_np1, f_d_np1, f_m_np1, K_bulk, C
 
         # optional line-search
         if line_search:
@@ -1197,7 +1202,8 @@ def _hht_try_step(model: Model,
                 v_try = v_n + dt * ((1.0 - gamma) * acc_n + gamma * acc_try)
 
                 f_bulk_t, _, _, _, _ = bulk_internal_force(
-                    nodes, elems, model.cdp, u_try, states_comm, thickness=model.b, precomp=precomp
+                    nodes, elems, model.cdp, u_try, states_comm, thickness=model.b, precomp=precomp,
+                    compute_psi_bulk=False
                 )
                 f_rb_t, _ = rebar_contrib(
                     nodes, rebar_segs, u_try, model.steel_A_total,
@@ -1223,7 +1229,8 @@ def _hht_try_step(model: Model,
             u_it[dof] = val
 
     # Failure return (energy quantities are undefined)
-    return False, u_n, v_n, acc_n, f_int_n, states_comm, gp_sig_nom_last, gp_rank_last, 0.0, 0.0, None, None
+    ndof = u_n.size
+    return False, u_n, v_n, acc_n, f_int_n, states_comm, gp_sig_nom_last, gp_rank_last, 0.0, 0.0, np.zeros(ndof), np.zeros(ndof), None, None
 
 
 def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_search: bool = True,
@@ -1292,6 +1299,8 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
     # energy tracking state
     energy_history = []
     psi_bulk_n = 0.0
+    f_d_n = np.zeros(ndof, dtype=float)
+    f_m_n = np.zeros(ndof, dtype=float)
     K_bulk_n = None
     C_n = None
     W_dir_cum = 0.0
@@ -1316,7 +1325,7 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
             if dt < min_dt:
                 raise RuntimeError(f"Adaptive HHT: dt fell below min_dt ({min_dt}).")
             u1 = u0 + du
-            ok, u_np1, v_np1, acc_np1, f_int_np1, states_np1, gp_sig_nom, gp_rank, P_int, psi_bulk_np1, K_bulk_np1, C_np1 = _hht_try_step(
+            ok, u_np1, v_np1, acc_np1, f_int_np1, states_np1, gp_sig_nom, gp_rank, P_int, psi_bulk_np1, f_d_np1, f_m_np1, K_bulk_np1, C_np1 = _hht_try_step(
                 model, nodes, elems, precomp, rebar_segs,
                 Mdiag, M,
                 u_n, v_n, acc_n, f_int_n, states_comm,
@@ -1348,24 +1357,19 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
                         step=accepted_count + 1,
                         t_n=t_prev,
                         t_np1=t_n,
-                        alpha=alpha,
-                        aM=float(model.rayleigh_aM),
-                        aK=float(model.rayleigh_aK),
                         Mdiag=Mdiag,
                         u_n=u_n,
                         v_n=v_n,
-                        a_n=acc_n,
                         f_int_n=f_int_n,
+                        f_d_n=f_d_n,
+                        f_m_n=f_m_n,
                         psi_bulk_n=psi_bulk_n,
-                        K_bulk_n=K_bulk_n if K_bulk_n is not None else sp.csr_matrix((ndof, ndof)),
-                        C_n=C_n if C_n is not None else sp.csr_matrix((ndof, ndof)),
                         u_np1=u_np1,
                         v_np1=v_np1,
-                        a_np1=acc_np1,
                         f_int_np1=f_int_np1,
+                        f_d_np1=f_d_np1,
+                        f_m_np1=f_m_np1,
                         psi_bulk_np1=psi_bulk_np1,
-                        K_bulk_np1=K_bulk_np1,
-                        C_np1=C_np1,
                         dir_dofs=dir_dofs,
                         W_dir_cum_prev=W_dir_cum,
                         D_damp_cum_prev=D_damp_cum,
@@ -1378,6 +1382,8 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
                     D_damp_cum = step_energy.D_damp_cum
                     D_alg_cum = step_energy.D_alg_cum
                     psi_bulk_n = psi_bulk_np1
+                    f_d_n = f_d_np1.copy()
+                    f_m_n = f_m_np1.copy()
                     K_bulk_n = K_bulk_np1
                     C_n = C_np1
 
