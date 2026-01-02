@@ -731,10 +731,21 @@ def assemble_bulk_secant_K(nodes: np.ndarray, elems: np.ndarray, mat: CDPMateria
 
 
 
-def bulk_internal_force(nodes: np.ndarray, elems: np.ndarray, mat: CDPMaterial, u: np.ndarray, states_committed: List[List[CDPState]], thickness: float, precomp=None):
+def bulk_internal_force(nodes: np.ndarray, elems: np.ndarray, mat: CDPMaterial, u: np.ndarray, states_committed: List[List[CDPState]], thickness: float, precomp=None, compute_psi_bulk: bool = False):
     """
     Compute bulk internal force and trial updated states (not committed).
-    Returns: f_int (ndof_u,), states_trial, gp_stress_eff, gp_stress_nom, gp_rankine
+
+    Args:
+        nodes, elems: mesh geometry
+        mat: material model
+        u: displacement vector
+        states_committed: committed CDP states
+        thickness: element thickness
+        precomp: precomputed B matrices (optional)
+        compute_psi_bulk: if True, also compute bulk recoverable energy
+
+    Returns:
+        f_int (ndof_u,), states_trial, gp_stress_nom, gp_rankine, psi_bulk (if compute_psi_bulk else 0.0)
     """
     nnode = nodes.shape[0]
     ndof = 2 * nnode
@@ -749,6 +760,9 @@ def bulk_internal_force(nodes: np.ndarray, elems: np.ndarray, mat: CDPMaterial, 
 
     gp_sig_nom = np.zeros((len(elems), 4, 3), dtype=float)
     gp_rank = np.zeros((len(elems), 4), dtype=float)
+
+    # Energy accumulator (cheap to compute during same GP loop)
+    psi_bulk = 0.0
 
     for e, conn in enumerate(elems):
         xe = nodes[conn, :]
@@ -768,13 +782,19 @@ def bulk_internal_force(nodes: np.ndarray, elems: np.ndarray, mat: CDPMaterial, 
             gp_sig_nom[e, igp, :] = sig_nom
             gp_rank[e, igp] = rank
 
+            # Accumulate bulk recoverable energy (elastic strain energy proxy)
+            # Ψ_bulk = Σ_gp 0.5 * (ε_el · σ_nom) * w_gp * thickness
+            if compute_psi_bulk:
+                eps_el = eps - st.eps_p
+                psi_bulk += 0.5 * float(np.dot(eps_el, sig_nom)) * detJ * wgt * thickness
+
         edofs = []
         for a in conn:
             edofs.extend([2*a, 2*a+1])
         for i in range(8):
             f[edofs[i]] += fe[i]
 
-    return f, states_trial, gp_sig_nom, gp_rank
+    return f, states_trial, gp_sig_nom, gp_rank, psi_bulk
 
 
 def apply_dirichlet(K: sp.csr_matrix, r: np.ndarray, fixed: Dict[int, float], u: np.ndarray):
@@ -895,7 +915,7 @@ def run_analysis_static(model: Model, nx: int, ny: int, nsteps: int, umax: float
             u_it[dof] = val
         for it in range(model.newton_maxit):
             # internal forces
-            f_bulk, states_trial, gp_sig_nom, gp_rank = bulk_internal_force(
+            f_bulk, states_trial, gp_sig_nom, gp_rank, _ = bulk_internal_force(
                 nodes, elems, model.cdp, u_it, states_comm, thickness=model.b, precomp=precomp
             )
 
@@ -925,7 +945,7 @@ def run_analysis_static(model: Model, nx: int, ny: int, nsteps: int, umax: float
                 for _ls in range(10):
                     u_try = u_base.copy()
                     u_try[free] += alpha * du_f
-                    f_bulk_t, _, _, _ = bulk_internal_force(nodes, elems, model.cdp, u_try, states_comm, thickness=model.b, precomp=precomp)
+                    f_bulk_t, _, _, _, _ = bulk_internal_force(nodes, elems, model.cdp, u_try, states_comm, thickness=model.b, precomp=precomp)
                     f_rb_t, _ = rebar_contrib(nodes, rebar_segs, u_try, model.steel_A_total, model.steel_E, model.steel_fy, model.steel_fu, model.steel_Eh)
                     r_t = f_bulk_t + f_rb_t
                     _, _, r_f_t, _ = apply_dirichlet(Kt, r_t, fixed, u_try)
@@ -944,7 +964,7 @@ def run_analysis_static(model: Model, nx: int, ny: int, nsteps: int, umax: float
 
             norm_du = float(np.linalg.norm(du_f))
             # recompute residual norm quickly for stop
-            f_bulk2, states_trial2, gp_sig_nom2, gp_rank2 = bulk_internal_force(nodes, elems, model.cdp, u_it, states_comm, thickness=model.b)
+            f_bulk2, states_trial2, gp_sig_nom2, gp_rank2, _ = bulk_internal_force(nodes, elems, model.cdp, u_it, states_comm, thickness=model.b)
             f_rb2, _ = rebar_contrib(nodes, rebar_segs, u_it, model.steel_A_total, model.steel_E, model.steel_fy, model.steel_fu, model.steel_Eh)
             r2 = f_bulk2 + f_rb2
             _, _, r_f2, _ = apply_dirichlet(Kt, r2, fixed, u_it)
@@ -967,7 +987,7 @@ def run_analysis_static(model: Model, nx: int, ny: int, nsteps: int, umax: float
 
         # reactions -> load P
         # reaction forces are minus residual at constrained dofs
-        f_bulk, _, _, _ = bulk_internal_force(nodes, elems, model.cdp, u, states_comm, thickness=model.b)
+        f_bulk, _, _, _, _ = bulk_internal_force(nodes, elems, model.cdp, u, states_comm, thickness=model.b)
         f_rb, _ = rebar_contrib(nodes, rebar_segs, u, model.steel_A_total, model.steel_E, model.steel_fy, model.steel_fu, model.steel_Eh)
         r_full = f_bulk + f_rb
         P = -sum(r_full[d] for d in load_dofs)  # N
@@ -1033,10 +1053,19 @@ def _hht_try_step(model: Model,
                   load_dofs: List[int],
                   u_imp_target: float,
                   dt: float,
-                  line_search: bool = True):
+                  line_search: bool = True,
+                  track_energy: bool = False,
+                  K_bulk_n: Optional[sp.csr_matrix] = None):
     """
     Attempt a single implicit HHT-α step from state (u_n,v_n,acc_n,states_comm,f_int_n) to prescribed displacement u_imp_target.
-    Returns: (ok, u_np1, v_np1, acc_np1, f_int_np1, states_comm_np1, gp_sig_nom_last, gp_rank_last, P_internal)
+
+    Args:
+        track_energy: if True, return energy-related quantities
+        K_bulk_n: bulk stiffness at time n (required if track_energy=True)
+
+    Returns:
+        (ok, u_np1, v_np1, acc_np1, f_int_np1, states_comm_np1, gp_sig_nom_last, gp_rank_last, P_internal,
+         psi_bulk_np1, K_bulk_np1, C_np1) where last 3 are only valid if track_energy=True and ok=True
     """
     alpha = float(model.hht_alpha)
     gamma = 0.5 - alpha
@@ -1078,7 +1107,7 @@ def _hht_try_step(model: Model,
         v_it = v_n + dt * ((1.0 - gamma) * acc_n + gamma * acc_it)
 
         # internal forces + trial states (nonlinear)
-        f_bulk, states_trial, gp_sig_nom, gp_rank = bulk_internal_force(
+        f_bulk, states_trial, gp_sig_nom, gp_rank, _ = bulk_internal_force(
             nodes, elems, model.cdp, u_it, states_comm, thickness=model.b, precomp=precomp
         )
         f_rb, K_rb = rebar_contrib(
@@ -1120,7 +1149,16 @@ def _hht_try_step(model: Model,
             v_np1 = v_n + dt * ((1.0 - gamma) * acc_n + gamma * acc_np1)
             f_int_np1 = f_int.copy()
             P_internal = -sum(f_int_np1[d] for d in load_dofs)
-            return True, u_it, v_np1, acc_np1, f_int_np1, states_comm, gp_sig_nom_last, gp_rank_last, float(P_internal)
+
+            # Compute energy quantities if requested
+            psi_bulk_np1 = 0.0
+            if track_energy:
+                _, _, _, _, psi_bulk_np1 = bulk_internal_force(
+                    nodes, elems, model.cdp, u_it, states_comm, thickness=model.b,
+                    precomp=precomp, compute_psi_bulk=True
+                )
+
+            return True, u_it, v_np1, acc_np1, f_int_np1, states_comm, gp_sig_nom_last, gp_rank_last, float(P_internal), psi_bulk_np1, K_bulk, C
 
         du_f = spla.spsolve(K_ff, rhs)
         norm_du = float(np.linalg.norm(du_f))
@@ -1132,7 +1170,16 @@ def _hht_try_step(model: Model,
             v_np1 = v_n + dt * ((1.0 - gamma) * acc_n + gamma * acc_np1)
             f_int_np1 = f_int.copy()
             P_internal = -sum(f_int_np1[d] for d in load_dofs)
-            return True, u_it, v_np1, acc_np1, f_int_np1, states_comm, gp_sig_nom_last, gp_rank_last, float(P_internal)
+
+            # Compute energy quantities if requested
+            psi_bulk_np1 = 0.0
+            if track_energy:
+                _, _, _, _, psi_bulk_np1 = bulk_internal_force(
+                    nodes, elems, model.cdp, u_it, states_comm, thickness=model.b,
+                    precomp=precomp, compute_psi_bulk=True
+                )
+
+            return True, u_it, v_np1, acc_np1, f_int_np1, states_comm, gp_sig_nom_last, gp_rank_last, float(P_internal), psi_bulk_np1, K_bulk, C
 
         # optional line-search
         if line_search:
@@ -1149,7 +1196,7 @@ def _hht_try_step(model: Model,
                 acc_try = a0 * (u_try - u_n) - a2 * v_n - a3 * acc_n
                 v_try = v_n + dt * ((1.0 - gamma) * acc_n + gamma * acc_try)
 
-                f_bulk_t, _, _, _ = bulk_internal_force(
+                f_bulk_t, _, _, _, _ = bulk_internal_force(
                     nodes, elems, model.cdp, u_try, states_comm, thickness=model.b, precomp=precomp
                 )
                 f_rb_t, _ = rebar_contrib(
@@ -1175,11 +1222,12 @@ def _hht_try_step(model: Model,
         for dof, val in fixed.items():
             u_it[dof] = val
 
-    return False, u_n, v_n, acc_n, f_int_n, states_comm, gp_sig_nom_last, gp_rank_last, 0.0
+    # Failure return (energy quantities are undefined)
+    return False, u_n, v_n, acc_n, f_int_n, states_comm, gp_sig_nom_last, gp_rank_last, 0.0, 0.0, None, None
 
 
 def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_search: bool = True,
-                 max_subdiv: int = 10, min_dt: float = 1e-4):
+                 max_subdiv: int = 10, min_dt: float = 1e-4, track_energy: bool = False):
     """
     Quasi-static solver using pseudo-time HHT-α (implicit) **with adaptive substepping**.
 
@@ -1190,8 +1238,11 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
     Args:
       max_subdiv: maximum bisections per nominal step
       min_dt: minimum allowed pseudo-time step
+      track_energy: if True, track energy quantities (adds minimal overhead)
 
-    Returns the same tuple as before, but `results` may contain more than `nsteps` entries.
+    Returns:
+      nodes, elems, u_n, results, states_comm, gp_sig_nom_last, gp_rank_last, rebar_segs
+      If track_energy=True, also returns energy_history as the 9th element.
     """
     nodes, elems = structured_quad_mesh(model.L, model.H, nx, ny)
     nnode = nodes.shape[0]
@@ -1238,6 +1289,15 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
     gp_sig_nom_last = None
     gp_rank_last = None
 
+    # energy tracking state
+    energy_history = []
+    psi_bulk_n = 0.0
+    K_bulk_n = None
+    C_n = None
+    W_dir_cum = 0.0
+    D_damp_cum = 0.0
+    D_alg_cum = 0.0
+
     # current ramp value
     u_imp_n = 0.0
     t_n = 0.0
@@ -1256,17 +1316,72 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
             if dt < min_dt:
                 raise RuntimeError(f"Adaptive HHT: dt fell below min_dt ({min_dt}).")
             u1 = u0 + du
-            ok, u_np1, v_np1, acc_np1, f_int_np1, states_np1, gp_sig_nom, gp_rank, P_int = _hht_try_step(
+            ok, u_np1, v_np1, acc_np1, f_int_np1, states_np1, gp_sig_nom, gp_rank, P_int, psi_bulk_np1, K_bulk_np1, C_np1 = _hht_try_step(
                 model, nodes, elems, precomp, rebar_segs,
                 Mdiag, M,
                 u_n, v_n, acc_n, f_int_n, states_comm,
                 fixed_base, load_dofs,
                 u1, dt,
-                line_search=line_search
+                line_search=line_search,
+                track_energy=track_energy,
+                K_bulk_n=K_bulk_n
             )
 
             if ok:
                 # accept
+                t_prev = t_n
+                t_n = t0 + dt
+                dt_step = t_n - t_prev
+
+                # Compute energy if tracking enabled
+                if track_energy:
+                    from .xfem.energy_hht import compute_step_energy
+
+                    # Get Dirichlet DOFs
+                    fixed_current = dict(fixed_base)
+                    for dof in load_dofs:
+                        fixed_current[dof] = -u1
+                    dir_dofs = sorted(fixed_current.keys())
+
+                    # Compute energy for this step
+                    step_energy = compute_step_energy(
+                        step=accepted_count + 1,
+                        t_n=t_prev,
+                        t_np1=t_n,
+                        alpha=alpha,
+                        aM=float(model.rayleigh_aM),
+                        aK=float(model.rayleigh_aK),
+                        Mdiag=Mdiag,
+                        u_n=u_n,
+                        v_n=v_n,
+                        a_n=acc_n,
+                        f_int_n=f_int_n,
+                        psi_bulk_n=psi_bulk_n,
+                        K_bulk_n=K_bulk_n if K_bulk_n is not None else sp.csr_matrix((ndof, ndof)),
+                        C_n=C_n if C_n is not None else sp.csr_matrix((ndof, ndof)),
+                        u_np1=u_np1,
+                        v_np1=v_np1,
+                        a_np1=acc_np1,
+                        f_int_np1=f_int_np1,
+                        psi_bulk_np1=psi_bulk_np1,
+                        K_bulk_np1=K_bulk_np1,
+                        C_np1=C_np1,
+                        dir_dofs=dir_dofs,
+                        W_dir_cum_prev=W_dir_cum,
+                        D_damp_cum_prev=D_damp_cum,
+                        D_alg_cum_prev=D_alg_cum
+                    )
+                    energy_history.append(step_energy)
+
+                    # Update cumulative quantities
+                    W_dir_cum = step_energy.W_dir_cum
+                    D_damp_cum = step_energy.D_damp_cum
+                    D_alg_cum = step_energy.D_alg_cum
+                    psi_bulk_n = psi_bulk_np1
+                    K_bulk_n = K_bulk_np1
+                    C_n = C_np1
+
+                # Update state
                 u_n = u_np1
                 v_n = v_np1
                 acc_n = acc_np1
@@ -1274,7 +1389,6 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
                 states_comm = states_np1
                 gp_sig_nom_last = gp_sig_nom
                 gp_rank_last = gp_rank
-                t_n = t0 + dt
                 u_imp_n = u1
                 accepted_count += 1
 
@@ -1297,7 +1411,10 @@ def run_analysis(model: Model, nx: int, ny: int, nsteps: int, umax: float, line_
                 stack.append((t0 + dt2, u0 + du2, dt2, du2, level + 1))
                 stack.append((t0, u0, dt2, du2, level + 1))
 
-    return nodes, elems, u_n, results, states_comm, gp_sig_nom_last, gp_rank_last, rebar_segs
+    if track_energy:
+        return nodes, elems, u_n, results, states_comm, gp_sig_nom_last, gp_rank_last, rebar_segs, energy_history
+    else:
+        return nodes, elems, u_n, results, states_comm, gp_sig_nom_last, gp_rank_last, rebar_segs
 
 
 
