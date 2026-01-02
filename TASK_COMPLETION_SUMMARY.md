@@ -84,9 +84,10 @@ Bond shear traction in the Orlando/Gutiérrez thesis includes two reduction fact
 
 ```python
 eps_y = fy / Es
-eps_u = fu / Es
-xi = clamp((|eps_s| - eps_y) / (eps_u - eps_y), 0, 1)
-Ωy = 1 - 0.85 * (1 - exp(-5 * xi))
+eps_u = eps_y + (fu - fy) / H   # if H > 0 and fu > fy (bilinear hardening)
+     OR eps_u = fu / Es          # fallback
+xi = max(0, (|eps_s| - eps_y) / (eps_u - eps_y))  # No upper clamp
+Ωy = 1 - 0.85 * (1 - exp(-5 * xi))  # Naturally bounded to [0.15, 1.0]
 ```
 
 ### Crack Deterioration Factor Ωc(x, r)

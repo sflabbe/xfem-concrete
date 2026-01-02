@@ -1624,8 +1624,33 @@ def _bond_slip_assembly_python(
             s_eff = math.sqrt(s_abs**2 + bond_s_eps**2)
             s_eval = s_sign * s_eff
 
-        # PART B: Pass eps_s and omega_crack to bond law
-        tau, dtau_ds = bond_law.tau_and_tangent(s_eval, s_max, eps_s=eps_s, omega_crack=omega_crack)
+        # NUMBA PARITY: Apply same C1-continuous regularization as Numba kernel
+        # This prevents singular tangent at s=0 and improves conditioning
+        # (matches kernels_bond_slip.py lines 288-304)
+        apply_regularization = True  # Match Numba kernel behavior
+        if apply_regularization and hasattr(bond_law, 's1') and hasattr(bond_law, 'alpha'):
+            s_abs_eval = abs(s_eval)
+            s_sign = 1.0 if s_eval >= 0 else -1.0
+            s_reg = 0.5 * bond_law.s1
+
+            # Check if we're in the regularized region (loading on envelope with small slip)
+            if s_abs_eval < s_reg and s_abs_eval >= s_max - 1e-14:
+                # Loading envelope in regularized region: use linear branch
+                # k0 = tangent at s_reg to ensure C1 continuity
+                k0 = bond_law.tau_max * bond_law.alpha / bond_law.s1 * ((s_reg / bond_law.s1) ** (bond_law.alpha - 1.0))
+                tau = s_sign * k0 * s_abs_eval
+                dtau_ds = k0
+
+                # Apply Part B reduction factors (Ωy * Ωc) to match Numba kernel
+                omega_y = bond_law.compute_yielding_reduction(eps_s) if hasattr(bond_law, 'compute_yielding_reduction') else 1.0
+                tau *= omega_y * omega_crack
+                dtau_ds *= omega_y * omega_crack
+            else:
+                # Use standard bond law evaluation (power law or secant)
+                tau, dtau_ds = bond_law.tau_and_tangent(s_eval, s_max, eps_s=eps_s, omega_crack=omega_crack)
+        else:
+            # Fallback: use standard bond law evaluation
+            tau, dtau_ds = bond_law.tau_and_tangent(s_eval, s_max, eps_s=eps_s, omega_crack=omega_crack)
 
         # BLOQUE C: Optional tangent capping (prevent excessive stiffness)
         if bond_k_cap is not None and dtau_ds > bond_k_cap:

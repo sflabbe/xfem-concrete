@@ -31,15 +31,16 @@ if steel_EA > 0.0 and L0 > 1e-14:
 **Thesis Formula (Eq. 3.57-3.58):**
 ```
 eps_y = f_y / E_s
-eps_u = 10 * eps_y  (typical for steel)
+eps_u = eps_y + (f_u - f_y) / H   # if H > 0 and f_u > f_y (bilinear hardening)
+     OR eps_u = f_u / E_s          # fallback
 
 If eps_s <= eps_y:
     Ωy = 1.0  (elastic, no reduction)
 
-If eps_y < eps_s <= eps_u:
+If eps_s > eps_y:
     xi = (eps_s - eps_y) / (eps_u - eps_y)
     Ωy = 1 - 0.85 * (1 - exp(-5 * xi))
-    Ωy ∈ [0.15, 1.0]
+    Ωy ∈ [0.15, 1.0]  (naturally bounded by exponential)
 ```
 
 **Implementation:**
@@ -47,13 +48,16 @@ If eps_y < eps_s <= eps_u:
 omega_y = 1.0  # Default: no reduction
 if enable_omega_y > 0.5 and E_s > 1e-9:
     eps_y = f_y / E_s
-    eps_u = 10.0 * eps_y
+
+    # THESIS PARITY: Compute eps_u from fu and H
+    if H > 0.0 and f_u > f_y:
+        eps_u = eps_y + (f_u - f_y) / H  # Bilinear hardening
+    else:
+        eps_u = f_u / E_s  # Fallback
 
     if abs(eps_s) > eps_y:
-        xi = (abs(eps_s) - eps_y) / max(1e-30, (eps_u - eps_y))
-        xi = min(max(xi, 0.0), 1.0)  # Clamp to [0, 1]
+        xi = max(0.0, (abs(eps_s) - eps_y) / max(1e-30, (eps_u - eps_y)))
         omega_y = 1.0 - 0.85 * (1.0 - np.exp(-5.0 * xi))
-        omega_y = max(0.15, min(1.0, omega_y))
 ```
 
 #### 3. Application to Bond Stress
