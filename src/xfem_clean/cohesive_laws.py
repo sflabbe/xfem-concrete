@@ -35,6 +35,11 @@ class CohesiveLaw:
     # Mode II fracture energy
     Gf_II: float = 0.0  # If 0, defaults to Gf (Mode I)
 
+    # PART C: Wells-type shear stiffness degradation (exponential with opening)
+    shear_model: str = "constant"  # "constant" (default) or "wells"
+    k_s0: float = 0.0  # Initial shear stiffness [Pa/m] (wells model)
+    k_s1: float = 0.0  # Final shear stiffness [Pa/m] (wells model, degraded)
+
     def __post_init__(self) -> None:
         if self.law.lower().startswith("rein") and self.wcrit <= 0.0:
             # Choose w_c such that:  ∫_0^{w_c} t(w) dw = Gf, with t(w)=ft*f(w/w_c)
@@ -50,6 +55,13 @@ class CohesiveLaw:
                 self.Kt = self.Kn  # Default: shear stiffness = normal stiffness
             if self.Gf_II <= 0.0:
                 self.Gf_II = self.Gf  # Default: Mode II fracture energy = Mode I
+
+            # PART C: Set defaults for Wells-type shear model
+            if self.shear_model.lower() == "wells":
+                if self.k_s0 <= 0.0:
+                    self.k_s0 = self.Kt  # Default: initial shear stiffness = Kt
+                if self.k_s1 <= 0.0:
+                    self.k_s1 = 0.01 * self.k_s0  # Default: degraded to 1% of initial
 
     @staticmethod
     def _reinhardt_I(c1: float, c2: float, n: int = 4096) -> float:
@@ -339,58 +351,129 @@ def cohesive_update_mixed(
 
     # Apply residual stiffness floor
     k_alg_n = max(k_sec_n, k_res)
-    k_alg_t = max(k_sec_t, k_res * Kt / max(1e-30, Kn))  # Scale residual by stiffness ratio
+    k_alg_t_base = max(k_sec_t, k_res * Kt / max(1e-30, Kn))  # Base secant stiffness
 
-    # Tractions using secant stiffness (matches Mode I formulation)
-    t_n = k_alg_n * delta_n_pos
-    t_t = k_alg_t * delta_t_val
+    # =========================================================================
+    # PART C: Wells-type shear stiffness degradation (exponential with opening)
+    # =========================================================================
+    if law.shear_model.lower() == "wells":
+        # Wells model: k_s(w) = k_s0 * exp(h_s * w)
+        # where h_s = ln(k_s1 / k_s0) is the decay parameter
+        k_s0 = float(law.k_s0) if law.k_s0 > 0 else Kt
+        k_s1 = float(law.k_s1) if law.k_s1 > 0 else 0.01 * k_s0
+
+        # Decay parameter (negative for degradation)
+        h_s = math.log(k_s1 / max(1e-30, k_s0))
+
+        # Shear stiffness as function of opening
+        # Use delta_n_pos (positive opening only) for degradation
+        k_s_w = k_s0 * math.exp(h_s * delta_n_pos)
+
+        # Shear traction (linear in slip, modulated by opening-dependent stiffness)
+        k_alg_t = max(k_s_w, k_res)  # Apply residual floor
+        t_n = k_alg_n * delta_n_pos
+        t_t = k_alg_t * delta_t_val
+
+        # Store h_s for tangent calculation
+        h_s_stored = h_s
+    else:
+        # Standard constant shear stiffness
+        k_alg_t = k_alg_t_base
+        t_n = k_alg_n * delta_n_pos
+        t_t = k_alg_t * delta_t_val
+        h_s_stored = 0.0  # No opening-dependent degradation
 
     # --- Tangent matrix (consistent with secant stiffness formulation) ---
-    # Tangent for t_n = k_alg_n(g) * delta_n_pos, t_t = k_alg_t(g) * delta_t_val
-    # Need derivatives of (k_alg * delta) w.r.t. delta_n and delta_t
+    # PART C: Enhanced for Wells-type shear model
+    # For Wells: t_t = k_s(w) * s where k_s(w) = k_s0 * exp(h_s * w)
+    # => dt_t/dw = (dk_s/dw) * s = h_s * k_s(w) * s  (cross-coupling!)
+    # => dt_t/ds = k_s(w)
 
-    # dd/dg = 1 / (deltaf - delta0) for delta0 < g < deltaf
-    if delta0_eff < g_max < deltaf_eff:
-        dd_dg = 1.0 / max(1e-30, (deltaf_eff - delta0_eff))
-    else:
-        dd_dg = 0.0
+    if law.shear_model.lower() == "wells":
+        # Wells model: direct derivatives
+        # Normal traction: t_n = k_alg_n * delta_n_pos (unchanged from standard)
+        # Shear traction: t_t = k_s(w) * delta_t where k_s(w) = k_s0 * exp(h_s * w)
 
-    # ∂g/∂δ_n and ∂g/∂δ_t
-    if delta_eff > 1e-18:
         if delta_n > 0:
-            dg_ddn = delta_n_pos / delta_eff
+            # dt_n/dw: same as standard (damage-based)
+            # dd/dg = 1 / (deltaf - delta0) for delta0 < g < deltaf
+            if delta0_eff < g_max < deltaf_eff:
+                dd_dg = 1.0 / max(1e-30, (deltaf_eff - delta0_eff))
+            else:
+                dd_dg = 0.0
+
+            # ∂g/∂δ_n
+            if delta_eff > 1e-18:
+                dg_ddn = delta_n_pos / delta_eff
+            else:
+                dg_ddn = 0.0
+
+            # ∂k_alg_n/∂g
+            if g_max > 1e-18:
+                dk_alg_n_dg = -ft / g_max * dd_dg - k_alg_n / g_max
+            else:
+                dk_alg_n_dg = 0.0
+
+            dtn_ddn = dk_alg_n_dg * dg_ddn * delta_n_pos + k_alg_n
+            dtn_ddt = 0.0  # No coupling from slip to normal (wells model)
         else:
-            dg_ddn = 0.0  # Compression: g doesn't increase with negative δ_n
-        dg_ddt = beta * delta_t_val / delta_eff
-    else:
-        dg_ddn = 0.0
-        dg_ddt = 0.0
+            # Compression: no normal traction or tangent
+            dtn_ddn = 0.0
+            dtn_ddt = 0.0
 
-    # ∂k_alg_n/∂g and ∂k_alg_t/∂g
-    # k_alg_n = ft * (1-d) / g => dk_alg_n/dg = -ft/g * dd/dg - k_alg_n/g
-    # k_alg_t = tau_max * (1-d) / g => dk_alg_t/dg = -tau_max/g * dd/dg - k_alg_t/g
-    if g_max > 1e-18:
-        dk_alg_n_dg = -ft / g_max * dd_dg - k_alg_n / g_max
-        dk_alg_t_dg = -tau_max / g_max * dd_dg - k_alg_t / g_max
-    else:
-        dk_alg_n_dg = 0.0
-        dk_alg_t_dg = 0.0
+        # dt_t/dw = h_s * k_s(w) * delta_t  (Wells cross-coupling)
+        # dt_t/ds = k_s(w)
+        if delta_n > 0:
+            dtt_ddn = h_s_stored * k_alg_t * delta_t_val  # Cross-coupling term (PART C key feature!)
+        else:
+            dtt_ddn = 0.0  # No cross-coupling in compression
 
-    # Tangent components (with unilateral)
-    if delta_n > 0:
-        # dtn/ddn = dk_alg_n/dg * dg/ddn * delta_n_pos + k_alg_n
-        dtn_ddn = dk_alg_n_dg * dg_ddn * delta_n_pos + k_alg_n
-        # dtn/ddt = dk_alg_n/dg * dg/ddt * delta_n_pos
-        dtn_ddt = dk_alg_n_dg * dg_ddt * delta_n_pos
-    else:
-        # Compression: no normal traction or tangent
-        dtn_ddn = 0.0
-        dtn_ddt = 0.0
+        dtt_ddt = k_alg_t  # Linear in slip
 
-    # dtt/ddn = dk_alg_t/dg * dg/ddn * delta_t
-    dtt_ddn = dk_alg_t_dg * dg_ddn * delta_t_val
-    # dtt/ddt = dk_alg_t/dg * dg/ddt * delta_t + k_alg_t
-    dtt_ddt = dk_alg_t_dg * dg_ddt * delta_t_val + k_alg_t
+    else:
+        # Standard formulation (damage-based coupling through effective separation)
+        # dd/dg = 1 / (deltaf - delta0) for delta0 < g < deltaf
+        if delta0_eff < g_max < deltaf_eff:
+            dd_dg = 1.0 / max(1e-30, (deltaf_eff - delta0_eff))
+        else:
+            dd_dg = 0.0
+
+        # ∂g/∂δ_n and ∂g/∂δ_t
+        if delta_eff > 1e-18:
+            if delta_n > 0:
+                dg_ddn = delta_n_pos / delta_eff
+            else:
+                dg_ddn = 0.0  # Compression: g doesn't increase with negative δ_n
+            dg_ddt = beta * delta_t_val / delta_eff
+        else:
+            dg_ddn = 0.0
+            dg_ddt = 0.0
+
+        # ∂k_alg_n/∂g and ∂k_alg_t/∂g
+        # k_alg_n = ft * (1-d) / g => dk_alg_n/dg = -ft/g * dd/dg - k_alg_n/g
+        # k_alg_t = tau_max * (1-d) / g => dk_alg_t/dg = -tau_max/g * dd/dg - k_alg_t/g
+        if g_max > 1e-18:
+            dk_alg_n_dg = -ft / g_max * dd_dg - k_alg_n / g_max
+            dk_alg_t_dg = -tau_max / g_max * dd_dg - k_alg_t / g_max
+        else:
+            dk_alg_n_dg = 0.0
+            dk_alg_t_dg = 0.0
+
+        # Tangent components (with unilateral)
+        if delta_n > 0:
+            # dtn/ddn = dk_alg_n/dg * dg/ddn * delta_n_pos + k_alg_n
+            dtn_ddn = dk_alg_n_dg * dg_ddn * delta_n_pos + k_alg_n
+            # dtn/ddt = dk_alg_n/dg * dg/ddt * delta_n_pos
+            dtn_ddt = dk_alg_n_dg * dg_ddt * delta_n_pos
+        else:
+            # Compression: no normal traction or tangent
+            dtn_ddn = 0.0
+            dtn_ddt = 0.0
+
+        # dtt/ddn = dk_alg_t/dg * dg/ddn * delta_t
+        dtt_ddn = dk_alg_t_dg * dg_ddn * delta_t_val
+        # dtt/ddt = dk_alg_t/dg * dg/ddt * delta_t + k_alg_t
+        dtt_ddt = dk_alg_t_dg * dg_ddt * delta_t_val + k_alg_t
 
     t = np.array([t_n, t_t], dtype=float)
     K_mat = np.array([[dtn_ddn, dtn_ddt], [dtt_ddn, dtt_ddt]], dtype=float)
