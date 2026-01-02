@@ -77,47 +77,45 @@ def kinetic_energy(Mdiag: np.ndarray, v: np.ndarray) -> float:
     return 0.5 * float(np.dot(Mdiag, v * v))
 
 
-def constraint_work_hht(
-    alpha: float,
-    dt: float,
+def constraint_work_trapezoidal(
     f_int_n: np.ndarray,
     f_int_np1: np.ndarray,
-    C_n: sp.csr_matrix,
-    C_np1: sp.csr_matrix,
-    v_n: np.ndarray,
-    v_np1: np.ndarray,
-    a_n: np.ndarray,
-    a_np1: np.ndarray,
-    Mdiag: np.ndarray,
+    f_d_n: np.ndarray,
+    f_d_np1: np.ndarray,
+    f_m_n: np.ndarray,
+    f_m_np1: np.ndarray,
+    u_n: np.ndarray,
+    u_np1: np.ndarray,
     dir_dofs: List[int]
 ) -> float:
     """
-    Compute constraint work increment using α-weighted power.
+    Compute constraint work increment using trapezoidal rule.
 
-    The constraint forces (reactions) are computed from the equilibrium
-    at the α-evaluation point:
-      g_alpha = (1+alpha)*g_{n+1} + (-alpha)*g_n
-    where
-      g_n = f_int_n + C_n v_n + M a_n
-      g_{n+1} = f_int_{n+1} + C_{n+1} v_{n+1} + M a_{n+1}
+    This is the energy-consistent formula for α=0 (Newmark average acceleration).
+    For α<0, the algorithmic dissipation will be captured as a remainder.
 
-    The constraint work is:
-      ΔW_dir = dt * (lambda_alpha · v_dir_alpha)
-    where
-      lambda_alpha = g_alpha[dir_dofs]
-      v_dir_alpha = (1+alpha)*v_{n+1}[dir_dofs] + (-alpha)*v_n[dir_dofs]
+    Dynamic nodal force vectors:
+      g_n = f_int_n + f_d_n + f_m_n
+      g_np1 = f_int_np1 + f_d_np1 + f_m_np1
+
+    Constraint forces (reactions):
+      λ_n = g_n[dir_dofs]
+      λ_np1 = g_np1[dir_dofs]
+
+    Displacement increment:
+      Δu_dir = u_np1[dir_dofs] - u_n[dir_dofs]
+
+    Work increment (trapezoidal):
+      ΔW_dir = 0.5 * (λ_n + λ_np1) · Δu_dir
 
     Sign convention: positive when energy flows into the system
     (i.e., for monotone imposed displacement in same direction as reaction).
 
     Args:
-        alpha: HHT-α parameter
-        dt: time step size
         f_int_n, f_int_np1: internal force vectors at n and n+1
-        C_n, C_np1: damping matrices at n and n+1
-        v_n, v_np1: velocity vectors at n and n+1
-        a_n, a_np1: acceleration vectors at n and n+1
-        Mdiag: diagonal mass vector
+        f_d_n, f_d_np1: damping force vectors (C@v) at n and n+1
+        f_m_n, f_m_np1: inertia force vectors (M@a) at n and n+1
+        u_n, u_np1: displacement vectors at n and n+1
         dir_dofs: list of Dirichlet-constrained DOFs
 
     Returns:
@@ -126,95 +124,54 @@ def constraint_work_hht(
     if len(dir_dofs) == 0:
         return 0.0
 
-    # Weights for α-evaluation
-    w1 = 1.0 + alpha
-    w0 = -alpha
-
-    # Equilibrium vectors
-    g_n = f_int_n + (C_n @ v_n) + (Mdiag * a_n)
-    g_np1 = f_int_np1 + (C_np1 @ v_np1) + (Mdiag * a_np1)
-
-    # α-weighted equilibrium (reaction-like forces at constrained DOFs)
-    g_alpha = w1 * g_np1 + w0 * g_n
-
-    # α-weighted velocity at constrained DOFs
-    v_alpha = w1 * v_np1 + w0 * v_n
+    # Dynamic nodal force vectors (equilibrium)
+    g_n = f_int_n + f_d_n + f_m_n
+    g_np1 = f_int_np1 + f_d_np1 + f_m_np1
 
     # Extract constrained DOFs
     dir_dofs_arr = np.array(dir_dofs, dtype=int)
-    lambda_alpha = g_alpha[dir_dofs_arr]
-    v_dir_alpha = v_alpha[dir_dofs_arr]
+    lambda_n = g_n[dir_dofs_arr]
+    lambda_np1 = g_np1[dir_dofs_arr]
 
-    # Power = force · velocity (integrated over time step)
-    # Sign: for monotone imposed displacement, this should be positive
-    ΔW_dir = dt * float(np.dot(lambda_alpha, v_dir_alpha))
+    # Displacement increment at constrained DOFs
+    du_dir = u_np1[dir_dofs_arr] - u_n[dir_dofs_arr]
+
+    # Trapezoidal integration: work = average force · displacement increment
+    ΔW_dir = 0.5 * float(np.dot(lambda_n + lambda_np1, du_dir))
 
     return ΔW_dir
 
 
-def damping_dissipation_hht(
-    alpha: float,
+def damping_dissipation_trapezoidal(
     dt: float,
-    aM: float,
-    aK: float,
-    Mdiag: np.ndarray,
-    K_bulk_n: sp.csr_matrix,
-    K_bulk_np1: sp.csr_matrix,
     v_n: np.ndarray,
-    v_np1: np.ndarray
+    v_np1: np.ndarray,
+    f_d_n: np.ndarray,
+    f_d_np1: np.ndarray
 ) -> float:
     """
-    Compute damping dissipation increment efficiently.
+    Compute damping dissipation increment using trapezoidal rule.
 
-    Rayleigh damping: C = aM*M + aK*K
+    NO EXTRA MATVECS: reuses f_d = C@v already computed in Newton iterations.
 
-    Damping dissipation for α-weighted scheme:
-      ΔD_damp = dt * (v_alpha^T C_alpha v_alpha)
-    where
-      v_alpha = (1+alpha)*v_{n+1} + (-alpha)*v_n
-      C_alpha = (1+alpha)*C_{n+1} + (-alpha)*C_n  (approximately)
+    Damping power: P_damp = v^T f_d
+    Trapezoidal integration:
+      ΔD_damp = 0.5 * dt * (v_n · f_d_n + v_np1 · f_d_np1)
 
-    For efficiency, we compute this in two parts:
-    - Mass-proportional: aM * dt * sum(Mdiag * v_alpha^2)
-    - Stiffness-proportional: aK * dt * (v_alpha^T K_alpha v_alpha)
-      where K_alpha ≈ (1+alpha)*K_{n+1} + (-alpha)*K_n
+    This is always >= 0 for positive semi-definite C.
 
     Args:
-        alpha: HHT-α parameter
         dt: time step size
-        aM: mass-proportional damping coefficient
-        aK: stiffness-proportional damping coefficient
-        Mdiag: diagonal mass vector
-        K_bulk_n, K_bulk_np1: bulk stiffness matrices at n and n+1
         v_n, v_np1: velocity vectors at n and n+1
+        f_d_n, f_d_np1: damping force vectors (C@v) at n and n+1
 
     Returns:
         Damping dissipation increment (scalar, should be >= 0)
     """
-    if aM == 0.0 and aK == 0.0:
-        return 0.0
-
-    # Weights for α-evaluation
-    w1 = 1.0 + alpha
-    w0 = -alpha
-
-    # α-weighted velocity
-    v_alpha = w1 * v_np1 + w0 * v_n
-
-    ΔD_damp = 0.0
-
-    # Mass-proportional damping (cheap: diagonal)
-    if aM != 0.0:
-        ΔD_damp_mass = aM * dt * float(np.dot(Mdiag, v_alpha * v_alpha))
-        ΔD_damp += ΔD_damp_mass
-
-    # Stiffness-proportional damping (one sparse matvec + dot)
-    if aK != 0.0:
-        # Use α-weighted stiffness for accuracy
-        K_alpha = w1 * K_bulk_np1 + w0 * K_bulk_n
-        Kv = K_alpha @ v_alpha
-        ΔD_damp_stiff = aK * dt * float(np.dot(v_alpha, Kv))
-        ΔD_damp += ΔD_damp_stiff
+    # Trapezoidal integration of damping power
+    power_n = float(np.dot(v_n, f_d_n))
+    power_np1 = float(np.dot(v_np1, f_d_np1))
+    ΔD_damp = 0.5 * dt * (power_n + power_np1)
 
     return ΔD_damp
 
@@ -223,51 +180,45 @@ def compute_step_energy(
     step: int,
     t_n: float,
     t_np1: float,
-    alpha: float,
-    aM: float,
-    aK: float,
     Mdiag: np.ndarray,
     u_n: np.ndarray,
     v_n: np.ndarray,
-    a_n: np.ndarray,
     f_int_n: np.ndarray,
+    f_d_n: np.ndarray,
+    f_m_n: np.ndarray,
     psi_bulk_n: float,
-    K_bulk_n: sp.csr_matrix,
-    C_n: sp.csr_matrix,
     u_np1: np.ndarray,
     v_np1: np.ndarray,
-    a_np1: np.ndarray,
     f_int_np1: np.ndarray,
+    f_d_np1: np.ndarray,
+    f_m_np1: np.ndarray,
     psi_bulk_np1: float,
-    K_bulk_np1: sp.csr_matrix,
-    C_np1: sp.csr_matrix,
     dir_dofs: List[int],
     W_dir_cum_prev: float,
     D_damp_cum_prev: float,
     D_alg_cum_prev: float
 ) -> StepEnergy:
     """
-    Compute complete energy ledger for step n→n+1.
+    Compute complete energy ledger for step n→n+1 using trapezoidal formulas.
 
-    This is the main interface for energy tracking. It computes all energy
-    quantities consistently with the HHT-α scheme.
+    This is the main interface for energy tracking. It uses trapezoidal integration
+    which is energy-consistent for α=0 (Newmark average acceleration) and captures
+    algorithmic dissipation for α<0 as a remainder.
 
     Args:
         step: step number
         t_n, t_np1: times at n and n+1
-        alpha: HHT-α parameter
-        aM, aK: Rayleigh damping coefficients
         Mdiag: diagonal mass vector
-        u_n, v_n, a_n: displacement, velocity, acceleration at n
+        u_n, v_n: displacement, velocity at n
         f_int_n: internal force at n
+        f_d_n: damping force (C@v) at n
+        f_m_n: inertia force (M@a) at n
         psi_bulk_n: bulk recoverable energy at n
-        K_bulk_n: bulk stiffness at n
-        C_n: damping matrix at n
-        u_np1, v_np1, a_np1: displacement, velocity, acceleration at n+1
+        u_np1, v_np1: displacement, velocity at n+1
         f_int_np1: internal force at n+1
+        f_d_np1: damping force (C@v) at n+1
+        f_m_np1: inertia force (M@a) at n+1
         psi_bulk_np1: bulk recoverable energy at n+1
-        K_bulk_np1: bulk stiffness at n+1
-        C_np1: damping matrix at n+1
         dir_dofs: Dirichlet-constrained DOFs
         W_dir_cum_prev: cumulative constraint work from previous steps
         D_damp_cum_prev: cumulative damping dissipation from previous steps
@@ -287,23 +238,20 @@ def compute_step_energy(
     E_mech_np1 = T_np1 + psi_bulk_np1
     ΔE_mech = E_mech_np1 - E_mech_n
 
-    # Constraint work
-    ΔW_dir = constraint_work_hht(
-        alpha, dt,
+    # Constraint work (trapezoidal)
+    ΔW_dir = constraint_work_trapezoidal(
         f_int_n, f_int_np1,
-        C_n, C_np1,
-        v_n, v_np1,
-        a_n, a_np1,
-        Mdiag, dir_dofs
+        f_d_n, f_d_np1,
+        f_m_n, f_m_np1,
+        u_n, u_np1,
+        dir_dofs
     )
 
-    # Damping dissipation
-    ΔD_damp = damping_dissipation_hht(
-        alpha, dt,
-        aM, aK,
-        Mdiag,
-        K_bulk_n, K_bulk_np1,
-        v_n, v_np1
+    # Damping dissipation (trapezoidal, no extra matvecs)
+    ΔD_damp = damping_dissipation_trapezoidal(
+        dt,
+        v_n, v_np1,
+        f_d_n, f_d_np1
     )
 
     # Algorithmic dissipation (remainder)
