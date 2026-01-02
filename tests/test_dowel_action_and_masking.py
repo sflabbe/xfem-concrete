@@ -235,6 +235,109 @@ class TestSegmentMasking:
             "Unmasked segment should produce non-zero force"
         )
 
+    def test_masked_segment_retains_steel_axial_behavior(self):
+        """Test Part A fix: Masked segments (bond disabled) STILL have steel axial behavior.
+
+        This is the critical regression test for the segment_mask bug fix.
+        Previously, masked segments would skip ALL contributions including steel axial.
+        After fix, masked segments skip bond shear/dowel but RETAIN steel axial stiffness/force.
+        """
+        n_seg = 2
+        steel_segments = np.array(
+            [
+                [0, 1, 1.0, 1.0, 0.0],  # Segment 0: horizontal, 1m
+                [1, 2, 1.0, 1.0, 0.0],  # Segment 1: horizontal, 1m
+            ],
+            dtype=float,
+        )
+
+        steel_dof_map = np.array([[4, 5], [6, 7], [8, 9]], dtype=np.int64)
+        ndof_total = 10
+
+        # Impose axial displacement on steel (tensile)
+        u_total = np.zeros(ndof_total, dtype=float)
+        u_total[6] = 0.002  # Steel node 1, x-displacement (axial for horizontal bar)
+
+        bond_law = BondSlipModelCode2010(f_cm=30e6, d_bar=0.016, condition="good")
+        bond_states = BondSlipStateArrays.zeros(n_seg)
+
+        # Steel properties
+        E_steel = 200e9  # Pa
+        A_steel = np.pi * (0.016 / 2) ** 2  # m^2
+        steel_EA = E_steel * A_steel  # N
+
+        # Mask segment 0 (bond disabled)
+        segment_mask = np.array([True, False], dtype=bool)
+
+        # Test both Numba and Python
+        for use_numba in [True, False]:
+            label = "Numba" if use_numba else "Python"
+
+            try:
+                f, K, _ = assemble_bond_slip(
+                    u_total=u_total,
+                    steel_segments=steel_segments,
+                    steel_dof_offset=4,
+                    bond_law=bond_law,
+                    bond_states=bond_states,
+                    steel_dof_map=steel_dof_map,
+                    steel_EA=steel_EA,
+                    use_numba=use_numba,
+                    segment_mask=segment_mask,
+                )
+            except Exception as e:
+                if use_numba:
+                    pytest.skip(f"Numba not available: {e}")
+                else:
+                    raise
+
+            # CRITICAL CHECK: Masked segment 0 should have NON-ZERO steel axial force
+            # Steel force should appear at nodes 0 and 1 (segment 0 endpoints)
+            # Expected: N = (EA/L) * (u[6] - u[4]) = (EA/1.0) * 0.002
+            N_expected = steel_EA * 0.002
+
+            # Check node 0 steel DOFs (should have reaction force in -x direction)
+            fx_node0 = f[4]
+            assert abs(fx_node0 + N_expected) < 1e-6, (
+                f"{label}: Masked segment 0 should have steel axial force at node 0: "
+                f"expected {-N_expected:.4e}, got {fx_node0:.4e}"
+            )
+
+            # Check node 1 steel DOFs (should have force in +x direction)
+            fx_node1 = f[6]
+            assert abs(fx_node1 - N_expected) < 1e-6, (
+                f"{label}: Masked segment 0 should have steel axial force at node 1: "
+                f"expected {N_expected:.4e}, got {fx_node1:.4e}"
+            )
+
+            # CRITICAL CHECK: Masked segment 0 should have NON-ZERO steel axial stiffness
+            K_dense = K.toarray()
+            K_steel_expected = steel_EA / 1.0  # EA/L
+
+            # Check diagonal stiffness at steel node 0, x-direction
+            assert abs(K_dense[4, 4] - K_steel_expected) < 1e-6, (
+                f"{label}: Masked segment 0 should have steel axial stiffness at node 0: "
+                f"expected {K_steel_expected:.4e}, got {K_dense[4, 4]:.4e}"
+            )
+
+            # Check off-diagonal coupling (node 0 <-> node 1)
+            assert abs(K_dense[4, 6] + K_steel_expected) < 1e-6, (
+                f"{label}: Masked segment 0 should have steel axial coupling K[4,6]: "
+                f"expected {-K_steel_expected:.4e}, got {K_dense[4, 6]:.4e}"
+            )
+
+            # VERIFY: Bond shear force should be ZERO for masked segment
+            # Bond shear couples concrete-steel in tangential direction
+            # For horizontal bar, bond couples concrete x-DOFs to steel x-DOFs
+            # Concrete node 0 x-DOF is 0, concrete node 1 x-DOF is 2
+            # Bond should be zero, so concrete should have no force from bond
+            assert abs(f[0]) < 1e-10, (
+                f"{label}: Masked segment should have zero bond force on concrete node 0"
+            )
+            assert abs(f[2]) < 1e-10, (
+                f"{label}: Masked segment should have zero bond force on concrete node 1"
+            )
+
 
 class TestDowelActionAssembly:
     """Test dowel action assembly integration."""

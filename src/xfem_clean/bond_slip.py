@@ -1369,13 +1369,10 @@ def _bond_slip_assembly_python(
         perimeter = math.pi * bond_law.d_bar
 
     for i in range(n_seg):
-        # Skip disabled segments (segment_mask[i] == True means disabled)
-        if segment_mask is not None and segment_mask[i]:
-            # Set slip to zero for disabled segments (no forces, no stiffness)
-            s_current[i] = 0.0
-            continue
-
-        # Extract segment data
+        # =================================================================
+        # PART A FIX: Extract geometry and DOFs BEFORE mask check
+        # =================================================================
+        # Extract segment data (needed for both bond and steel axial)
         n1 = int(steel_segments[i, 0])
         n2 = int(steel_segments[i, 1])
         L0 = steel_segments[i, 2]
@@ -1419,6 +1416,64 @@ def _bond_slip_assembly_python(
         u_s1y = u_total[dof_s1y]
         u_s2x = u_total[dof_s2x]
         u_s2y = u_total[dof_s2y]
+
+        # =================================================================
+        # PART A FIX: Steel axial contribution ALWAYS assembled (before mask check)
+        # =================================================================
+        # This is the bar element behavior independent of bond interface.
+        # Even if bond is disabled (masked), the steel bar must carry axial loads.
+        if steel_EA > 0.0:
+            K_steel = steel_EA / L0
+            Kxx_s = K_steel * cx * cx
+            Kxy_s = K_steel * cx * cy
+            Kyy_s = K_steel * cy * cy
+
+            # Compute steel axial displacement (du = u2 - u1)
+            du_steel_x = u_s2x - u_s1x
+            du_steel_y = u_s2y - u_s1y
+
+            # Axial elongation in bar direction: axial = du · c
+            axial = du_steel_x * cx + du_steel_y * cy
+
+            # Axial force: N = (EA/L) * axial
+            N_steel = K_steel * axial
+
+            # Internal force contribution: f = N * c at each node
+            # Node 1: f1 = -N * c (compression if pulled)
+            # Node 2: f2 = +N * c (tension if pulled)
+            f_bond[dof_s1x] += -N_steel * cx
+            f_bond[dof_s1y] += -N_steel * cy
+            f_bond[dof_s2x] += +N_steel * cx
+            f_bond[dof_s2y] += +N_steel * cy
+
+            # Add 16 entries for full 4x4 block
+            for ri, ci, val in [
+                (dof_s1x, dof_s1x, Kxx_s), (dof_s1x, dof_s1y, Kxy_s),
+                (dof_s1y, dof_s1x, Kxy_s), (dof_s1y, dof_s1y, Kyy_s),
+                (dof_s2x, dof_s2x, Kxx_s), (dof_s2x, dof_s2y, Kxy_s),
+                (dof_s2y, dof_s2x, Kxy_s), (dof_s2y, dof_s2y, Kyy_s),
+                (dof_s1x, dof_s2x, -Kxx_s), (dof_s1x, dof_s2y, -Kxy_s),
+                (dof_s1y, dof_s2x, -Kxy_s), (dof_s1y, dof_s2y, -Kyy_s),
+                (dof_s2x, dof_s1x, -Kxx_s), (dof_s2x, dof_s1y, -Kxy_s),
+                (dof_s2y, dof_s1x, -Kxy_s), (dof_s2y, dof_s1y, -Kyy_s),
+            ]:
+                rows.append(ri)
+                cols.append(ci)
+                data.append(val)
+
+        # =================================================================
+        # PART A FIX: Mask check - Skip ONLY bond shear (and dowel)
+        # =================================================================
+        # CRITICAL FIX: Masked segments (bond disabled) skip bond/dowel contributions
+        # but STILL include steel axial element (already assembled above).
+        if segment_mask is not None and segment_mask[i]:
+            # Set slip to zero for disabled segments (no bond forces/stiffness)
+            s_current[i] = 0.0
+            continue
+
+        # =================================================================
+        # Bond shear interface (only if NOT masked)
+        # =================================================================
 
         # Average slip
         u_c_mid_x = 0.5 * (u_c1x + u_c2x)
@@ -1574,46 +1629,8 @@ def _bond_slip_assembly_python(
                     cols.append(dofs[b])
                     data.append(K_dowel * g_w[a] * g_w[b])
 
-        # Add steel axial stiffness and internal force if requested
-        # CRITICAL FIX (Task A): Add missing steel axial internal force
-        if steel_EA > 0.0:
-            K_steel = steel_EA / L0
-            Kxx_s = K_steel * cx * cx
-            Kxy_s = K_steel * cx * cy
-            Kyy_s = K_steel * cy * cy
-
-            # Compute steel axial displacement (du = u2 - u1)
-            du_steel_x = u_s2x - u_s1x
-            du_steel_y = u_s2y - u_s1y
-
-            # Axial elongation in bar direction: axial = du · c
-            axial = du_steel_x * cx + du_steel_y * cy
-
-            # Axial force: N = (EA/L) * axial
-            N_steel = K_steel * axial
-
-            # Internal force contribution: f = N * c at each node
-            # Node 1: f1 = -N * c (compression if pulled)
-            # Node 2: f2 = +N * c (tension if pulled)
-            f_bond[dof_s1x] += -N_steel * cx
-            f_bond[dof_s1y] += -N_steel * cy
-            f_bond[dof_s2x] += +N_steel * cx
-            f_bond[dof_s2y] += +N_steel * cy
-
-            # Add 16 entries for full 4x4 block
-            for ri, ci, val in [
-                (dof_s1x, dof_s1x, Kxx_s), (dof_s1x, dof_s1y, Kxy_s),
-                (dof_s1y, dof_s1x, Kxy_s), (dof_s1y, dof_s1y, Kyy_s),
-                (dof_s2x, dof_s2x, Kxx_s), (dof_s2x, dof_s2y, Kxy_s),
-                (dof_s2y, dof_s2x, Kxy_s), (dof_s2y, dof_s2y, Kyy_s),
-                (dof_s1x, dof_s2x, -Kxx_s), (dof_s1x, dof_s2y, -Kxy_s),
-                (dof_s1y, dof_s2x, -Kxy_s), (dof_s1y, dof_s2y, -Kyy_s),
-                (dof_s2x, dof_s1x, -Kxx_s), (dof_s2x, dof_s1y, -Kxy_s),
-                (dof_s2y, dof_s1x, -Kxy_s), (dof_s2y, dof_s1y, -Kyy_s),
-            ]:
-                rows.append(ri)
-                cols.append(ci)
-                data.append(val)
+        # NOTE: Steel axial stiffness and internal force now assembled BEFORE mask check (lines 1420-1462)
+        # This ensures masked segments (bond disabled) still include steel bar behavior.
 
     K_bond_sp = sp.csr_matrix((data, (rows, cols)), shape=(ndof, ndof))
 
