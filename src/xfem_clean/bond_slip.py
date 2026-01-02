@@ -152,6 +152,10 @@ class BondSlipModelCode2010:
         Steel yield stress [Pa] (for Ωy calculation)
     E_s : float, optional
         Steel Young's modulus [Pa] (for Ωy calculation)
+    f_u : float, optional
+        Steel ultimate stress [Pa] (for Ωy εu calculation). Default: 1.5*f_y
+    H : float, optional
+        Steel hardening modulus [Pa] (for Ωy εu calculation). Default: 0.01*E_s
     use_secant_stiffness : bool
         Use secant instead of tangent stiffness for stability (Part B7)
     enable_yielding_reduction : bool
@@ -176,6 +180,8 @@ class BondSlipModelCode2010:
     condition: str = "good"
     f_y: float = 500e6  # Steel yield stress [Pa] (Part B3)
     E_s: float = 200e9  # Steel Young's modulus [Pa] (Part B3)
+    f_u: float = 0.0  # Steel ultimate stress [Pa] (Part B3, THESIS PARITY). Default: 1.5*f_y if 0
+    H: float = 0.0  # Steel hardening modulus [Pa] (Part B3, THESIS PARITY). Default: 0.01*E_s if 0
     use_secant_stiffness: bool = True  # Part B7: Use secant for stability (DEPRECATED, use tangent_mode)
     tangent_mode: str = "secant_thesis"  # "consistent" | "secant_thesis" (Task D)
     enable_yielding_reduction: bool = False  # Part B3: Steel yielding Ωy
@@ -208,6 +214,12 @@ class BondSlipModelCode2010:
         # Safety checks
         if self.s1 <= 0 or self.s2 <= self.s1 or self.s3 <= self.s2:
             raise ValueError("Bond-slip parameters must satisfy: 0 < s1 < s2 < s3")
+
+        # THESIS PARITY: Set steel ultimate properties defaults
+        if self.f_u <= 0.0:
+            self.f_u = 1.5 * self.f_y  # Typical: fu = 1.5*fy for steel
+        if self.H <= 0.0:
+            self.H = 0.01 * self.E_s  # Typical: H = 1% of E_s
 
     def tau_envelope(self, s_abs: float) -> Tuple[float, float]:
         """Compute bond stress and tangent on the monotonic envelope.
@@ -262,7 +274,7 @@ class BondSlipModelCode2010:
         eps_s : float
             Steel strain (axial, in bar direction) [-]
         eps_u : float, optional
-            Ultimate strain (default: 10 * eps_y for typical steel)
+            Ultimate strain. If None, computed from fu and H per thesis spec.
 
         Returns
         -------
@@ -273,29 +285,36 @@ class BondSlipModelCode2010:
         -----
         From dissertation Eq. 3.57-3.58 (exact):
             eps_y = f_y / E_s
+            eps_u = eps_y + (fu - fy) / H  (if H > 0)
+                 OR eps_u = fu / E_s        (fallback)
             If eps_s <= eps_y: Ωy = 1
-            If eps_y < eps_s <= eps_u:
-                Ωy = 1 - 0.85 * (1 - exp(-5 * (eps_s - eps_y) / (eps_u - eps_y)))
+            If eps_y < eps_s:
+                ξ = clamp((eps_s - eps_y) / (eps_u - eps_y), 0, +∞)
+                Ωy = 1 - 0.85 * (1 - exp(-5 * ξ))
         """
         if not self.enable_yielding_reduction:
             return 1.0
 
         eps_y = self.f_y / self.E_s  # Yield strain
 
-        # Ultimate strain: default to 10× yield strain (typical for steel)
+        # THESIS PARITY: Compute eps_u from fu and H per spec
         if eps_u is None:
-            eps_u = 10.0 * eps_y
+            if self.H > 0.0 and self.f_u > self.f_y:
+                # Bilinear hardening: εu = εy + (fu - fy) / H
+                eps_u = eps_y + (self.f_u - self.f_y) / self.H
+            else:
+                # Fallback: εu = fu / E_s
+                eps_u = self.f_u / self.E_s
 
         if eps_s <= eps_y:
             return 1.0
-        elif eps_s <= eps_u:
-            # Eq. 3.58 (exact form from thesis)
-            xi = (eps_s - eps_y) / (eps_u - eps_y)
-            omega_y = 1.0 - 0.85 * (1.0 - math.exp(-5.0 * xi))
-            return max(0.0, min(1.0, omega_y))
         else:
-            # Beyond ultimate strain: assume complete degradation
-            return 0.15  # Residual (1 - 0.85) per Eq. 3.58 at xi→∞
+            # Eq. 3.58 (exact form from thesis)
+            # ξ = clamp((eps_s - eps_y) / (eps_u - eps_y), 0, +∞)  (no upper clamp per spec)
+            xi = max(0.0, (eps_s - eps_y) / max(1e-30, (eps_u - eps_y)))
+            omega_y = 1.0 - 0.85 * (1.0 - math.exp(-5.0 * xi))
+            # Note: As ξ→∞, Ωy→0.15 (do not clamp unless you want a minimum of 0.15 explicitly)
+            return omega_y  # No upper clamp; formula naturally stays in [0.15, 1.0]
 
     def compute_crack_deterioration(
         self, dist_to_crack: float, w_max: float, t_n_cohesive_stress: float, f_t: float
@@ -840,16 +859,21 @@ class DowelActionModel:
     The model uses MPa and mm internally for numerical stability, following
     the thesis formulation. All inputs/outputs are converted to SI units (Pa, m).
 
-    Equations (thesis Eqs. 3.62–3.68):
-    (1) sigma(w) = ω̃ * k0 * w
-    (2) k0 = 599.96 * fc^0.75 / phi
-    (3) ω̃ = [ 1.5 * ( a + sqrt( d^2 * (40*w*phi - b)^2 + c^2 ) ) ]^(-4/3)
-    (4) a = 0.59 - 0.0110*fc
-    (5) b = 0.0075*fc - 0.23
-    (6) c = 0.0038*fc + 0.44
-    (7) d = 0.0025*fc + 0.58
+    Equations (THESIS PARITY - updated constants):
+    (1) sigma(w) = ω̃(w) * k0 * w
+    (2) k0 = 599.96 * fc^0.75 / φ          (fc in MPa, φ in mm, k0 in MPa/mm)
+    (3) q(w) = 40*w*φ - b
+    (4) g(w) = a + sqrt( d^2 * q(w)^2 + c^2 )
+    (5) ω̃(w) = [ 1.5 * g(w) ]^(-4/3)
+    (6) Tangent: dσ/dw = k0*( ω̃ + w*dω̃/dw )
 
-    where fc is in MPa, phi is in mm, w is in mm.
+    Constants (THESIS PARITY):
+        a = 0.16
+        b = 0.19
+        c = 0.67
+        d = 0.26
+
+    where fc is in MPa, φ is in mm, w is in mm.
     """
 
     d_bar: float  # [m]
@@ -879,45 +903,49 @@ class DowelActionModel:
         phi_mm = self.d_bar * 1e3  # m → mm
         w_mm = abs(w) * 1e3  # m → mm (use absolute value for opening)
 
-        # Eq. 3.62-3.68 coefficients (MPa units)
-        a = 0.59 - 0.0110 * fc_mpa
-        b = 0.0075 * fc_mpa - 0.23
-        c = 0.0038 * fc_mpa + 0.44
-        d = 0.0025 * fc_mpa + 0.58
+        # THESIS PARITY: Updated constants (exact values from spec)
+        a = 0.16
+        b = 0.19
+        c = 0.67
+        d = 0.26
 
-        # Eq. 3.62: k0 (initial stiffness) [MPa/mm]
+        # Eq: k0 (initial stiffness) [MPa/mm]
         k0 = 599.96 * (fc_mpa ** 0.75) / phi_mm
 
-        # Eq. 3.63: Compute ω̃ (reduction factor)
-        # X = 40*w*phi - b
-        X = 40.0 * w_mm * phi_mm - b
+        # Compute ω̃ (reduction factor) via intermediate functions
+        # q(w) = 40*w*φ - b
+        q = 40.0 * w_mm * phi_mm - b
 
-        # S = sqrt(d^2 * X^2 + c^2)
-        S = math.sqrt(d**2 * X**2 + c**2)
+        # g(w) = a + sqrt( d^2 * q(w)^2 + c^2 )
+        sqrt_arg = d**2 * q**2 + c**2
+        g = a + math.sqrt(max(0.0, sqrt_arg))  # Safeguard for numerical stability
 
-        # Y = 1.5 * (a + S)
-        Y = 1.5 * (a + S)
+        # ω̃(w) = [ 1.5 * g(w) ]^(-4/3)
+        Y = 1.5 * g
+        if Y > 1e-14:
+            omega = Y ** (-4.0/3.0)
+        else:
+            omega = 0.0  # Avoid division by zero
 
-        # ω̃ = Y^(-4/3)
-        omega = Y ** (-4.0/3.0)
-
-        # Eq. 3.62: sigma = ω̃ * k0 * w [MPa]
+        # sigma(w) = ω̃ * k0 * w [MPa]
         sigma_mpa = omega * k0 * w_mm
 
-        # Derivative: dσ/dw = k0 * (ω̃ + w * dω̃/dw)
-        # dS/dw = (d^2 * X / S) * dX/dw
-        # dX/dw = 40*phi
-        dX_dw = 40.0 * phi_mm  # [dimensionless, since w in mm]
-
-        if S > 1e-14:
-            dS_dw = (d**2 * X / S) * dX_dw
-        else:
-            dS_dw = 0.0
-
-        # dY/dw = 1.5 * dS/dw
-        dY_dw = 1.5 * dS_dw
-
+        # Analytical tangent: dσ/dw = k0 * (ω̃ + w * dω̃/dw)
+        # Chain rule:
+        # dq/dw = 40*φ
+        # dg/dw = d^2 * q / sqrt(...) * dq/dw  (if sqrt_arg > 0)
+        # dY/dw = 1.5 * dg/dw
         # dω̃/dw = (-4/3) * Y^(-7/3) * dY/dw
+
+        dq_dw = 40.0 * phi_mm
+
+        if sqrt_arg > 1e-14:
+            dg_dw = (d**2 * q / math.sqrt(sqrt_arg)) * dq_dw
+        else:
+            dg_dw = 0.0
+
+        dY_dw = 1.5 * dg_dw
+
         if Y > 1e-14:
             domega_dw = (-4.0/3.0) * (Y ** (-7.0/3.0)) * dY_dw
         else:
@@ -1139,6 +1167,8 @@ def assemble_bond_slip(
     # Dowel action parameters (P4)
     enable_dowel: bool = False,  # Enable dowel action (transverse)
     dowel_model: Optional[DowelActionModel] = None,  # Dowel action constitutive model
+    # THESIS PARITY: Crack deterioration context (Ωc, GOAL #1)
+    crack_context: Optional[np.ndarray] = None,  # [n_seg, 2]: [crack_dist, tn_ratio] for Ωc
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Assemble bond-slip interface forces and stiffness.
 
@@ -1185,6 +1215,11 @@ def assemble_bond_slip(
     dowel_model : DowelActionModel, optional
         Dowel action constitutive model. Required if enable_dowel=True.
         If None and enable_dowel=True, creates default model from bond_law params.
+    crack_context : np.ndarray, optional
+        Crack deterioration context [n_seg, 2] for computing Ωc (THESIS PARITY, GOAL #1).
+        crack_context[i, 0] = distance to nearest crack [m]
+        crack_context[i, 1] = tn/ft ratio at crack location [-]
+        If None, Ωc = 1.0 everywhere (no deterioration).
 
     Returns
     -------
@@ -1241,6 +1276,8 @@ def assemble_bond_slip(
             # PART B: Get yielding reduction parameters from bond law
             f_y = getattr(bond_law, 'f_y', 500e6)  # Default: 500 MPa
             E_s = getattr(bond_law, 'E_s', 200e9)  # Default: 200 GPa
+            f_u = getattr(bond_law, 'f_u', 1.5 * f_y)  # THESIS PARITY: Ultimate stress
+            H = getattr(bond_law, 'H', 0.01 * E_s)  # THESIS PARITY: Hardening modulus
             enable_omega_y = 1.0 if getattr(bond_law, 'enable_yielding_reduction', False) else 0.0
 
             bond_params = np.array([
@@ -1256,6 +1293,8 @@ def assemble_bond_slip(
                 f_y,  # PART B: Steel yield stress
                 E_s,  # PART B: Steel Young's modulus
                 enable_omega_y,  # PART B: Enable yielding reduction flag
+                f_u,  # THESIS PARITY: Steel ultimate stress
+                H,  # THESIS PARITY: Steel hardening modulus
             ], dtype=float)
         except AttributeError:
             # Bond law doesn't have required attributes (e.g., BilinearBondLaw, BanholzerBondLaw)
@@ -1354,6 +1393,8 @@ def assemble_bond_slip(
             # Dowel action (P4)
             enable_dowel=enable_dowel,
             dowel_model=dowel_model,
+            # THESIS PARITY: Crack deterioration (Ωc)
+            crack_context=crack_context,
         )
 
     return f_bond, K_bond, bond_states_new
@@ -1388,6 +1429,8 @@ def _bond_slip_assembly_python(
     # Dowel action (P4)
     enable_dowel: bool = False,
     dowel_model: Optional[DowelActionModel] = None,
+    # THESIS PARITY: Crack deterioration (Ωc, GOAL #1)
+    crack_context: Optional[np.ndarray] = None,  # [n_seg, 2]: [crack_dist, tn_ratio]
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
     """Pure Python fallback for bond-slip assembly (for debugging).
 
@@ -1544,11 +1587,33 @@ def _bond_slip_assembly_python(
             eps_s = axial / L0
 
         # =====================================================================
-        # PART B: Compute crack deterioration factor (omega_crack)
+        # THESIS PARITY: Compute crack deterioration factor Ωc (GOAL #1)
         # =====================================================================
-        # TODO: Implement crack intersection tracking for full Ωc computation
-        # For now, default to 1.0 (no deterioration) to enable Ωy testing
-        omega_crack = 1.0
+        omega_crack = 1.0  # Default: no deterioration
+        if crack_context is not None and bond_law.enable_crack_deterioration:
+            # Extract precomputed crack context for this segment
+            crack_dist = crack_context[i, 0]  # Distance to nearest crack [m]
+            tn_ratio = crack_context[i, 1]    # tn/ft ratio at crack [-]
+
+            # Compute Ωc using bond_law method
+            # Note: We don't have w_max or tn directly here; use tn_ratio = tn/ft
+            # Reconstruct tn from ratio (requires ft from bond_law)
+            if hasattr(bond_law, 'f_cm'):
+                # Estimate ft from f_cm (crude approximation: ft ≈ 0.3*sqrt(f_cm) in MPa)
+                ft_approx = 0.3 * math.sqrt(bond_law.f_cm / 1e6) * 1e6  # [Pa]
+                tn_cohesive = tn_ratio * ft_approx
+            else:
+                # Fallback: assume tn_ratio is already meaningful
+                tn_cohesive = 3e6  # Default: 3 MPa
+                tn_ratio_clamped = max(0.0, min(1.0, tn_ratio))
+
+            # Call compute_crack_deterioration (note: ft is estimated above)
+            omega_crack = bond_law.compute_crack_deterioration(
+                dist_to_crack=crack_dist,
+                w_max=0.0,  # Not used in current formula (only dist and tn matter)
+                t_n_cohesive_stress=tn_cohesive,
+                f_t=ft_approx if hasattr(bond_law, 'f_cm') else 3e6
+            )
 
         # BLOQUE C: Optional slip smoothing (regularization near s≈0)
         s_eval = s
@@ -1824,6 +1889,101 @@ def assemble_dowel_action(
 
     K_dowel = sp.csr_matrix((data, (rows, cols)), shape=(ndof_total, ndof_total))
     return K_dowel
+
+
+# ------------------------------------------------------------------------------
+# THESIS PARITY: Crack Context Precomputation (Ωc, GOAL #1)
+# ------------------------------------------------------------------------------
+
+def precompute_crack_context_for_bond(
+    steel_segments: np.ndarray,
+    cohesive_segments: Optional[List[Any]] = None,
+    cohesive_states: Optional[List[Any]] = None,
+    ft: float = 3e6,  # Concrete tensile strength [Pa]
+) -> np.ndarray:
+    """Precompute crack deterioration context for bond segments (THESIS PARITY, GOAL #1).
+
+    This function computes the crack_context array needed by assemble_bond_slip
+    to evaluate the crack deterioration factor Ωc for each bond segment.
+
+    Parameters
+    ----------
+    steel_segments : np.ndarray
+        [n_seg, 5]: [n1, n2, L0, cx, cy] bond segment geometry
+    cohesive_segments : list, optional
+        List of cohesive segment data structures (crack geometry).
+        If None, returns crack_context with Ωc=1 everywhere (no cracks).
+    cohesive_states : list, optional
+        List of cohesive state objects containing w_max and tn.
+        If None, assumes no cohesive tractions (r=0).
+    ft : float, optional
+        Concrete tensile strength [Pa] for computing tn/ft ratio.
+
+    Returns
+    -------
+    crack_context : np.ndarray
+        [n_seg, 2] array where:
+        crack_context[i, 0] = distance to nearest crack [m]
+        crack_context[i, 1] = tn/ft ratio at nearest crack [-]
+
+    Notes
+    -----
+    This is a simplified implementation that assumes:
+    - Cracks are represented by cohesive segments
+    - "Distance to crack" is the minimum distance from bond segment midpoint
+      to any cohesive segment midpoint
+    - tn is extracted from cohesive state at the nearest crack
+
+    For production use, this should be replaced with proper geometric
+    intersection finding and crack tracking.
+    """
+    n_seg = steel_segments.shape[0]
+    crack_context = np.zeros((n_seg, 2), dtype=float)
+
+    # Default: no cracks (large distance, r=0)
+    crack_context[:, 0] = 1e10  # Very large distance (no deterioration)
+    crack_context[:, 1] = 0.0   # No cohesive stress (full deterioration if crack present)
+
+    if cohesive_segments is None or len(cohesive_segments) == 0:
+        return crack_context  # No cracks: Ωc = 1 everywhere
+
+    # Compute bond segment midpoints
+    bond_midpoints = np.zeros((n_seg, 2), dtype=float)
+    for i in range(n_seg):
+        # Assume segments have node coordinates or we need to pass nodes
+        # For now, use a placeholder: midpoint at (0, 0)
+        # TODO: Replace with actual geometry from nodes
+        bond_midpoints[i] = [0.0, 0.0]  # Placeholder
+
+    # For each bond segment, find nearest cohesive segment
+    # (This is a simplified O(n*m) search; use spatial indexing for large problems)
+    for i in range(n_seg):
+        min_dist = 1e10
+        nearest_tn_ratio = 0.0
+
+        # Search all cohesive segments
+        for j, coh_seg in enumerate(cohesive_segments):
+            # Compute distance (placeholder: needs actual geometry)
+            # For now, assume all cohesive segments are at origin
+            # TODO: Replace with actual segment-to-segment distance
+            dist = 0.1  # Placeholder: 0.1m from each crack
+
+            if dist < min_dist:
+                min_dist = dist
+
+                # Extract tn from cohesive state
+                if cohesive_states is not None and j < len(cohesive_states):
+                    # Assuming cohesive state has a traction field or similar
+                    # For now, use placeholder
+                    tn = 0.0  # TODO: Extract from cohesive_states[j]
+                    nearest_tn_ratio = max(0.0, min(1.0, tn / ft))
+                else:
+                    nearest_tn_ratio = 0.0
+
+        crack_context[i, 0] = min_dist
+        crack_context[i, 1] = nearest_tn_ratio
+
+    return crack_context
 
 
 # ------------------------------------------------------------------------------

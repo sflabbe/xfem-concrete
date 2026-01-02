@@ -53,7 +53,7 @@ def bond_slip_assembly_kernel(
         Mapping [nnode, 2]: node → (dof_x, dof_y) for steel
         Use -1 for nodes without steel DOFs
     bond_params : np.ndarray
-        Bond law parameters [12] (PART B: extended for yielding reduction):
+        Bond law parameters [14] (THESIS PARITY: extended for proper εu):
         [0] tau_max: peak bond stress [Pa]
         [1] s1: slip at peak stress [m]
         [2] s2: slip at start of plateau end [m]
@@ -66,6 +66,8 @@ def bond_slip_assembly_kernel(
         [9] f_y: steel yield stress [Pa] (for Ωy, Part B)
         [10] E_s: steel Young's modulus [Pa] (for Ωy, Part B)
         [11] enable_omega_y: 1.0 to enable yielding reduction, 0.0 to disable
+        [12] f_u: steel ultimate stress [Pa] (THESIS PARITY)
+        [13] H: steel hardening modulus [Pa] (THESIS PARITY)
     s_max_hist : np.ndarray
         Maximum historical slip [n_seg]
     steel_EA : float, optional
@@ -105,7 +107,7 @@ def bond_slip_assembly_kernel(
     data = np.empty(max_entries, dtype=np.float64)
     s_current = np.zeros(n_seg, dtype=np.float64)
 
-    # Unpack bond parameters (PART B: extended for yielding reduction)
+    # Unpack bond parameters (THESIS PARITY: extended for proper εu)
     tau_max = bond_params[0]
     s1 = bond_params[1]
     s2 = bond_params[2]
@@ -115,10 +117,12 @@ def bond_slip_assembly_kernel(
     perimeter = bond_params[6]  # π * d_bar
     dtau_max = bond_params[7] if bond_params.shape[0] > 7 else 1e20  # Tangent cap
     gamma = bond_params[8] if bond_params.shape[0] > 8 else 1.0  # Continuation parameter
-    # PART B: Yielding reduction parameters
+    # PART B / THESIS PARITY: Yielding reduction parameters
     f_y = bond_params[9] if bond_params.shape[0] > 9 else 500e6  # Default: 500 MPa
     E_s = bond_params[10] if bond_params.shape[0] > 10 else 200e9  # Default: 200 GPa
     enable_omega_y = bond_params[11] if bond_params.shape[0] > 11 else 0.0  # Default: disabled
+    f_u = bond_params[12] if bond_params.shape[0] > 12 else 1.5 * f_y  # THESIS PARITY: Ultimate stress
+    H = bond_params[13] if bond_params.shape[0] > 13 else 0.01 * E_s  # THESIS PARITY: Hardening modulus
 
     entry_idx = 0
 
@@ -251,20 +255,26 @@ def bond_slip_assembly_kernel(
             eps_s = axial_displ / L0
 
         # =====================================================================
-        # PART B: Compute yielding reduction factor Ωy(eps_s)
+        # PART B / THESIS PARITY: Compute yielding reduction factor Ωy(eps_s)
         # =====================================================================
         omega_y = 1.0  # Default: no reduction
         if enable_omega_y > 0.5 and E_s > 1e-9:  # Check if enabled
             eps_y = f_y / E_s  # Yield strain
-            eps_u = 10.0 * eps_y  # Ultimate strain (typical for steel)
+
+            # THESIS PARITY: Compute eps_u from fu and H per spec
+            if H > 0.0 and f_u > f_y:
+                # Bilinear hardening: εu = εy + (fu - fy) / H
+                eps_u = eps_y + (f_u - f_y) / H
+            else:
+                # Fallback: εu = fu / E_s
+                eps_u = f_u / E_s
 
             if abs(eps_s) > eps_y:
                 # Steel has yielded: apply reduction per Eq. 3.57-3.58
-                xi = (abs(eps_s) - eps_y) / max(1e-30, (eps_u - eps_y))
-                xi = min(max(xi, 0.0), 1.0)  # Clamp to [0, 1]
-                # Eq. 3.58: Ωy = 1 - 0.85*(1 - exp(-5*xi))
+                xi = max(0.0, (abs(eps_s) - eps_y) / max(1e-30, (eps_u - eps_y)))
+                # Eq. 3.58: Ωy = 1 - 0.85*(1 - exp(-5*ξ))
+                # Note: As ξ→∞, Ωy→0.15 (formula naturally bounds to [0.15, 1.0])
                 omega_y = 1.0 - 0.85 * (1.0 - np.exp(-5.0 * xi))
-                omega_y = max(0.15, min(1.0, omega_y))  # Clamp to [0.15, 1.0]
 
         # TODO PART B: Crack deterioration factor Ωc (requires crack intersection tracking)
         omega_crack = 1.0  # Placeholder: no deterioration

@@ -39,6 +39,11 @@ class CohesiveLaw:
     shear_model: str = "constant"  # "constant" (default) or "wells"
     k_s0: float = 0.0  # Initial shear stiffness [Pa/m] (wells model)
     k_s1: float = 0.0  # Final shear stiffness [Pa/m] (wells model, degraded)
+    w1: float = 1.0e-3  # Characteristic opening for shear degradation [m] (default: 1mm, THESIS PARITY)
+
+    # THESIS PARITY: Compression penalty for cyclic closure
+    kp: float = 0.0  # Compression penalty stiffness [Pa/m]. If 0, defaults to Kn
+    use_cyclic_closure: bool = False  # Enable cyclic closure (compression penalty + w_max for shear)
 
     def __post_init__(self) -> None:
         if self.law.lower().startswith("rein") and self.wcrit <= 0.0:
@@ -62,6 +67,10 @@ class CohesiveLaw:
                     self.k_s0 = self.Kt  # Default: initial shear stiffness = Kt
                 if self.k_s1 <= 0.0:
                     self.k_s1 = 0.01 * self.k_s0  # Default: degraded to 1% of initial
+
+            # THESIS PARITY: Set default for compression penalty
+            if self.kp <= 0.0:
+                self.kp = self.Kn  # Default: compression stiffness = normal stiffness
 
     @staticmethod
     def _reinhardt_I(c1: float, c2: float, n: int = 4096) -> float:
@@ -283,10 +292,31 @@ def cohesive_update_mixed(
     Gf_I = float(law.Gf)
     Gf_II = float(law.Gf_II) if law.Gf_II > 0 else Gf_I
     k_res = float(law.kres_factor) * Kn
+    kp = float(law.kp) if law.kp > 0 else Kn  # THESIS PARITY: Compression penalty
 
     # Unilateral opening
     delta_n_pos = max(0.0, float(delta_n))
     delta_t_val = float(delta_t)
+
+    # =========================================================================
+    # THESIS PARITY: Compression penalty (cyclic closure)
+    # =========================================================================
+    if delta_n < 0.0 and law.use_cyclic_closure:
+        # Compression: tn = kp * δn (negative traction for closure)
+        t_n = kp * delta_n
+        dtn_ddn = kp
+
+        # Shear remains active even in compression (friction-like behavior)
+        # Use existing shear logic but with delta_n = 0 for damage calculation
+        # (compression doesn't increase damage, only opening does)
+        t_t = 0.0
+        dtt_ddn = 0.0
+        dtt_ddt = Kt  # Elastic shear stiffness
+
+        t = np.array([t_n, t_t], dtype=float)
+        K_mat = np.array([[dtn_ddn, 0.0], [dtt_ddn, dtt_ddt]], dtype=float)
+        st2 = CohesiveState(delta_max=float(st.delta_max), damage=float(st.damage))
+        return t, K_mat, st2
 
     # Effective separation parameter beta (ratio of stiffnesses)
     beta = Kt / max(1e-30, Kn)
@@ -354,34 +384,46 @@ def cohesive_update_mixed(
     k_alg_t_base = max(k_sec_t, k_res * Kt / max(1e-30, Kn))  # Base secant stiffness
 
     # =========================================================================
-    # PART C: Wells-type shear stiffness degradation (exponential with opening)
+    # PART C / THESIS PARITY: Wells-type shear stiffness degradation (exponential with opening)
     # =========================================================================
     if law.shear_model.lower() == "wells":
-        # Wells model: k_s(w) = k_s0 * exp(h_s * w)
-        # where h_s = ln(k_s1 / k_s0) is the decay parameter
+        # Wells model: k_s(W) = k_s0 * exp(h_s * W)
+        # where h_s = ln(k_s1 / k_s0) / w1 (THESIS PARITY: normalized by w1)
+        # W = current opening (monotonic) OR W = w_max (cyclic, THESIS PARITY)
         k_s0 = float(law.k_s0) if law.k_s0 > 0 else Kt
         k_s1 = float(law.k_s1) if law.k_s1 > 0 else 0.01 * k_s0
+        w1 = float(law.w1) if law.w1 > 0 else 1.0e-3  # THESIS PARITY: default 1mm
 
-        # Decay parameter (negative for degradation)
-        h_s = math.log(k_s1 / max(1e-30, k_s0))
+        # Decay parameter (negative for degradation, normalized by w1)
+        h_s = math.log(k_s1 / max(1e-30, k_s0)) / max(1e-30, w1)
+
+        # THESIS PARITY: For cyclic loading, use w_max (history) instead of current opening
+        if law.use_cyclic_closure:
+            # Cyclic mode: shear degradation depends on maximum opening reached
+            # W = w_max = st.delta_max (stored in delta_max field)
+            W = float(st.delta_max)
+        else:
+            # Monotonic mode: shear degradation depends on current opening
+            W = delta_n_pos
 
         # Shear stiffness as function of opening
-        # Use delta_n_pos (positive opening only) for degradation
-        k_s_w = k_s0 * math.exp(h_s * delta_n_pos)
+        k_s_w = k_s0 * math.exp(h_s * W)
 
         # Shear traction (linear in slip, modulated by opening-dependent stiffness)
         k_alg_t = max(k_s_w, k_res)  # Apply residual floor
         t_n = k_alg_n * delta_n_pos
         t_t = k_alg_t * delta_t_val
 
-        # Store h_s for tangent calculation
+        # Store h_s and W for tangent calculation
         h_s_stored = h_s
+        W_stored = W
     else:
         # Standard constant shear stiffness
         k_alg_t = k_alg_t_base
         t_n = k_alg_n * delta_n_pos
         t_t = k_alg_t * delta_t_val
         h_s_stored = 0.0  # No opening-dependent degradation
+        W_stored = 0.0
 
     # --- Tangent matrix (consistent with secant stiffness formulation) ---
     # PART C: Enhanced for Wells-type shear model
@@ -421,10 +463,17 @@ def cohesive_update_mixed(
             dtn_ddn = 0.0
             dtn_ddt = 0.0
 
-        # dt_t/dw = h_s * k_s(w) * delta_t  (Wells cross-coupling)
-        # dt_t/ds = k_s(w)
+        # dt_t/dw = h_s * k_s(W) * delta_t  (Wells cross-coupling)
+        # dt_t/ds = k_s(W)
+        # THESIS PARITY: In cyclic mode, W = w_max (history), so derivative wrt current w is 0
+        # unless we're actively loading (current w = w_max)
         if delta_n > 0:
-            dtt_ddn = h_s_stored * k_alg_t * delta_t_val  # Cross-coupling term (PART C key feature!)
+            if law.use_cyclic_closure and delta_n_pos < float(st.delta_max) - 1e-14:
+                # Cyclic unloading/reloading: W = w_max is constant, no cross-coupling
+                dtt_ddn = 0.0
+            else:
+                # Monotonic OR loading at envelope: W = current w, normal cross-coupling
+                dtt_ddn = h_s_stored * k_alg_t * delta_t_val  # Cross-coupling term (PART C key feature!)
         else:
             dtt_ddn = 0.0  # No cross-coupling in compression
 
