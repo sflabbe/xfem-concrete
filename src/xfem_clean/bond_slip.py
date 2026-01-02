@@ -351,8 +351,8 @@ class BondSlipModelCode2010:
         if not self.enable_crack_deterioration:
             return 1.0
 
-        # Characteristic length for bond deterioration
-        l = 2.0 * self.d_bar  # Thesis uses 2*d_bar as characteristic length
+        # Characteristic length for bond deterioration (bar diameter φ)
+        phi = self.d_bar  # Bar diameter [m]
 
         # FPZ state indicator: ratio = t_n(w_max) / f_t
         if f_t > 1e-9:
@@ -360,16 +360,16 @@ class BondSlipModelCode2010:
         else:
             ratio_tn_ft = 0.0  # Assume fully cracked if no tensile strength
 
-        # Distance normalized by characteristic length
-        x_norm = dist_to_crack / l
-
-        # Eq. 3.60 (exact form from thesis)
-        if x_norm <= 2.0:
-            # Within deterioration zone (x ≤ 2*l)
-            omega_crack = 0.5 * x_norm + ratio_tn_ft * (1.0 - 0.5 * x_norm)
+        # Thesis Eq. 3.60 (exact):
+        # For x <= 2φ: Ωλ = 0.5 * x / φ,  Ωc = Ωλ + r*(1 - Ωλ)
+        # For x > 2φ:  Ωc = 1.0
+        if abs(dist_to_crack) <= 2.0 * phi:
+            # Within deterioration zone (x ≤ 2φ)
+            omega_lambda = 0.5 * abs(dist_to_crack) / phi
+            omega_crack = omega_lambda + ratio_tn_ft * (1.0 - omega_lambda)
             return max(0.0, min(1.0, omega_crack))
         else:
-            # Beyond deterioration zone (x > 2*l): no deterioration
+            # Beyond deterioration zone (x > 2φ): no deterioration
             return 1.0
 
     def tau_and_tangent(
@@ -1922,91 +1922,208 @@ def assemble_dowel_action(
 
 def precompute_crack_context_for_bond(
     steel_segments: np.ndarray,
-    cohesive_segments: Optional[List[Any]] = None,
-    cohesive_states: Optional[List[Any]] = None,
+    nodes: np.ndarray,
+    cracks: Optional[List[Any]] = None,  # List of XFEMCrack objects
+    cohesive_states: Optional[Any] = None,  # CohesiveStateArrays or None
+    cohesive_law: Optional[Any] = None,  # CohesiveLaw for tn(wmax) evaluation
     ft: float = 3e6,  # Concrete tensile strength [Pa]
+    phi_tolerance: float = None,  # Tolerance for "transverse crack" detection (defaults to 0.5*d_bar)
 ) -> np.ndarray:
     """Precompute crack deterioration context for bond segments (THESIS PARITY, GOAL #1).
 
     This function computes the crack_context array needed by assemble_bond_slip
     to evaluate the crack deterioration factor Ωc for each bond segment.
 
+    Algorithm (per thesis Eq. 3.60-3.61):
+    -------
+    1. For each bond segment i:
+       - Compute midpoint p_i and bar axis direction c_i
+       - Project p_i onto bar axis line
+
+    2. Find nearest "transverse crack":
+       - Check each crack for intersection with bar
+       - Crack is "transverse" if:
+         (a) Intersects bar line within tolerance (φ/2)
+         (b) Crack tangent not parallel to bar axis (angle > 30°)
+       - Compute signed distance x_i along bar axis
+
+    3. Extract cohesive state at crack:
+       - Get wmax from cohesive history at crack location
+       - Compute tn = cohesive_law(wmax, ...)
+       - Compute r_i = clamp(tn / ft, 0, 1)
+
+    4. Return [x_i, r_i] for each segment
+
     Parameters
     ----------
     steel_segments : np.ndarray
         [n_seg, 5]: [n1, n2, L0, cx, cy] bond segment geometry
-    cohesive_segments : list, optional
-        List of cohesive segment data structures (crack geometry).
+    nodes : np.ndarray
+        [n_nodes, 2]: node coordinates [m]
+    cracks : list of XFEMCrack, optional
+        Active crack objects with geometry (p0, pt, tvec, nvec methods).
         If None, returns crack_context with Ωc=1 everywhere (no cracks).
-    cohesive_states : list, optional
-        List of cohesive state objects containing w_max and tn.
-        If None, assumes no cohesive tractions (r=0).
+    cohesive_states : CohesiveStateArrays, optional
+        Cohesive state arrays with delta_max[k, e, gp] for each crack/element/GP.
+        If None, assumes r=0 (no cohesive traction).
+    cohesive_law : CohesiveLaw, optional
+        Cohesive law for evaluating tn(wmax). Required if cohesive_states provided.
     ft : float, optional
-        Concrete tensile strength [Pa] for computing tn/ft ratio.
+        Concrete tensile strength [Pa] for computing r = tn/ft ratio.
+    phi_tolerance : float, optional
+        Tolerance for detecting crack intersection with bar [m].
+        Defaults to 0.5 * estimated_bar_diameter if None.
 
     Returns
     -------
     crack_context : np.ndarray
         [n_seg, 2] array where:
-        crack_context[i, 0] = distance to nearest crack [m]
-        crack_context[i, 1] = tn/ft ratio at nearest crack [-]
+        crack_context[i, 0] = signed distance to nearest crack along bar axis [m]
+                              (positive = crack ahead, negative = crack behind)
+        crack_context[i, 1] = r = tn(wmax)/ft ratio at nearest crack [-], clamped to [0, 1]
 
     Notes
     -----
-    This is a simplified implementation that assumes:
-    - Cracks are represented by cohesive segments
-    - "Distance to crack" is the minimum distance from bond segment midpoint
-      to any cohesive segment midpoint
-    - tn is extracted from cohesive state at the nearest crack
-
-    For production use, this should be replaced with proper geometric
-    intersection finding and crack tracking.
+    - If no crack intersects the bar within tolerance: x = +inf, r = 1.0 → Ωc = 1.0 (no deterioration)
+    - For multiple crack intersections: uses nearest crack along bar axis
+    - For cracks that don't intersect: distance computed to nearest point on crack line
     """
     n_seg = steel_segments.shape[0]
     crack_context = np.zeros((n_seg, 2), dtype=float)
 
-    # Default: no cracks (large distance, r=0)
-    crack_context[:, 0] = 1e10  # Very large distance (no deterioration)
-    crack_context[:, 1] = 0.0   # No cohesive stress (full deterioration if crack present)
+    # Default: no cracks (large distance → Ωc = 1.0)
+    crack_context[:, 0] = 1e10  # Very large distance
+    crack_context[:, 1] = 1.0   # r = 1.0 → no deterioration
 
-    if cohesive_segments is None or len(cohesive_segments) == 0:
+    if cracks is None or len(cracks) == 0:
         return crack_context  # No cracks: Ωc = 1 everywhere
 
-    # Compute bond segment midpoints
-    bond_midpoints = np.zeros((n_seg, 2), dtype=float)
+    # Estimate tolerance if not provided (use 0.5 * typical bar diameter)
+    if phi_tolerance is None:
+        # Estimate bar diameter from segment length (crude heuristic)
+        typical_segment_length = np.median(steel_segments[:, 2]) if n_seg > 0 else 0.1
+        phi_tolerance = 0.5 * max(0.01, min(0.02, typical_segment_length * 0.1))  # 10-20mm
+
+    # Process each bond segment
     for i in range(n_seg):
-        # Assume segments have node coordinates or we need to pass nodes
-        # For now, use a placeholder: midpoint at (0, 0)
-        # TODO: Replace with actual geometry from nodes
-        bond_midpoints[i] = [0.0, 0.0]  # Placeholder
+        n1 = int(steel_segments[i, 0])
+        n2 = int(steel_segments[i, 1])
+        L0 = steel_segments[i, 2]
+        cx = steel_segments[i, 3]  # Bar axis unit vector
+        cy = steel_segments[i, 4]
 
-    # For each bond segment, find nearest cohesive segment
-    # (This is a simplified O(n*m) search; use spatial indexing for large problems)
-    for i in range(n_seg):
-        min_dist = 1e10
-        nearest_tn_ratio = 0.0
+        # Bond segment midpoint and bar direction
+        if n1 >= nodes.shape[0] or n2 >= nodes.shape[0]:
+            # Node index out of bounds - skip this segment
+            continue
 
-        # Search all cohesive segments
-        for j, coh_seg in enumerate(cohesive_segments):
-            # Compute distance (placeholder: needs actual geometry)
-            # For now, assume all cohesive segments are at origin
-            # TODO: Replace with actual segment-to-segment distance
-            dist = 0.1  # Placeholder: 0.1m from each crack
+        p1 = nodes[n1]
+        p2 = nodes[n2]
+        p_mid = 0.5 * (p1 + p2)
+        c_bar = np.array([cx, cy], dtype=float)  # Bar axis direction
 
-            if dist < min_dist:
-                min_dist = dist
+        # Find nearest transverse crack
+        min_dist_signed = 1e10
+        nearest_r = 1.0
+        found_crack = False
 
-                # Extract tn from cohesive state
-                if cohesive_states is not None and j < len(cohesive_states):
-                    # Assuming cohesive state has a traction field or similar
-                    # For now, use placeholder
-                    tn = 0.0  # TODO: Extract from cohesive_states[j]
-                    nearest_tn_ratio = max(0.0, min(1.0, tn / ft))
+        for k, crack in enumerate(cracks):
+            if not hasattr(crack, 'active') or not crack.active:
+                continue
+
+            # Crack geometry
+            p0_crack = crack.p0()  # Crack start point
+            pt_crack = crack.pt()  # Crack tip
+            t_crack = crack.tvec()  # Crack tangent vector
+            n_crack = crack.nvec()  # Crack normal vector
+
+            # Check if crack is "transverse" to bar (not parallel)
+            # Angle between crack tangent and bar axis
+            cos_angle = abs(np.dot(t_crack, c_bar))
+            if cos_angle > 0.866:  # cos(30°) ≈ 0.866 → skip nearly parallel cracks
+                continue
+
+            # Find intersection point between infinite crack line and bar line
+            # Bar line: P = p_mid + s * c_bar
+            # Crack line: Q = p0_crack + t * t_crack
+            # Solve: p_mid + s*c_bar = p0_crack + t*t_crack
+            #   => [c_bar, -t_crack] @ [s, t]^T = p0_crack - p_mid
+
+            A = np.column_stack([c_bar, -t_crack])
+            b = p0_crack - p_mid
+
+            # Check if lines are parallel (det(A) ≈ 0)
+            det_A = A[0,0]*A[1,1] - A[0,1]*A[1,0]
+            if abs(det_A) < 1e-12:
+                # Lines are parallel - compute perpendicular distance
+                # Distance from p_mid to infinite crack line
+                dist_perp = abs(np.dot(n_crack, p_mid - p0_crack))
+                if dist_perp < phi_tolerance:
+                    # Bar runs along crack - use midpoint projection
+                    s_intersect = np.dot(p_mid - p0_crack, t_crack)
+                    dist_signed = 0.0  # Crack at bar location
                 else:
-                    nearest_tn_ratio = 0.0
+                    continue  # Too far from crack
+            else:
+                # Solve for intersection parameters
+                s_t = np.linalg.solve(A, b)
+                s_intersect = s_t[0]  # Distance along bar axis to intersection
+                t_intersect = s_t[1]  # Distance along crack axis to intersection
 
-        crack_context[i, 0] = min_dist
-        crack_context[i, 1] = nearest_tn_ratio
+                # Check if intersection is within active crack segment
+                s_crack_tip = crack.s_tip()  # Length of active crack
+                if t_intersect < -1e-6 or t_intersect > s_crack_tip + 1e-6:
+                    # Intersection point is outside active crack segment
+                    # Compute distance to nearest endpoint instead
+                    dist_to_p0 = np.linalg.norm(p_mid - p0_crack)
+                    dist_to_pt = np.linalg.norm(p_mid - pt_crack)
+                    if dist_to_p0 < phi_tolerance or dist_to_pt < phi_tolerance:
+                        # Near crack endpoint
+                        s_to_p0 = np.dot(p0_crack - p_mid, c_bar)
+                        s_to_pt = np.dot(pt_crack - p_mid, c_bar)
+                        s_intersect = s_to_p0 if dist_to_p0 < dist_to_pt else s_to_pt
+                        dist_signed = s_intersect
+                    else:
+                        continue  # Outside crack and not close enough
+                else:
+                    # Valid intersection within active crack
+                    dist_signed = s_intersect
+
+            # Check if this is the nearest crack
+            if abs(dist_signed) < abs(min_dist_signed):
+                min_dist_signed = dist_signed
+                found_crack = True
+
+                # Extract cohesive state at this crack location
+                if cohesive_states is not None and cohesive_law is not None:
+                    # Get wmax from cohesive state
+                    # Cohesive states are indexed by [k, e, gp]
+                    # For simplicity, use maximum wmax across all elements/GPs for this crack
+                    try:
+                        if hasattr(cohesive_states, 'delta_max') and cohesive_states.delta_max.shape[0] > k:
+                            wmax_vals = cohesive_states.delta_max[k, :, :]
+                            wmax = float(np.max(wmax_vals)) if wmax_vals.size > 0 else 0.0
+
+                            # Evaluate cohesive law at wmax
+                            # Use cohesive_update to get current traction
+                            from xfem_clean.cohesive_laws import CohesiveState, cohesive_update
+                            dummy_state = CohesiveState(delta_max=wmax, damage=0.0)
+                            tn, _, _ = cohesive_update(cohesive_law, wmax, dummy_state, visc_damp=0.0)
+
+                            # Compute r = tn/ft ratio
+                            nearest_r = max(0.0, min(1.0, tn / max(1e-9, ft)))
+                        else:
+                            nearest_r = 0.0  # No state data
+                    except Exception:
+                        nearest_r = 0.0  # Error in state extraction, conservative value
+                else:
+                    nearest_r = 0.0  # No cohesive state provided
+
+        # Store results
+        if found_crack:
+            crack_context[i, 0] = min_dist_signed
+            crack_context[i, 1] = nearest_r
+        # else: keep default values (large distance, r=1.0)
 
     return crack_context
 
