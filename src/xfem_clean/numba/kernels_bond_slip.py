@@ -10,6 +10,7 @@ Design
 * Supports BondSlipModelCode2010 constitutive law with inline evaluation
 * Optional steel axial stiffness contribution
 * C1-continuous regularization near s=0 to prevent ill-conditioning
+* PART A FIX: Steel axial element always assembled, even when bond is masked
 
 Performance
 -----------
@@ -69,6 +70,7 @@ def bond_slip_assembly_kernel(
     segment_mask : np.ndarray, optional
         Boolean mask [n_seg] where True = bond disabled for that segment.
         If None, all segments are active.
+        CRITICAL (Part A): Masked segments skip bond/dowel but RETAIN steel axial element.
 
     Returns
     -------
@@ -86,7 +88,8 @@ def bond_slip_assembly_kernel(
       where g = [∂s/∂u] is the slip gradient (see implementation).
     * Regularization: For s < s_reg = 0.5*s1, uses linear branch to avoid
       singular tangent at s=0 (C1-continuous transition).
-    * Masked segments (segment_mask[i] == True) contribute zero force and stiffness.
+    * PART A FIX: Masked segments (segment_mask[i] == True) skip bond shear/dowel
+      but ALWAYS include steel axial stiffness and internal force.
     """
     ndof = u_total.shape[0]
     n_seg = segs.shape[0]
@@ -112,13 +115,10 @@ def bond_slip_assembly_kernel(
     entry_idx = 0
 
     for i in range(n_seg):  # Serial (not prange) due to entry_idx
-        # Skip masked segments (bond disabled)
-        if segment_mask is not None and segment_mask[i]:
-            # Set slip to zero for disabled segments (no forces, no stiffness)
-            s_current[i] = 0.0
-            continue
-
-        # Node IDs
+        # =====================================================================
+        # PART A FIX: Extract geometry and DOFs BEFORE mask check
+        # =====================================================================
+        # Node IDs (needed for both bond and steel axial)
         n1 = int(segs[i, 0])
         n2 = int(segs[i, 1])
         L0 = segs[i, 2]
@@ -148,6 +148,73 @@ def bond_slip_assembly_kernel(
         u_s2x = u_total[dof_s2x]
         u_s2y = u_total[dof_s2y]
 
+        # =====================================================================
+        # PART A FIX: Steel axial contribution ALWAYS assembled (before mask check)
+        # =====================================================================
+        # This is the bar element behavior independent of bond interface.
+        # Even if bond is disabled (masked), the steel bar must carry axial loads.
+        if steel_EA > 0.0 and entry_idx + 16 < max_entries:
+            K_steel = steel_EA / L0
+            Kxx_s = K_steel * cx * cx
+            Kxy_s = K_steel * cx * cy
+            Kyy_s = K_steel * cy * cy
+
+            # Compute steel axial displacement (du = u2 - u1)
+            du_steel_x = u_s2x - u_s1x
+            du_steel_y = u_s2y - u_s1y
+
+            # Axial elongation in bar direction: axial = du · c
+            axial = du_steel_x * cx + du_steel_y * cy
+
+            # Axial force: N = (EA/L) * axial
+            N_steel = K_steel * axial
+
+            # Internal force contribution: f = N * c at each node
+            # Node 1: f1 = -N * c (compression if pulled)
+            # Node 2: f2 = +N * c (tension if pulled)
+            f[dof_s1x] += -N_steel * cx
+            f[dof_s1y] += -N_steel * cy
+            f[dof_s2x] += +N_steel * cx
+            f[dof_s2y] += +N_steel * cy
+
+            # Steel bar stiffness: K = (EA/L) * [c⊗c, -c⊗c; -c⊗c, c⊗c]
+            # Node 1 - Node 1 (positive)
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1x; data[entry_idx] = Kxx_s; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1y; data[entry_idx] = Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1x; data[entry_idx] = Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1y; data[entry_idx] = Kyy_s; entry_idx += 1
+
+            # Node 2 - Node 2 (positive)
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2x; data[entry_idx] = Kxx_s; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2y; data[entry_idx] = Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2x; data[entry_idx] = Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2y; data[entry_idx] = Kyy_s; entry_idx += 1
+
+            # Node 1 - Node 2 (negative)
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2x; data[entry_idx] = -Kxx_s; entry_idx += 1
+            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2y; data[entry_idx] = -Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2x; data[entry_idx] = -Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2y; data[entry_idx] = -Kyy_s; entry_idx += 1
+
+            # Node 2 - Node 1 (negative)
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1x; data[entry_idx] = -Kxx_s; entry_idx += 1
+            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1y; data[entry_idx] = -Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1x; data[entry_idx] = -Kxy_s; entry_idx += 1
+            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1y; data[entry_idx] = -Kyy_s; entry_idx += 1
+
+        # =====================================================================
+        # PART A FIX: Mask check - Skip ONLY bond shear (and future dowel)
+        # =====================================================================
+        # CRITICAL FIX: Masked segments (bond disabled) skip bond/dowel contributions
+        # but STILL include steel axial element (already assembled above).
+        if segment_mask is not None and segment_mask[i]:
+            # Set slip to zero for disabled segments (no bond forces/stiffness)
+            s_current[i] = 0.0
+            continue
+
+        # =====================================================================
+        # Bond shear interface (only if NOT masked)
+        # =====================================================================
         # Average slip along segment (simplified: use midpoint)
         u_c_mid_x = 0.5 * (u_c1x + u_c2x)
         u_c_mid_y = 0.5 * (u_c1y + u_c2y)
@@ -370,57 +437,6 @@ def bond_slip_assembly_kernel(
             rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1y; data[entry_idx] = K_bond * g_s2y * g_s1y; entry_idx += 1
             rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2x; data[entry_idx] = K_bond * g_s2y * g_s2x; entry_idx += 1
             rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2y; data[entry_idx] = K_bond * g_s2y * g_s2y; entry_idx += 1
-
-        # Steel axial stiffness and internal force (if steel_EA > 0)
-        # CRITICAL FIX (Task A): Add missing steel axial internal force
-        if steel_EA > 0.0 and entry_idx + 16 < max_entries:
-            K_steel = steel_EA / L0
-            Kxx_s = K_steel * cx * cx
-            Kxy_s = K_steel * cx * cy
-            Kyy_s = K_steel * cy * cy
-
-            # Compute steel axial displacement (du = u2 - u1)
-            du_steel_x = u_s2x - u_s1x
-            du_steel_y = u_s2y - u_s1y
-
-            # Axial elongation in bar direction: axial = du · c
-            axial = du_steel_x * cx + du_steel_y * cy
-
-            # Axial force: N = (EA/L) * axial
-            N_steel = K_steel * axial
-
-            # Internal force contribution: f = N * c at each node
-            # Node 1: f1 = -N * c (compression if pulled)
-            # Node 2: f2 = +N * c (tension if pulled)
-            f[dof_s1x] += -N_steel * cx
-            f[dof_s1y] += -N_steel * cy
-            f[dof_s2x] += +N_steel * cx
-            f[dof_s2y] += +N_steel * cy
-
-            # Steel bar stiffness: K = (EA/L) * [c⊗c, -c⊗c; -c⊗c, c⊗c]
-            # Node 1 - Node 1 (positive)
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1x; data[entry_idx] = Kxx_s; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s1y; data[entry_idx] = Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1x; data[entry_idx] = Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s1y; data[entry_idx] = Kyy_s; entry_idx += 1
-
-            # Node 2 - Node 2 (positive)
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2x; data[entry_idx] = Kxx_s; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s2y; data[entry_idx] = Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2x; data[entry_idx] = Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s2y; data[entry_idx] = Kyy_s; entry_idx += 1
-
-            # Node 1 - Node 2 (negative)
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2x; data[entry_idx] = -Kxx_s; entry_idx += 1
-            rows[entry_idx] = dof_s1x; cols[entry_idx] = dof_s2y; data[entry_idx] = -Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2x; data[entry_idx] = -Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s1y; cols[entry_idx] = dof_s2y; data[entry_idx] = -Kyy_s; entry_idx += 1
-
-            # Node 2 - Node 1 (negative)
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1x; data[entry_idx] = -Kxx_s; entry_idx += 1
-            rows[entry_idx] = dof_s2x; cols[entry_idx] = dof_s1y; data[entry_idx] = -Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1x; data[entry_idx] = -Kxy_s; entry_idx += 1
-            rows[entry_idx] = dof_s2y; cols[entry_idx] = dof_s1y; data[entry_idx] = -Kyy_s; entry_idx += 1
 
     # Trim arrays
     rows_out = rows[:entry_idx]
