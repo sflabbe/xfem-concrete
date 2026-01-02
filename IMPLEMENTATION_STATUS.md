@@ -40,10 +40,12 @@
 ### TASK 1: Implement Crack Deterioration Ωc with Geometry 🔴 **Complex**
 **Status:** Placeholder exists, needs geometry implementation
 
-**Current State:**
-- Thesis formula implemented in `BondSlipModelCode2010.compute_crack_deterioration()` (lines 319-373)
-- Placeholder function exists: `precompute_crack_context_for_bond()` (lines 1898-1986)
-- **Gap:** No real geometry intersection code
+**Current State** (Commit b8136e3):
+- ✅ Thesis formula implemented in `BondSlipModelCode2010.compute_crack_deterioration()` (bond_slip.py:319-373)
+- ✅ Full geometric intersection in `precompute_crack_context_for_bond()` (bond_slip.py:1923-2128)
+- ✅ Python bond assembly uses crack_context (bond_slip.py:1590-1616)
+- ✅ Comprehensive tests (test_crack_deterioration_omega_c.py) - all passing
+- ⏳ **Gap:** Numba kernel doesn't support crack_context yet (forces Python fallback)
 
 **Required Implementation:**
 ```python
@@ -272,17 +274,19 @@ def precompute_crack_context_for_bond(
 
 ## 📊 SUMMARY
 
-| Task | Status | Difficulty | Priority | Est. Time |
-|------|--------|-----------|----------|-----------|
-| TASK 0: Fix tests & docs | ✅ Done | Easy | High | ~2h |
-| Python/Numba parity fix | ✅ Done | Medium | High | ~1h |
-| TASK 1: Crack Ωc geometry | 🔴 Not Started | Hard | Medium | ~8-12h |
-| TASK 2: BondLayer wiring | 🔴 Not Started | Medium | High | ~4-6h |
-| TASK 3: Mixed-mode cohesive | 🔴 Not Started | Medium | Medium | ~6-8h |
-| TASK 4: Dowel Numba | 🔴 Not Started | Easy | Low | ~3-4h |
-| TASK 5: Energy tracking | 🔴 Not Started | Hard | Low | ~8-10h |
+| Task | Status | Difficulty | Priority | Est. Time | Actual Time |
+|------|--------|-----------|----------|-----------|-------------|
+| TASK 0: Fix tests & docs | ✅ Done | Easy | High | ~2h | ~2h |
+| Python/Numba parity fix | ✅ Done | Medium | High | ~1h | ~1h |
+| TASK 1: Crack Ωc (Python) | ✅ Done | Hard | Medium | ~6-8h | ~6h |
+| TASK 1: Crack Ωc (Numba) | 🟡 Pending | Medium | Low | ~2-4h | - |
+| TASK 2: BondLayer wiring | 🔴 Not Started | Medium | High | ~4-6h | - |
+| TASK 3: Mixed-mode cohesive | 🔴 Not Started | Medium | Medium | ~6-8h | - |
+| TASK 4: Dowel Numba | 🔴 Not Started | Easy | Low | ~3-4h | - |
+| TASK 5: Energy tracking | 🔴 Not Started | Hard | Low | ~8-10h | - |
 
-**Total Remaining Estimated Time:** 30-40 hours
+**Completed:** ~9 hours
+**Total Remaining Estimated Time:** 23-38 hours
 
 ---
 
@@ -306,14 +310,26 @@ def precompute_crack_context_for_bond(
 
 ## 📝 COMMIT LOG
 
+### Commit b8136e3 (2026-01-02)
+```
+feat: Implement crack deterioration Ωc geometry and formula (TASK 1 partial)
+
+Major progress on TASK 1:
+- Full geometric crack-bar intersection algorithm
+- Correct thesis Eq. 3.60 formula (φ normalization fixed)
+- Python assembly integration with crack_context
+- Comprehensive tests (all passing)
+Remaining: Numba kernel extension
+```
+
 ### Commit 6a6af32 (2026-01-02)
 ```
 fix: Update bond yielding tests and docs for thesis parity εu calculation
 
 - Fixed test_bond_yielding_reduction.py to use bilinear hardening εu
-- Updated documentation (PARTB_C_D_IMPLEMENTATION_SUMMARY.md, TASK_COMPLETION_SUMMARY.md)
-- Added C1-continuous regularization to Python fallback for Numba parity
-- All tests pass with improved accuracy
+- Updated documentation
+- Added C1-continuous regularization to Python fallback
+- All tests pass
 ```
 
 ---
