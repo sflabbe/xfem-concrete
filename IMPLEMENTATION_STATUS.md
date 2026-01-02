@@ -280,13 +280,13 @@ def precompute_crack_context_for_bond(
 | Python/Numba parity fix | ✅ Done | Medium | High | ~1h | ~1h |
 | TASK 1: Crack Ωc (Python) | ✅ Done | Hard | Medium | ~6-8h | ~6h |
 | TASK 1: Crack Ωc (Numba) | 🟡 Pending | Medium | Low | ~2-4h | - |
-| TASK 2: BondLayer wiring | 🔴 Not Started | Medium | High | ~4-6h | - |
+| TASK 2: BondLayer wiring | ✅ Done | Medium | High | ~4-6h | ~5h |
 | TASK 3: Mixed-mode cohesive | 🔴 Not Started | Medium | Medium | ~6-8h | - |
 | TASK 4: Dowel Numba | 🔴 Not Started | Easy | Low | ~3-4h | - |
 | TASK 5: Energy tracking | 🔴 Not Started | Hard | Low | ~8-10h | - |
 
-**Completed:** ~9 hours
-**Total Remaining Estimated Time:** 23-38 hours
+**Completed:** ~14 hours
+**Total Remaining Estimated Time:** 19-34 hours
 
 ---
 
@@ -309,6 +309,17 @@ def precompute_crack_context_for_bond(
 ---
 
 ## 📝 COMMIT LOG
+
+### Commit b49bd0a (2026-01-02)
+```
+feat: Wire BondLayer multi-layer reinforcement (TASK 2 complete)
+
+Full multi-layer reinforcement support:
+- build_bond_layers_from_case() with horizontal/vertical orientations
+- Solver interface wired to use bond_layers
+- EA/perimeter computation, segment masking
+- Backward compatible with legacy path
+```
 
 ### Commit b8136e3 (2026-01-02)
 ```
