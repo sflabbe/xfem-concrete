@@ -69,6 +69,9 @@ def assemble_xfem_system(
     enable_rebar_contact: bool = False,
     # Subdomain support (FASE C)
     subdomain_mgr: Optional[object] = None,  # SubdomainManager
+    # PART D: Multi-layer bond-slip support
+    bond_layers: Optional[list] = None,  # List[BondLayer] for multi-layer (steel + FRP)
+    bond_states_list_comm: Optional[list] = None,  # List of bond state arrays (one per layer)
 ) -> Tuple[
     sp.csr_matrix,
     np.ndarray,
@@ -651,8 +654,58 @@ def assemble_xfem_system(
         K = K + sp.diags(stab, 0, shape=(ndof, ndof), format="csr")
 
     # Bond-slip contribution (Phase 2: Bond-Slip Integration)
+    # PART D: Support multiple bond layers (steel + FRP)
     bond_updates = None
-    if enable_bond_slip and rebar_segs is not None and bond_law is not None and bond_states_comm is not None:
+    bond_updates_list = None
+
+    if bond_layers is not None and len(bond_layers) > 0:
+        # PART D: Multi-layer bond-slip (explicit layers)
+        if dofs.steel_dof_offset < 0:
+            raise ValueError("Bond-slip enabled but steel DOFs not allocated. Check build_xfem_dofs().")
+
+        from xfem_clean.bond_slip import assemble_bond_slip
+
+        bond_updates_list = []
+
+        for layer_idx, layer in enumerate(bond_layers):
+            # Get committed states for this layer
+            layer_states_comm = bond_states_list_comm[layer_idx] if bond_states_list_comm else None
+            if layer_states_comm is None:
+                continue  # Skip if no states for this layer
+
+            # Get layer-specific parameters
+            layer_segs = layer.segments
+            layer_bond_law = layer.bond_law
+            layer_EA = layer.EA
+            layer_perimeter = layer.perimeter
+            layer_mask = layer.segment_mask  # May be None
+
+            f_bond, K_bond, layer_updates = assemble_bond_slip(
+                u_total=q,
+                steel_segments=layer_segs,
+                steel_dof_offset=dofs.steel_dof_offset,
+                bond_law=layer_bond_law,
+                bond_states=layer_states_comm,
+                steel_dof_map=dofs.steel,  # Shared DOF mapping
+                steel_EA=layer_EA,
+                use_numba=use_numba,
+                perimeter=layer_perimeter,
+                segment_mask=layer_mask,
+                bond_gamma=bond_gamma,
+                bond_k_cap=bond_k_cap,
+                bond_s_eps=bond_s_eps,
+            )
+
+            # Accumulate contributions from all layers
+            fint += f_bond
+            K = K + K_bond
+            bond_updates_list.append(layer_updates)
+
+        # For backward compatibility, return first layer's updates
+        bond_updates = bond_updates_list[0] if len(bond_updates_list) > 0 else None
+
+    elif enable_bond_slip and rebar_segs is not None and bond_law is not None and bond_states_comm is not None:
+        # Legacy: single bond law for all rebar
         if dofs.steel_dof_offset < 0:
             raise ValueError("Bond-slip enabled but steel DOFs not allocated. Check build_xfem_dofs().")
 

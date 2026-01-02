@@ -75,6 +75,7 @@ def run_analysis_xfem(
     bond_law: Optional[Any] = None,
     return_bundle: bool = False,
     u_targets: Optional[np.ndarray] = None,
+    bond_layers: Optional[List[Any]] = None,  # PART D: List[BondLayer] for multi-layer support
 ):
     """Run the single-crack XFEM prototype (stable linear version + cohesive).
 
@@ -84,6 +85,14 @@ def run_analysis_xfem(
         Boundary condition specification. If None, defaults to 3-point bending:
         - Fixed: left bottom (ux=0, uy=0) and right bottom (uy=0)
         - Prescribed: top center nodes (uy=-umax)
+    bond_law : Optional[Any], optional
+        Single bond law for all rebar (legacy, for backward compatibility).
+        Ignored if bond_layers is provided.
+    bond_layers : Optional[List[BondLayer]], optional
+        PART D: List of bond layers (rebars, FRP). Each layer has its own
+        segments, bond law, EA, perimeter, and optional segment mask.
+        If provided, rebar segments are NOT auto-generated from model.cover.
+        This enables multi-layer support (steel + FRP) and explicit geometry control.
     return_bundle : bool, optional
         If True, return dict with comprehensive results:
         {nodes, elems, u, history, crack, mp_states, bond_states, rebar_segs, dofs}
@@ -126,7 +135,14 @@ def run_analysis_xfem(
         load_dofs = list(bc_spec.prescribed_dofs)
         # NOTE: Negative DOFs mark steel nodes to be resolved after DOF manager is created
 
-    rebar_segs = prepare_rebar_segments(nodes, cover=model.cover)
+    # PART D: Bond layer handling - use provided layers or auto-generate from cover
+    if bond_layers is not None and len(bond_layers) > 0:
+        # PART D: Use provided bond layers (explicit geometry)
+        # Rebar segments will be extracted from layers when needed
+        rebar_segs = bond_layers[0].segments  # Use first layer for legacy rebar_segs (if needed)
+    else:
+        # Legacy: auto-generate rebar segments from cover distance
+        rebar_segs = prepare_rebar_segments(nodes, cover=model.cover)
 
     if model.cand_windows is not None:
         windows = list(model.cand_windows)
@@ -192,8 +208,25 @@ def run_analysis_xfem(
     dofs: Optional[XFEMDofs] = None
 
     # Bond-slip state initialization (Phase 2)
+    # PART D: Support multiple bond layers, each with its own state array
     bond_states = None
-    if model.enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
+    bond_states_list = None  # PART D: List of state arrays (one per layer)
+
+    if bond_layers is not None and len(bond_layers) > 0:
+        # PART D: Multi-layer bond-slip (explicit layers)
+        from xfem_clean.bond_slip import BondSlipStateArrays
+
+        bond_states_list = []
+        for layer in bond_layers:
+            n_seg = layer.segments.shape[0]
+            layer_states = BondSlipStateArrays.zeros(n_seg)
+            bond_states_list.append(layer_states)
+
+        # For backward compatibility with single-layer code
+        bond_states = bond_states_list[0] if len(bond_states_list) > 0 else None
+
+    elif model.enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
+        # Legacy: single bond law for all rebar
         from xfem_clean.bond_slip import BondSlipStateArrays, BondSlipModelCode2010
 
         n_seg = rebar_segs.shape[0]
@@ -370,6 +403,7 @@ def run_analysis_xfem(
         mp_committed,
         bond_committed=None,
         bond_gamma: float = 1.0,  # BLOQUE A: Bond-slip continuation parameter
+        bond_committed_list=None,  # PART D: List of bond states (one per layer)
     ):
         nonlocal total_newton_solves
         if model.debug_newton:
@@ -436,6 +470,8 @@ def run_analysis_xfem(
                 bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,  # BLOQUE C
                 bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,  # BLOQUE C
                 subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
+                bond_layers=bond_layers,  # PART D: Multi-layer bond support
+                bond_states_list_comm=bond_committed_list if bond_layers else None,  # PART D: Per-layer states
             )
             if model.debug_newton:
                 print(f"        [newton] it={it:02d} assemble done, K.shape={K.shape}")
@@ -803,6 +839,7 @@ def run_analysis_xfem(
                             mp_cur,
                             bond_cur,
                             bond_gamma=gamma,
+                            bond_committed_list=bond_states_list,  # PART D
                         )
 
                         if not ok:
@@ -839,6 +876,7 @@ def run_analysis_xfem(
                         mp_states,
                         bond_states,
                         bond_gamma=1.0,
+                        bond_committed_list=bond_states_list,  # PART D
                     )
 
                 if model.debug_substeps:

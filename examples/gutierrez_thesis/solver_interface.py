@@ -85,6 +85,85 @@ def map_bond_law(bond_law_config: Any) -> Any:
 
 
 # =============================================================================
+# PART D: BOND LAYER BUILDER
+# =============================================================================
+
+def build_bond_layers_from_case(
+    case: CaseConfig,
+    nodes: np.ndarray,
+) -> List[Any]:  # List[BondLayer]
+    """
+    Build BondLayer objects from case configuration (rebars + FRP).
+
+    PART D: This function converts RebarLayer and FRPSheet configurations
+    into explicit BondLayer objects with segments, bond laws, and properties.
+
+    Parameters
+    ----------
+    case : CaseConfig
+        Case configuration with reinforcement layers
+    nodes : np.ndarray
+        Node coordinates [nnode, 2] in SI units (m)
+
+    Returns
+    -------
+    bond_layers : List[BondLayer]
+        List of bond layers (steel rebars, FRP sheets)
+    """
+    from xfem_clean.bond_slip import BondLayer
+    from xfem_clean.rebar import prepare_rebar_segments
+
+    bond_layers = []
+
+    # Process rebar layers
+    if hasattr(case, 'reinforcement') and case.reinforcement is not None:
+        if hasattr(case.reinforcement, 'rebar_layers'):
+            for layer_idx, rebar_config in enumerate(case.reinforcement.rebar_layers):
+                # Generate rebar segments from y_position
+                cover = rebar_config.y_position * 1e-3  # mm → m
+                segments = prepare_rebar_segments(nodes, cover=cover)
+
+                # Convert bond law
+                bond_law = map_bond_law(rebar_config.bond_law)
+
+                # Compute EA and perimeter
+                d_bar = rebar_config.diameter * 1e-3  # mm → m
+                A_bar = np.pi * (d_bar / 2.0) ** 2
+                EA = rebar_config.steel.E * 1e6 * rebar_config.n_bars * A_bar  # MPa → Pa
+                perimeter = rebar_config.n_bars * np.pi * d_bar
+
+                # Segment mask (bond-disabled regions)
+                segment_mask = None
+                if rebar_config.bond_disabled_x_range is not None:
+                    x_min, x_max = rebar_config.bond_disabled_x_range
+                    x_min *= 1e-3  # mm → m
+                    x_max *= 1e-3
+                    # Mark segments in this x-range as disabled
+                    seg_x_mid = 0.5 * (nodes[segments[:, 0].astype(int), 0] + nodes[segments[:, 1].astype(int), 0])
+                    segment_mask = (seg_x_mid >= x_min) & (seg_x_mid <= x_max)
+
+                # Create BondLayer
+                layer = BondLayer(
+                    segments=segments,
+                    EA=EA,
+                    perimeter=perimeter,
+                    bond_law=bond_law,
+                    segment_mask=segment_mask,
+                    enable_dowel=False,  # TODO: Add dowel support
+                    dowel_model=None,
+                    layer_id=f"rebar_layer_{layer_idx}",
+                )
+                bond_layers.append(layer)
+
+        # TODO: Process FRP sheets (requires edge segment generation)
+        # if hasattr(case.reinforcement, 'frp_sheets'):
+        #     for frp_config in case.reinforcement.frp_sheets:
+        #         ...
+
+    return bond_layers
+
+
+# =============================================================================
 # BOUNDARY CONDITIONS MAPPER
 # =============================================================================
 
