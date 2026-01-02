@@ -94,6 +94,9 @@ class XFEMModel:
     steel_EA_min: float = 1e3      # Minimum steel axial stiffness [N] to avoid rigid body mode
     bond_tangent_cap_factor: float = 1e2  # Cap bond tangent at factor × median(diag(K_bulk))
 
+    # Bond layers (Task B: explicit layer-based modeling, thesis parity)
+    bond_layers: List = field(default_factory=list)  # List[BondLayer]
+
     # Bond-slip continuation parameters (BLOQUE B: convergence improvement)
     bond_gamma_strategy: str = "ramp_steps"  # "ramp_steps" | "adaptive_on_fail" | "disabled"
     bond_gamma_ramp_steps: int = 5  # Number of gamma values in ramp (0→1)

@@ -12,8 +12,8 @@ The implementation includes:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Tuple, List, Dict, Any, Optional
+from dataclasses import dataclass, field
+from typing import Tuple, List, Dict, Any, Optional, Union
 import math
 
 import numpy as np
@@ -34,6 +34,83 @@ except Exception:
         return wrap
     def prange(*args):
         return range(*args)
+
+
+@dataclass
+class BondLayer:
+    """Bond layer specification for reinforcement (steel rebar or FRP).
+
+    This structure encapsulates all parameters needed for bond-slip modeling
+    of a single reinforcement layer, replacing the legacy approach of inventing
+    geometry from cover distance.
+
+    Attributes
+    ----------
+    segments : np.ndarray
+        Segment connectivity and geometry [nseg, 5]: [n1, n2, L0, cx, cy]
+        where n1, n2 are node IDs, L0 is reference length, cx, cy is unit tangent
+    EA : float
+        Axial stiffness (N): E * A_total for the layer
+        For steel: E_s * (n_bars * π * d²/4)
+        For FRP: E_frp * t_frp * b_eff
+    perimeter : float
+        Bond perimeter (m) for traction integration
+        For steel bars: n_bars * π * d
+        For FRP sheets: b_eff (effective width)
+    bond_law : Union[BondSlipModelCode2010, CustomBondSlipLaw, BilinearBondLaw, BanholzerBondLaw]
+        Constitutive law for bond stress-slip relationship
+    segment_mask : Optional[np.ndarray]
+        Boolean mask [nseg] where True = bond disabled for that segment
+        (e.g., for empty elements in pullout tests). Default: None (all active)
+    enable_dowel : bool
+        Enable dowel action (transverse stress) for this layer. Default: False
+    dowel_model : Optional[DowelActionModel]
+        Dowel action constitutive model. Required if enable_dowel=True.
+    layer_id : str
+        Human-readable identifier for this layer (e.g., "rebar_layer_1", "frp_bottom")
+
+    Notes
+    -----
+    This structure enables:
+    - Explicit control over reinforcement geometry (no cover-based invention)
+    - Per-layer bond law specification (allows FRP + steel in same model)
+    - Segment-level masking for bond-disabled regions
+    - Dowel action on/off per layer
+    """
+
+    segments: np.ndarray  # [nseg, 5]: [n1, n2, L0, cx, cy]
+    EA: float  # Axial stiffness (N)
+    perimeter: float  # Bond perimeter (m)
+    bond_law: Any  # Bond constitutive law (use Any to avoid circular import)
+    segment_mask: Optional[np.ndarray] = None  # [nseg] bool: True = disabled
+    enable_dowel: bool = False
+    dowel_model: Optional[Any] = None  # DowelActionModel or None
+    layer_id: str = "bond_layer"
+
+    def __post_init__(self):
+        """Validate bond layer parameters."""
+        if self.segments.ndim != 2 or self.segments.shape[1] != 5:
+            raise ValueError(
+                f"segments must be shape (nseg, 5), got {self.segments.shape}"
+            )
+        if self.EA <= 0:
+            raise ValueError(f"EA must be positive, got {self.EA}")
+        if self.perimeter <= 0:
+            raise ValueError(f"perimeter must be positive, got {self.perimeter}")
+
+        # Validate segment_mask shape if provided
+        if self.segment_mask is not None:
+            if self.segment_mask.shape[0] != self.segments.shape[0]:
+                raise ValueError(
+                    f"segment_mask length {self.segment_mask.shape[0]} != "
+                    f"n_segments {self.segments.shape[0]}"
+                )
+
+        # Validate dowel model if enabled
+        if self.enable_dowel and self.dowel_model is None:
+            raise ValueError(
+                "dowel_model must be provided when enable_dowel=True"
+            )
 
 
 @dataclass
@@ -99,7 +176,8 @@ class BondSlipModelCode2010:
     condition: str = "good"
     f_y: float = 500e6  # Steel yield stress [Pa] (Part B3)
     E_s: float = 200e9  # Steel Young's modulus [Pa] (Part B3)
-    use_secant_stiffness: bool = True  # Part B7: Use secant for stability
+    use_secant_stiffness: bool = True  # Part B7: Use secant for stability (DEPRECATED, use tangent_mode)
+    tangent_mode: str = "secant_thesis"  # "consistent" | "secant_thesis" (Task D)
     enable_yielding_reduction: bool = False  # Part B3: Steel yielding Ωy
     enable_crack_deterioration: bool = False  # Part B4: Crack deterioration Ωcrack
 
@@ -176,13 +254,15 @@ class BondSlipModelCode2010:
 
         return float(tau), float(dtau_ds)
 
-    def compute_yielding_reduction(self, eps_s: float) -> float:
+    def compute_yielding_reduction(self, eps_s: float, eps_u: float = None) -> float:
         """Compute steel yielding reduction factor Ωy per Eq. 3.57-3.58.
 
         Parameters
         ----------
         eps_s : float
             Steel strain (axial, in bar direction) [-]
+        eps_u : float, optional
+            Ultimate strain (default: 10 * eps_y for typical steel)
 
         Returns
         -------
@@ -191,35 +271,41 @@ class BondSlipModelCode2010:
 
         Notes
         -----
-        From dissertation Eq. 3.57-3.58:
+        From dissertation Eq. 3.57-3.58 (exact):
             eps_y = f_y / E_s
             If eps_s <= eps_y: Ωy = 1
-            If eps_s > eps_y: Ωy = exp(-k_y * (eps_s - eps_y) / eps_y)
-        where k_y ≈ 10 (calibration parameter).
+            If eps_y < eps_s <= eps_u:
+                Ωy = 1 - 0.85 * (1 - exp(-5 * (eps_s - eps_y) / (eps_u - eps_y)))
         """
         if not self.enable_yielding_reduction:
             return 1.0
 
         eps_y = self.f_y / self.E_s  # Yield strain
-        k_y = 10.0  # Calibration parameter (dissertation uses ~10)
+
+        # Ultimate strain: default to 10× yield strain (typical for steel)
+        if eps_u is None:
+            eps_u = 10.0 * eps_y
 
         if eps_s <= eps_y:
             return 1.0
+        elif eps_s <= eps_u:
+            # Eq. 3.58 (exact form from thesis)
+            xi = (eps_s - eps_y) / (eps_u - eps_y)
+            omega_y = 1.0 - 0.85 * (1.0 - math.exp(-5.0 * xi))
+            return max(0.0, min(1.0, omega_y))
         else:
-            # Exponential decay after yielding
-            delta_eps = (eps_s - eps_y) / eps_y
-            omega_y = math.exp(-k_y * delta_eps)
-            return max(0.0, min(1.0, omega_y))  # Clamp to [0, 1]
+            # Beyond ultimate strain: assume complete degradation
+            return 0.15  # Residual (1 - 0.85) per Eq. 3.58 at xi→∞
 
     def compute_crack_deterioration(
         self, dist_to_crack: float, w_max: float, t_n_cohesive_stress: float, f_t: float
     ) -> float:
-        """Compute crack deterioration factor Ωcrack per Eq. 3.60-3.61 (modified).
+        """Compute crack deterioration factor Ω꜀ per Eq. 3.60 (exact).
 
         Parameters
         ----------
         dist_to_crack : float
-            Distance from interface point to nearest transverse crack [m]
+            Distance x from interface point to nearest transverse crack [m]
         w_max : float
             Maximum crack opening (historical) at interface level [m]
         t_n_cohesive_stress : float
@@ -234,35 +320,38 @@ class BondSlipModelCode2010:
 
         Notes
         -----
-        From dissertation Eq. 3.60-3.61 (modified):
-            l_ch = characteristic length (e.g., 2*d_bar)
-            chi = t_n(w_max) / f_t  (FPZ state indicator)
-            Ωcrack = exp(-dist_to_crack / l_ch * (1 - chi))
+        From dissertation Eq. 3.60 (exact):
+            For distance x ≤ 2*l from transverse crack:
+                Ω꜀ = 0.5 * (x/l) + (t_n(w_max)/f_t) * (1 - 0.5 * (x/l))
+            where:
+                l = characteristic length (typically 2 * d_bar or l_ch)
+                t_n(w_max)/f_t = FPZ damage indicator (1 = uncracked, 0 = macrocrack)
 
-        When chi = 1 (no crack): Ωcrack = 1
-        When chi = 0 (fully open crack): Ωcrack = exp(-dist/l_ch)
+        For x > 2*l: Ω꜀ = 1 (no deterioration far from crack)
         """
         if not self.enable_crack_deterioration:
             return 1.0
 
-        l_ch = 2.0 * self.d_bar  # Characteristic length
+        # Characteristic length for bond deterioration
+        l = 2.0 * self.d_bar  # Thesis uses 2*d_bar as characteristic length
 
-        # FPZ state indicator (Eq. 3.61)
+        # FPZ state indicator: ratio = t_n(w_max) / f_t
         if f_t > 1e-9:
-            chi = max(0.0, min(1.0, t_n_cohesive_stress / f_t))
+            ratio_tn_ft = max(0.0, min(1.0, t_n_cohesive_stress / f_t))
         else:
-            chi = 0.0
+            ratio_tn_ft = 0.0  # Assume fully cracked if no tensile strength
 
-        # Deterioration factor (Eq. 3.60 modified)
-        if dist_to_crack < 1e-12:
-            # At crack: maximum deterioration
-            omega_crack = chi  # Reduces to chi at crack
+        # Distance normalized by characteristic length
+        x_norm = dist_to_crack / l
+
+        # Eq. 3.60 (exact form from thesis)
+        if x_norm <= 2.0:
+            # Within deterioration zone (x ≤ 2*l)
+            omega_crack = 0.5 * x_norm + ratio_tn_ft * (1.0 - 0.5 * x_norm)
+            return max(0.0, min(1.0, omega_crack))
         else:
-            # Exponential decay
-            omega_crack = math.exp(-dist_to_crack / l_ch * (1.0 - chi))
-            omega_crack = max(chi, min(1.0, omega_crack))  # Clamp [chi, 1]
-
-        return omega_crack
+            # Beyond deterioration zone (x > 2*l): no deterioration
+            return 1.0
 
     def tau_and_tangent(
         self,
@@ -325,9 +414,18 @@ class BondSlipModelCode2010:
         tau_abs *= omega_y * omega_crack
         dtau_abs *= omega_y * omega_crack
 
-        # Part B7: Use secant stiffness for stability
-        if self.use_secant_stiffness and s_abs > 1e-14:
-            dtau_abs = tau_abs / s_abs  # Secant stiffness
+        # Task D: Tangent mode selection for convergence robustness (Section 5.1)
+        # "secant_thesis" = secant moduli per thesis Section 5.1 (replaces tangent with τ/s for stability)
+        # "consistent" = consistent tangent (dτ/ds)
+        if self.tangent_mode == "secant_thesis" and s_abs > 1e-14:
+            dtau_abs = tau_abs / s_abs  # Secant stiffness (thesis approach)
+        elif self.tangent_mode == "consistent":
+            # Keep tangent as-is (dtau_abs already computed)
+            pass
+        else:
+            # Backward compatibility: use_secant_stiffness flag (deprecated)
+            if self.use_secant_stiffness and s_abs > 1e-14:
+                dtau_abs = tau_abs / s_abs
 
         return sign * float(tau_abs), float(dtau_abs)
 
@@ -371,7 +469,8 @@ class CustomBondSlipLaw:
     tau_max: float
     tau_f: float
     alpha: float = 0.4
-    use_secant_stiffness: bool = True
+    use_secant_stiffness: bool = True  # DEPRECATED, use tangent_mode
+    tangent_mode: str = "secant_thesis"  # "consistent" | "secant_thesis" (Task D)
 
     def __post_init__(self):
         """Validate parameters."""
@@ -468,9 +567,15 @@ class CustomBondSlipLaw:
             tau_abs = tau_env
             dtau_abs = dtau_env
 
-        # Secant stiffness option for stability
-        if self.use_secant_stiffness and s_abs > 1e-14:
+        # Tangent mode selection (Task D)
+        if self.tangent_mode == "secant_thesis" and s_abs > 1e-14:
             dtau_abs = tau_abs / s_abs
+        elif self.tangent_mode == "consistent":
+            pass  # Keep tangent as-is
+        else:
+            # Backward compatibility
+            if self.use_secant_stiffness and s_abs > 1e-14:
+                dtau_abs = tau_abs / s_abs
 
         return sign * float(tau_abs), float(dtau_abs)
 
@@ -502,7 +607,8 @@ class BilinearBondLaw:
     s1: float
     s2: float
     tau1: float
-    use_secant_stiffness: bool = True
+    use_secant_stiffness: bool = True  # DEPRECATED, use tangent_mode
+    tangent_mode: str = "secant_thesis"  # "consistent" | "secant_thesis" (Task D)
 
     def __post_init__(self):
         """Validate parameters."""
@@ -559,9 +665,15 @@ class BilinearBondLaw:
             tau_abs = tau_env
             dtau_abs = dtau_env
 
-        # Secant stiffness
-        if self.use_secant_stiffness and s_abs > 1e-14:
+        # Tangent mode selection (Task D)
+        if self.tangent_mode == "secant_thesis" and s_abs > 1e-14:
             dtau_abs = tau_abs / s_abs
+        elif self.tangent_mode == "consistent":
+            pass  # Keep tangent as-is
+        else:
+            # Backward compatibility
+            if self.use_secant_stiffness and s_abs > 1e-14:
+                dtau_abs = tau_abs / s_abs
 
         return sign * float(tau_abs), float(dtau_abs)
 
@@ -598,7 +710,8 @@ class BanholzerBondLaw:
     tau1: float
     tau2: float
     tau_f: float
-    use_secant_stiffness: bool = True
+    use_secant_stiffness: bool = True  # DEPRECATED, use tangent_mode
+    tangent_mode: str = "secant_thesis"  # "consistent" | "secant_thesis" (Task D)
 
     def __post_init__(self):
         """Validate parameters."""
@@ -658,9 +771,15 @@ class BanholzerBondLaw:
             tau_abs = tau_env
             dtau_abs = dtau_env
 
-        # Secant stiffness
-        if self.use_secant_stiffness and s_abs > 1e-14:
+        # Tangent mode selection (Task D)
+        if self.tangent_mode == "secant_thesis" and s_abs > 1e-14:
             dtau_abs = tau_abs / s_abs
+        elif self.tangent_mode == "consistent":
+            pass  # Keep tangent as-is
+        else:
+            # Backward compatibility
+            if self.use_secant_stiffness and s_abs > 1e-14:
+                dtau_abs = tau_abs / s_abs
 
         return sign * float(tau_abs), float(dtau_abs)
 
@@ -1455,12 +1574,31 @@ def _bond_slip_assembly_python(
                     cols.append(dofs[b])
                     data.append(K_dowel * g_w[a] * g_w[b])
 
-        # Add steel axial stiffness if requested
+        # Add steel axial stiffness and internal force if requested
+        # CRITICAL FIX (Task A): Add missing steel axial internal force
         if steel_EA > 0.0:
             K_steel = steel_EA / L0
             Kxx_s = K_steel * cx * cx
             Kxy_s = K_steel * cx * cy
             Kyy_s = K_steel * cy * cy
+
+            # Compute steel axial displacement (du = u2 - u1)
+            du_steel_x = u_s2x - u_s1x
+            du_steel_y = u_s2y - u_s1y
+
+            # Axial elongation in bar direction: axial = du · c
+            axial = du_steel_x * cx + du_steel_y * cy
+
+            # Axial force: N = (EA/L) * axial
+            N_steel = K_steel * axial
+
+            # Internal force contribution: f = N * c at each node
+            # Node 1: f1 = -N * c (compression if pulled)
+            # Node 2: f2 = +N * c (tension if pulled)
+            f_bond[dof_s1x] += -N_steel * cx
+            f_bond[dof_s1y] += -N_steel * cy
+            f_bond[dof_s2x] += +N_steel * cx
+            f_bond[dof_s2y] += +N_steel * cy
 
             # Add 16 entries for full 4x4 block
             for ri, ci, val in [
