@@ -1,0 +1,342 @@
+# XFEM Bond-Cohesive Thesis Parity Implementation Status
+
+**Branch:** `claude/xfem-bond-cohesive-upgrade-tpdq9`
+**Date:** 2026-01-02
+**Objective:** Bring XFEM bond-slip and cohesive implementation to Orlando/Gutiérrez thesis parity
+
+---
+
+## ✅ COMPLETED TASKS
+
+### TASK 0: Fix Bond Yielding Reduction Tests ✅
+**Status:** Complete and committed (commit 6a6af32)
+
+**Changes:**
+1. **Fixed Test Logic** (`tests/test_bond_yielding_reduction.py`):
+   - Updated to use thesis-parity εu formula instead of old heuristic
+   - Old: `εu = 10 * εy` (arbitrary multiplier)
+   - New: `εu = εy + (fu - fy) / H` (bilinear hardening physics)
+   - With defaults (fu=1.5*fy, H=0.01*Es): εu ≈ 51*εy
+
+2. **Updated Documentation**:
+   - `PARTB_C_D_IMPLEMENTATION_SUMMARY.md`: Corrected εu formula and examples
+   - `TASK_COMPLETION_SUMMARY.md`: Updated formulas to match thesis
+
+3. **Fixed Python/Numba Parity** (`src/xfem_clean/bond_slip.py`):
+   - Added C1-continuous regularization to Python fallback (lines 1627-1653)
+   - Matches Numba kernel behavior for small slips (s < 0.5*s1)
+   - Prevents singular tangent at s=0, improves numerical conditioning
+   - **Result:** `test_bond_slip_python_fallback` now passes
+
+**Physics Impact:**
+- More realistic steel ductility (51× vs 10× yield strain)
+- More gradual bond degradation in post-yield regime
+- Better numerical stability for small-slip scenarios
+
+---
+
+## 📋 REMAINING TASKS
+
+### TASK 1: Implement Crack Deterioration Ωc with Geometry 🔴 **Complex**
+**Status:** Placeholder exists, needs geometry implementation
+
+**Current State:**
+- Thesis formula implemented in `BondSlipModelCode2010.compute_crack_deterioration()` (lines 319-373)
+- Placeholder function exists: `precompute_crack_context_for_bond()` (lines 1898-1986)
+- **Gap:** No real geometry intersection code
+
+**Required Implementation:**
+```python
+def precompute_crack_context_for_bond(
+    steel_segments: np.ndarray,  # Bond segment geometry
+    nodes: np.ndarray,           # Node coordinates [n_nodes, 2]
+    cohesive_segments: List,     # Crack geometry from cohesive zones
+    cohesive_states: List,       # Cohesive states with wmax and tn
+    cohesive_law: CohesiveLaw,   # For tn(wmax) evaluation
+) -> np.ndarray:  # [n_seg, 2]: [distance_to_crack, r=tn/ft]
+```
+
+**Algorithm (per thesis Eq. 3.60-3.61):**
+1. For each bond segment `i`:
+   - Get midpoint `p_i` and bar axis direction `c_i`
+   - Project onto bar axis line
+
+2. Find nearest "transverse crack":
+   - Check each cohesive segment for intersection with bar
+   - Crack is "transverse" if: (a) intersects bar line within tolerance,
+     (b) crack normal not parallel to bar axis
+   - Compute distance `x_i` along bar axis
+
+3. Extract cohesive state at crack:
+   - Get `wmax` from cohesive history at crack location
+   - Compute `tn = cohesive_law.cohesive_update(wmax, ...)[0]`
+   - Compute `r_i = clamp(tn / ft, 0, 1)`
+
+4. Compute Ωc:
+   ```python
+   φ = bond_law.d_bar  # Bar diameter
+   if x_i <= 2*φ:
+       Ωλ = 0.5 * x_i / φ
+       Ωc = Ωλ + r_i * (1 - Ωλ)
+   else:
+       Ωc = 1.0
+   ```
+
+**Integration Points:**
+- Call `precompute_crack_context_for_bond()` in analysis drivers before bond assembly
+- Pass `crack_context` array to `assemble_bond_slip(..., crack_context=...)`
+- Python path already uses it (line 1593-1616)
+- **TODO:** Extend Numba kernel to accept crack_context arrays
+
+**Tests Needed:**
+- Synthetic geometry: single bar + single transverse crack, known r → verify Ωc(x)
+- Parity: Python vs Numba with Ωc enabled
+
+---
+
+### TASK 2: Wire BondLayer Multi-Layer Reinforcement 🟡 **Medium**
+**Status:** BondLayer dataclass exists, not used by drivers
+
+**Current State:**
+- `BondLayer` dataclass defined (lines 40-113 in bond_slip.py)
+- `solver_interface.py` only uses `case.rebar_layers[0]`, ignores orientation
+- `build_bond_layers_from_case()` references wrong fields
+
+**Required Changes:**
+
+1. **Fix `build_bond_layers_from_case()`** (examples/gutierrez_thesis/solver_interface.py):
+   ```python
+   def build_bond_layers_from_case(case, nodes, elems, ...):
+       bond_layers = []
+       for rebar in case.rebar_layers:  # NOT case.reinforcement
+           if rebar.orientation_deg == 0:
+               # Bars along +x, placed at y = rebar.y_position
+               segments = generate_segments_horizontal(...)
+           elif rebar.orientation_deg == 90:
+               # Bars along +y, placed at x = rebar.x_position (or rebar.y_position as offset)
+               segments = generate_segments_vertical(...)
+
+           EA = rebar.E_s * (rebar.n_bars * np.pi * rebar.diameter**2 / 4)
+           perimeter = rebar.n_bars * np.pi * rebar.diameter
+
+           bond_layers.append(BondLayer(
+               segments=segments,
+               EA=EA,
+               perimeter=perimeter,
+               bond_law=rebar.bond_law,
+               segment_mask=rebar.segment_mask if hasattr(rebar, 'segment_mask') else None,
+               layer_id=f"rebar_layer_{len(bond_layers)}"
+           ))
+       return bond_layers
+   ```
+
+2. **Update `run_analysis_xfem()` and `run_analysis_xfem_multicrack()`**:
+   - Add `bond_layers: Optional[List[BondLayer]]` parameter
+   - If provided, loop over layers and call `assemble_bond_slip()` for each
+   - Accumulate forces/stiffness
+   - Keep legacy `bond_law` parameter for backward compatibility
+
+3. **Extend `RebarLayer` dataclass** (if needed):
+   - Add `x_position` field for 90° orientation
+   - Or: interpret `y_position` as "offset from left edge" when 90°
+
+**Tests Needed:**
+- Two-layer case → verify two BondLayers with correct EA/perimeter
+- Orientation=90 → segments aligned with +y axis
+- Parity: multi-layer result matches sum of individual layers
+
+---
+
+### TASK 3: Mixed-Mode Cohesive (Mode I + II) with Numba 🟡 **Medium**
+**Status:** Python implementation exists in `cohesive_laws.py`, not wired to solvers
+
+**Current State:**
+- `cohesive_update_mixed()` function implemented (lines 241-531 in cohesive_laws.py)
+- Supports Wells-type shear degradation with cross-coupling
+- **Gap:** Assembly code only uses Mode I (normal opening)
+
+**Required Changes:**
+
+1. **Update Assembly** (`assembly_single.py`, `multicrack.py`):
+   - Compute both `δn` (normal) and `δs` (tangential) jumps at each cohesive GP
+   - Define unit normal `n` and unit tangent `t = rotate90(n)`
+   - Build jump operators: `g_n` and `g_s` such that:
+     ```python
+     δn = g_n @ q  # Normal jump
+     δs = g_s @ q  # Tangential jump
+     ```
+   - Call `cohesive_update_mixed(law, δn, δs, state)` if `law.mode == "mixed"`
+   - Returns `t = [tn, ts]` and `K = [[∂tn/∂δn, ∂tn/∂δs], [∂ts/∂δn, ∂ts/∂δs]]`
+   - Assemble:
+     ```python
+     f_loc = g_n.T @ tn + g_s.T @ ts
+     K_loc = g_n.T @ K[0,0] @ g_n + g_n.T @ K[0,1] @ g_s + \
+             g_s.T @ K[1,0] @ g_n + g_s.T @ K[1,1] @ g_s
+     ```
+
+2. **Create Numba Kernel** (`src/xfem_clean/numba/kernels_cohesive_mixed.py`):
+   - Port `cohesive_update_mixed()` to Numba
+   - Inline Wells-type shear logic: `k_s(w) = k_s0 * exp(h_s * w)`
+   - Compute full 2×2 tangent matrix with cross-coupling
+   - **Challenge:** Numba doesn't support complex dataclasses; use plain arrays
+
+3. **Add Tests**:
+   - Pure Mode I (δs=0) → matches old results
+   - Pure shear (δn=0, δs≠0) → verify `ts = k_s0*δs` and cross-coupling `∂ts/∂δn`
+   - Cyclic closure: verify `κ = wmax` is used for shear stiffness
+
+---
+
+### TASK 4: Numba Implementation for Dowel Action 🟢 **Easy-Medium**
+**Status:** Python implementation exists, Numba path forces fallback
+
+**Current State:**
+- `DowelActionModel.sigma_and_tangent()` implemented (lines 882-961 in bond_slip.py)
+- Python assembly includes dowel (lines 1654-1685, 1723-1755)
+- Numba kernel forces Python fallback when `enable_dowel=True` (line 1252)
+
+**Required Changes:**
+
+1. **Extend Numba Kernel** (`kernels_bond_slip.py`):
+   - Add dowel parameters to `bond_params` array or pass separately
+   - Inside segment loop, after bond shear assembly:
+     ```python
+     if enable_dowel:
+         # Normal direction: n = (-cy, cx)
+         nx, ny = -cy, cx
+         # Opening: w = du · n
+         w = (u_s_mid - u_c_mid) · (nx, ny)
+         w_pos = max(w, 0.0)
+
+         # Brenna model (inline):
+         # σ(w) = ω̃(w) * k0 * w
+         # k0 = 599.96 * fc^0.75 / φ  (fc in MPa, φ in mm)
+         # ω̃ = [1.5 * (a + sqrt(d²q² + c²))]^(-4/3)
+         # q = 40*w*φ - b
+         # Constants: a=0.16, b=0.19, c=0.67, d=0.26
+
+         # ... compute σ and dσ/dw ...
+
+         # Assemble dowel force and stiffness (normal direction)
+         F_dowel = σ * perimeter * L0
+         K_dowel = (dσ/dw) * perimeter * L0 * (g_w ⊗ g_w)
+     ```
+
+2. **Preserve `segment_mask` Behavior**:
+   - Masked segments: skip bond shear AND dowel, but keep steel axial
+
+**Tests Needed:**
+- Dowel-only case (bond disabled): verify transverse stiffness
+- Numba vs Python parity with dowel enabled
+- `segment_mask` compatibility
+
+---
+
+### TASK 5: Efficient Physical Energy Dissipation Tracking 🔴 **Complex**
+**Status:** HHT energy tracking exists (`energy_hht.py`), no physical dissipation breakdown
+
+**Current State:**
+- `energy_hht.py` computes total energy balance
+- Tracks kinetic, bulk, damping, constraint work
+- **Gap:** No decomposition of physical dissipation (bulk vs cohesive vs bond)
+
+**Required Implementation:**
+
+1. **Bulk Dissipation** (if CDP or damage model used):
+   - During constitutive update, compute `ΔD_bulk = ∫ σ : dε_plastic`
+   - Accumulate per Gauss point, sum over mesh
+   - **Challenge:** Requires constitutive model to track dissipation
+
+2. **Cohesive Dissipation**:
+   - During cohesive update, compute `ΔD_coh = Σ (t_n * Δδ_n + t_s * Δδ_s)`
+   - Trapezoidal rule: `0.5 * (t_old + t_new) · Δδ`
+   - Accumulate over all cohesive GPs
+
+3. **Bond-Slip Dissipation**:
+   - During bond update, compute `ΔD_bond = Σ τ * Δs * perimeter * L`
+   - Trapezoidal rule over segments
+   - Include dowel work if enabled
+
+4. **Efficient Implementation**:
+   - **DO NOT** add extra global assemblies
+   - Compute dissipation **during** the final Newton assembly that updates states
+   - Return scalar accumulators from assembly functions
+   - Numba kernels: add optional energy output arrays
+
+**Tests Needed:**
+- Elastic, α=0, no damping → `ΔD_alg ≈ 0`
+- α<0 → `ΔD_alg >= 0` (numerical dissipation)
+- Bond-slip cycle → dissipation matches trapezoidal τ-Δs work
+
+---
+
+## 📊 SUMMARY
+
+| Task | Status | Difficulty | Priority | Est. Time |
+|------|--------|-----------|----------|-----------|
+| TASK 0: Fix tests & docs | ✅ Done | Easy | High | ~2h |
+| Python/Numba parity fix | ✅ Done | Medium | High | ~1h |
+| TASK 1: Crack Ωc geometry | 🔴 Not Started | Hard | Medium | ~8-12h |
+| TASK 2: BondLayer wiring | 🔴 Not Started | Medium | High | ~4-6h |
+| TASK 3: Mixed-mode cohesive | 🔴 Not Started | Medium | Medium | ~6-8h |
+| TASK 4: Dowel Numba | 🔴 Not Started | Easy | Low | ~3-4h |
+| TASK 5: Energy tracking | 🔴 Not Started | Hard | Low | ~8-10h |
+
+**Total Remaining Estimated Time:** 30-40 hours
+
+---
+
+## 🎯 RECOMMENDATIONS
+
+### Immediate Next Steps (if continuing):
+1. **TASK 2 (BondLayer)**: Highest ROI - enables multi-layer reinforcement, relatively straightforward
+2. **TASK 3 (Mixed-mode)**: Python code exists, just needs wiring + Numba port
+3. **TASK 4 (Dowel)**: Quick win, completes dowel action feature
+
+### Defer for Later:
+- **TASK 1 (Crack Ωc)**: Complex geometry code, lower priority without specific test cases
+- **TASK 5 (Energy)**: Important for validation but can use total energy initially
+
+### Testing Strategy:
+- Run `python -m pytest tests/ -v` after each task
+- Add task-specific tests in `tests/test_thesis_parity_*.py`
+- Verify backward compatibility: all existing tests must pass
+
+---
+
+## 📝 COMMIT LOG
+
+### Commit 6a6af32 (2026-01-02)
+```
+fix: Update bond yielding tests and docs for thesis parity εu calculation
+
+- Fixed test_bond_yielding_reduction.py to use bilinear hardening εu
+- Updated documentation (PARTB_C_D_IMPLEMENTATION_SUMMARY.md, TASK_COMPLETION_SUMMARY.md)
+- Added C1-continuous regularization to Python fallback for Numba parity
+- All tests pass with improved accuracy
+```
+
+---
+
+## 🔗 KEY FILES
+
+### Core Implementation:
+- `src/xfem_clean/bond_slip.py` - Bond-slip assembly (Python + Numba)
+- `src/xfem_clean/numba/kernels_bond_slip.py` - Numba kernel
+- `src/xfem_clean/cohesive_laws.py` - Cohesive laws (Mode I + mixed)
+- `src/xfem_clean/numba/kernels_cohesive.py` - Cohesive Numba (Mode I only)
+
+### Assembly:
+- `src/xfem_clean/xfem/assembly_single.py` - Single-crack solver
+- `src/xfem_clean/xfem/multicrack.py` - Multi-crack solver
+
+### Driver:
+- `examples/gutierrez_thesis/solver_interface.py` - Thesis cases driver
+
+### Tests:
+- `tests/test_bond_yielding_reduction.py` - Bond yielding Ωy tests ✅
+- `tests/test_bond_hang_repro.py` - Python/Numba parity ✅
+
+---
+
+**End of Status Report**
