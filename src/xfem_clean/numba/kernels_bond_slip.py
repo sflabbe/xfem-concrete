@@ -33,7 +33,7 @@ def bond_slip_assembly_kernel(
     u_total: np.ndarray,        # [ndof_total] displacement vector
     segs: np.ndarray,           # [n_seg, 5]: [n1, n2, L0, cx, cy]
     steel_dof_map: np.ndarray,  # [nnode, 2]: node → steel DOF indices
-    bond_params: np.ndarray,    # [tau_max, s1, s2, s3, tau_f, alpha, perimeter, dtau_max, gamma]
+    bond_params: np.ndarray,    # [tau_max, s1, s2, s3, tau_f, alpha, perimeter, dtau_max, gamma, f_y, E_s, enable_omega_y]
     s_max_hist: np.ndarray,     # [n_seg] history
     steel_EA: float = 0.0,      # E * A for steel (if > 0, adds axial stiffness)
     segment_mask: np.ndarray = None,  # [n_seg] bool: True = bond disabled for segment
@@ -53,7 +53,7 @@ def bond_slip_assembly_kernel(
         Mapping [nnode, 2]: node → (dof_x, dof_y) for steel
         Use -1 for nodes without steel DOFs
     bond_params : np.ndarray
-        Bond law parameters [9]:
+        Bond law parameters [12] (PART B: extended for yielding reduction):
         [0] tau_max: peak bond stress [Pa]
         [1] s1: slip at peak stress [m]
         [2] s2: slip at start of plateau end [m]
@@ -63,6 +63,9 @@ def bond_slip_assembly_kernel(
         [6] perimeter: rebar perimeter [m] (π * d_bar for circular)
         [7] dtau_max: tangent cap [Pa/m] (use 1e20 for no cap)
         [8] gamma: continuation parameter [0, 1] (0=no bond, 1=full bond)
+        [9] f_y: steel yield stress [Pa] (for Ωy, Part B)
+        [10] E_s: steel Young's modulus [Pa] (for Ωy, Part B)
+        [11] enable_omega_y: 1.0 to enable yielding reduction, 0.0 to disable
     s_max_hist : np.ndarray
         Maximum historical slip [n_seg]
     steel_EA : float, optional
@@ -90,6 +93,7 @@ def bond_slip_assembly_kernel(
       singular tangent at s=0 (C1-continuous transition).
     * PART A FIX: Masked segments (segment_mask[i] == True) skip bond shear/dowel
       but ALWAYS include steel axial stiffness and internal force.
+    * PART B: Steel yielding reduction Ωy(eps_s) applied when enable_omega_y=1.
     """
     ndof = u_total.shape[0]
     n_seg = segs.shape[0]
@@ -101,7 +105,7 @@ def bond_slip_assembly_kernel(
     data = np.empty(max_entries, dtype=np.float64)
     s_current = np.zeros(n_seg, dtype=np.float64)
 
-    # Unpack bond parameters
+    # Unpack bond parameters (PART B: extended for yielding reduction)
     tau_max = bond_params[0]
     s1 = bond_params[1]
     s2 = bond_params[2]
@@ -111,6 +115,10 @@ def bond_slip_assembly_kernel(
     perimeter = bond_params[6]  # π * d_bar
     dtau_max = bond_params[7] if bond_params.shape[0] > 7 else 1e20  # Tangent cap
     gamma = bond_params[8] if bond_params.shape[0] > 8 else 1.0  # Continuation parameter
+    # PART B: Yielding reduction parameters
+    f_y = bond_params[9] if bond_params.shape[0] > 9 else 500e6  # Default: 500 MPa
+    E_s = bond_params[10] if bond_params.shape[0] > 10 else 200e9  # Default: 200 GPa
+    enable_omega_y = bond_params[11] if bond_params.shape[0] > 11 else 0.0  # Default: disabled
 
     entry_idx = 0
 
@@ -229,6 +237,38 @@ def bond_slip_assembly_kernel(
         s = du_x * cx + du_y * cy
         s_current[i] = s
 
+        # =====================================================================
+        # PART B: Compute steel strain (eps_s) for yielding reduction
+        # =====================================================================
+        eps_s = 0.0
+        if steel_EA > 0.0 and L0 > 1e-14:
+            # Steel axial displacement (already computed for steel element above)
+            # axial = (u_s2 - u_s1) · c
+            # eps_s = axial / L0
+            du_steel_x = u_s2x - u_s1x
+            du_steel_y = u_s2y - u_s1y
+            axial_displ = du_steel_x * cx + du_steel_y * cy
+            eps_s = axial_displ / L0
+
+        # =====================================================================
+        # PART B: Compute yielding reduction factor Ωy(eps_s)
+        # =====================================================================
+        omega_y = 1.0  # Default: no reduction
+        if enable_omega_y > 0.5 and E_s > 1e-9:  # Check if enabled
+            eps_y = f_y / E_s  # Yield strain
+            eps_u = 10.0 * eps_y  # Ultimate strain (typical for steel)
+
+            if abs(eps_s) > eps_y:
+                # Steel has yielded: apply reduction per Eq. 3.57-3.58
+                xi = (abs(eps_s) - eps_y) / max(1e-30, (eps_u - eps_y))
+                xi = min(max(xi, 0.0), 1.0)  # Clamp to [0, 1]
+                # Eq. 3.58: Ωy = 1 - 0.85*(1 - exp(-5*xi))
+                omega_y = 1.0 - 0.85 * (1.0 - np.exp(-5.0 * xi))
+                omega_y = max(0.15, min(1.0, omega_y))  # Clamp to [0.15, 1.0]
+
+        # TODO PART B: Crack deterioration factor Ωc (requires crack intersection tracking)
+        omega_crack = 1.0  # Placeholder: no deterioration
+
         # Bond stress (with history)
         s_abs = abs(s)
         s_max = max(s_max_hist[i], s_abs)
@@ -296,6 +336,13 @@ def bond_slip_assembly_kernel(
 
         tau = sign * tau_abs
         dtau_ds = dtau_abs
+
+        # =====================================================================
+        # PART B: Apply reduction factors (Ωy * Ωc)
+        # =====================================================================
+        omega_total = omega_y * omega_crack
+        tau = tau * omega_total
+        dtau_ds = dtau_ds * omega_total
 
         # Tangent capping (numerical stabilization)
         # NOTE: dtau_max passed as parameter; set to large value (1e20) if no capping desired

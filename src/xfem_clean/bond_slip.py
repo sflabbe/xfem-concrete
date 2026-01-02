@@ -526,7 +526,11 @@ class CustomBondSlipLaw:
         return float(tau), float(dtau_ds)
 
     def tau_and_tangent(
-        self, s: float, s_max_history: float
+        self,
+        s: float,
+        s_max_history: float,
+        eps_s: float = 0.0,  # PART B: Steel strain (for compatibility)
+        omega_crack: float = 1.0,  # PART B: Crack deterioration (for compatibility)
     ) -> Tuple[float, float]:
         """Compute bond stress and tangent with unloading/reloading.
 
@@ -536,6 +540,10 @@ class CustomBondSlipLaw:
             Current slip (signed)
         s_max_history : float
             Maximum absolute slip in history
+        eps_s : float, optional
+            Steel axial strain (ignored for CustomBondSlipLaw, Part B compatibility)
+        omega_crack : float, optional
+            Crack deterioration factor (ignored for CustomBondSlipLaw, Part B compatibility)
 
         Returns
         -------
@@ -543,6 +551,11 @@ class CustomBondSlipLaw:
             Bond stress (signed)
         dtau_ds : float
             Tangent or secant stiffness
+
+        Notes
+        -----
+        PART B: eps_s and omega_crack are accepted for API compatibility but not used
+        by this class. Use BondSlipModelCode2010 for yielding/crack reduction features.
         """
         s_abs = abs(s)
         sign = 1.0 if s >= 0 else -1.0
@@ -643,9 +656,18 @@ class BilinearBondLaw:
         return float(tau), float(dtau_ds)
 
     def tau_and_tangent(
-        self, s: float, s_max_history: float
+        self,
+        s: float,
+        s_max_history: float,
+        eps_s: float = 0.0,  # PART B: Steel strain (for compatibility)
+        omega_crack: float = 1.0,  # PART B: Crack deterioration (for compatibility)
     ) -> Tuple[float, float]:
-        """Compute bond stress and tangent with unloading/reloading."""
+        """Compute bond stress and tangent with unloading/reloading.
+
+        Notes
+        -----
+        PART B: eps_s and omega_crack are accepted for API compatibility but not used.
+        """
         s_abs = abs(s)
         sign = 1.0 if s >= 0 else -1.0
 
@@ -749,9 +771,18 @@ class BanholzerBondLaw:
         return float(tau), float(dtau_ds)
 
     def tau_and_tangent(
-        self, s: float, s_max_history: float
+        self,
+        s: float,
+        s_max_history: float,
+        eps_s: float = 0.0,  # PART B: Steel strain (for compatibility)
+        omega_crack: float = 1.0,  # PART B: Crack deterioration (for compatibility)
     ) -> Tuple[float, float]:
-        """Compute bond stress and tangent with unloading/reloading."""
+        """Compute bond stress and tangent with unloading/reloading.
+
+        Notes
+        -----
+        PART B: eps_s and omega_crack are accepted for API compatibility but not used.
+        """
         s_abs = abs(s)
         sign = 1.0 if s >= 0 else -1.0
 
@@ -1207,6 +1238,11 @@ def assemble_bond_slip(
             # For now, use a large value (no capping); caller can override via bond_law
             dtau_max = getattr(bond_law, 'dtau_max', 1e20)  # Default: no cap
 
+            # PART B: Get yielding reduction parameters from bond law
+            f_y = getattr(bond_law, 'f_y', 500e6)  # Default: 500 MPa
+            E_s = getattr(bond_law, 'E_s', 200e9)  # Default: 200 GPa
+            enable_omega_y = 1.0 if getattr(bond_law, 'enable_yielding_reduction', False) else 0.0
+
             bond_params = np.array([
                 bond_law.tau_max,
                 bond_law.s1,
@@ -1217,6 +1253,9 @@ def assemble_bond_slip(
                 perimeter,
                 dtau_max,
                 bond_gamma,  # BLOQUE 3: Continuation parameter
+                f_y,  # PART B: Steel yield stress
+                E_s,  # PART B: Steel Young's modulus
+                enable_omega_y,  # PART B: Enable yielding reduction flag
             ], dtype=float)
         except AttributeError:
             # Bond law doesn't have required attributes (e.g., BilinearBondLaw, BanholzerBondLaw)
@@ -1491,6 +1530,26 @@ def _bond_slip_assembly_python(
         # Bond stress
         s_max = max(bond_states.s_max[i], abs(s))
 
+        # =====================================================================
+        # PART B: Compute steel strain (eps_s) for yielding reduction
+        # =====================================================================
+        eps_s = 0.0
+        if steel_EA > 0.0 and L0 > 1e-14:
+            # Steel axial displacement (already computed above for steel element)
+            # axial = (u_s2 - u_s1) · c
+            # eps_s = axial / L0
+            du_steel_x = u_s2x - u_s1x
+            du_steel_y = u_s2y - u_s1y
+            axial = du_steel_x * cx + du_steel_y * cy
+            eps_s = axial / L0
+
+        # =====================================================================
+        # PART B: Compute crack deterioration factor (omega_crack)
+        # =====================================================================
+        # TODO: Implement crack intersection tracking for full Ωc computation
+        # For now, default to 1.0 (no deterioration) to enable Ωy testing
+        omega_crack = 1.0
+
         # BLOQUE C: Optional slip smoothing (regularization near s≈0)
         s_eval = s
         if bond_s_eps > 0.0:
@@ -1500,7 +1559,8 @@ def _bond_slip_assembly_python(
             s_eff = math.sqrt(s_abs**2 + bond_s_eps**2)
             s_eval = s_sign * s_eff
 
-        tau, dtau_ds = bond_law.tau_and_tangent(s_eval, s_max)
+        # PART B: Pass eps_s and omega_crack to bond law
+        tau, dtau_ds = bond_law.tau_and_tangent(s_eval, s_max, eps_s=eps_s, omega_crack=omega_crack)
 
         # BLOQUE C: Optional tangent capping (prevent excessive stiffness)
         if bond_k_cap is not None and dtau_ds > bond_k_cap:
