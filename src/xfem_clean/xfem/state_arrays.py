@@ -226,6 +226,30 @@ class BulkStateArrays:
     def zeros(cls, nelem: int, max_ip: int) -> "BulkStateArrays":
         return cls(nelem=int(nelem), max_ip=int(max_ip))
 
+    @classmethod
+    def from_default(cls, nelem: int, ngp: int) -> "BulkStateArrays":
+        """Backward-compatible constructor for default per-element integration point state arrays.
+
+        Equivalent to zeros(nelem, ngp) but marks all integration points active by default.
+        This is the expected initialization for tests and typical usage where all IPs
+        are immediately active.
+
+        Parameters
+        ----------
+        nelem : int
+            Number of elements
+        ngp : int
+            Number of integration points per element
+
+        Returns
+        -------
+        BulkStateArrays
+            New instance with all integration points marked active
+        """
+        obj = cls(nelem=int(nelem), max_ip=int(ngp))
+        obj.active[:, :] = True
+        return obj
+
     def copy(self) -> "BulkStateArrays":
         other = BulkStateArrays(self.nelem, self.max_ip)
         for name in (

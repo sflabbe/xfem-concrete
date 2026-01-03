@@ -155,7 +155,7 @@ def test_drucker_prager_dissipation():
     q_np1[dofs.std[3, 1]] = -0.001
 
     # Assemble at n (initial state)
-    K_n, f_n, coh_n, mp_states_mid, aux_n, _, _, _ = assemble_xfem_system(
+    K_n, f_n, coh_n, mp_patch_n, aux_n, _, _, _ = assemble_xfem_system(
         nodes=nodes,
         elems=elems,
         dofs=dofs,
@@ -172,6 +172,10 @@ def test_drucker_prager_dissipation():
         bulk_params=bulk_params,
     )
 
+    # Apply patch to get updated state at n
+    mp_states_at_n = mp_states_n.copy()
+    mp_patch_n.apply_to(mp_states_at_n)
+
     # Assemble at n+1 with dissipation tracking
     K_np1, f_np1, coh_np1, mp_states_np1, aux_np1, _, _, _ = assemble_xfem_system(
         nodes=nodes,
@@ -184,7 +188,7 @@ def test_drucker_prager_dissipation():
         law=law,
         coh_states_comm={},
         tip_enr_radius=0.3,
-        mp_states_comm=mp_states_mid,
+        mp_states_comm=mp_states_at_n,
         use_numba=True,
         bulk_kind=2,  # Drucker-Prager
         bulk_params=bulk_params,
