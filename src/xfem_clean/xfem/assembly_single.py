@@ -72,6 +72,9 @@ def assemble_xfem_system(
     # PART D: Multi-layer bond-slip support
     bond_layers: Optional[list] = None,  # List[BondLayer] for multi-layer (steel + FRP)
     bond_states_list_comm: Optional[list] = None,  # List of bond state arrays (one per layer)
+    # TASK 5: Physical dissipation tracking
+    q_prev: Optional[np.ndarray] = None,  # Displacement at previous time step (for dissipation)
+    compute_dissipation: bool = False,  # Enable physical dissipation computation
 ) -> Tuple[
     sp.csr_matrix,
     np.ndarray,
@@ -134,6 +137,11 @@ def assemble_xfem_system(
 
     coh_wgt = []
     coh_delta_max = []
+
+    # TASK 5: Physical dissipation accumulators
+    D_coh_inc = 0.0  # Cohesive dissipation increment [J]
+    D_bond_inc = 0.0  # Bond-slip dissipation increment [J]
+    D_bulk_plastic_inc = 0.0  # Bulk plastic dissipation increment [J]
 
     crack_active = bool(crack.active)
     p0 = crack.p0() if crack_active else None
@@ -671,6 +679,37 @@ def assemble_xfem_system(
                             coh_wgt.append(float(wline))
                             coh_delta_max.append(float(dm_for_energy))
 
+                            # TASK 5: Cohesive dissipation tracking
+                            if compute_dissipation and q_prev is not None:
+                                if use_mixed_mode:
+                                    # Compute old openings from q_prev
+                                    delta_n_old = float(np.dot(gvec_n, q_prev[edofs]))
+                                    delta_t_old = float(np.dot(gvec_t, q_prev[edofs]))
+
+                                    # Get old traction by evaluating law at old state
+                                    # NOTE: st is the committed state at time n, so we evaluate at old opening
+                                    t_vec_old, _, _ = cohesive_update_mixed(law, delta_n_old, delta_t_old, st, visc_damp=0.0)
+                                    t_n_old = t_vec_old[0]
+                                    t_t_old = t_vec_old[1]
+
+                                    # Trapezoidal rule for dissipation
+                                    # ΔD = 0.5 * (t_old + t_new) · Δδ
+                                    d_delta_n = delta_n - delta_n_old
+                                    d_delta_t = delta_t - delta_t_old
+                                    diss_local = 0.5 * ((t_n_old + t_n) * d_delta_n + (t_t_old + t_t) * d_delta_t) * wline
+                                    D_coh_inc += diss_local
+                                else:
+                                    # Mode I only
+                                    delta_old = float(np.dot(gvec_n, q_prev[edofs]))
+
+                                    # Get old traction
+                                    T_old, _, _ = cohesive_update(law, delta_old, st, visc_damp=0.0)
+
+                                    # Trapezoidal dissipation
+                                    d_delta = delta - delta_old
+                                    diss_local = 0.5 * (T_old + T) * d_delta * wline
+                                    D_coh_inc += diss_local
+
                             # Assemble force and stiffness
                             if use_mixed_mode:
                                 # Mixed-mode assembly
@@ -846,5 +885,9 @@ def assemble_xfem_system(
         "gp_weight": np.asarray(gp_wgt, dtype=float),
         "coh_weight": np.asarray(coh_wgt, dtype=float),
         "coh_delta_max": np.asarray(coh_delta_max, dtype=float),
+        # TASK 5: Physical dissipation (only meaningful when compute_dissipation=True)
+        "D_coh_inc": float(D_coh_inc),
+        "D_bond_inc": float(D_bond_inc),
+        "D_bulk_plastic_inc": float(D_bulk_plastic_inc),
     }
     return K, fint, coh_updates, mp_updates, aux, bond_updates, reinforcement_updates, contact_updates
