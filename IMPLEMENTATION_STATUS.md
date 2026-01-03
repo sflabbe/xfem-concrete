@@ -232,33 +232,31 @@ def precompute_crack_context_for_bond(
 - ✅ Formula validated: total dissipation matches Gf within 0.056%
 - ✅ Supports mixed-mode: `ΔD = 0.5*[(tn_old + tn_new)·Δδn + (tt_old + tt_new)·Δδt]`
 
-**Remaining Implementation:**
+**Implementation Guide**: See `TASK5_DISSIPATION_GUIDE.md` for complete methodology
 
-1. **Bulk Dissipation** (if CDP or damage model used):
-   - During constitutive update, compute `ΔD_bulk = ∫ σ : dε_plastic`
-   - Accumulate per Gauss point, sum over mesh
-   - **Challenge:** Requires constitutive model to track dissipation
+**Remaining Components** (~8-12 hours):
 
-2. **Cohesive Dissipation**:
-   - During cohesive update, compute `ΔD_coh = Σ (t_n * Δδ_n + t_s * Δδ_s)`
-   - Trapezoidal rule: `0.5 * (t_old + t_new) · Δδ`
-   - Accumulate over all cohesive GPs
+1. **Bond-Slip Dissipation** (~2-3h):
+   - Add `u_total_prev` and `compute_dissipation` parameters to `assemble_bond_slip()`
+   - Trapezoidal formula: `ΔD = Σ 0.5*(τ_old + τ_new)*(s_new - s_old)*perimeter*L_gp`
+   - Return `D_bond_inc` from assembly
+   - Test: cyclic loading should show hysteresis dissipation
 
-3. **Bond-Slip Dissipation**:
-   - During bond update, compute `ΔD_bond = Σ τ * Δs * perimeter * L`
-   - Trapezoidal rule over segments
-   - Include dowel work if enabled
+2. **Bulk Plastic Dissipation** (~3-4h):
+   - Modify `bulk_internal_force()` to track plastic work
+   - Compute: `ΔD = σ : Δε_plastic * detJ * w_gp * thickness`
+   - For elastic material: `Δε_p = 0` → `D_bulk = 0` ✓
+   - Test: plastic compression/damage should dissipate
 
-4. **Efficient Implementation**:
-   - **DO NOT** add extra global assemblies
-   - Compute dissipation **during** the final Newton assembly that updates states
-   - Return scalar accumulators from assembly functions
-   - Numba kernels: add optional energy output arrays
+3. **Energy Framework Integration** (~1-2h):
+   - Extend `StepEnergy` with `D_coh_inc`, `D_bond_inc`, `D_bulk_inc`
+   - Decompose: `ΔD_numerical = ΔD_alg - ΔD_physical`
+   - Pass `D_physical` to `compute_step_energy()`
 
-**Tests Needed:**
-- Elastic, α=0, no damping → `ΔD_alg ≈ 0`
-- α<0 → `ΔD_alg >= 0` (numerical dissipation)
-- Bond-slip cycle → dissipation matches trapezoidal τ-Δs work
+4. **Comprehensive Testing** (~2-3h):
+   - Energy conservation (elastic, α=0): `|ΔD_numerical| < 1e-6`
+   - Physical dissipation vs analytical: `D_coh ≈ Gf * crack_area`
+   - HHT-α algorithmic damping validation
 
 ---
 
