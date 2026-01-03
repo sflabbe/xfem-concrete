@@ -8,7 +8,7 @@ from typing import Dict, Optional, Tuple, Union
 import numpy as np
 import scipy.sparse as sp
 
-from xfem_clean.cohesive_laws import CohesiveLaw, CohesiveState, cohesive_update
+from xfem_clean.cohesive_laws import CohesiveLaw, CohesiveState, cohesive_update, cohesive_update_mixed
 from xfem_clean.numba.kernels_cohesive import cohesive_update_values_numba
 from xfem_clean.numba.kernels_bulk import (
     elastic_integrate_plane_stress_numba,
@@ -72,6 +72,9 @@ def assemble_xfem_system(
     # PART D: Multi-layer bond-slip support
     bond_layers: Optional[list] = None,  # List[BondLayer] for multi-layer (steel + FRP)
     bond_states_list_comm: Optional[list] = None,  # List of bond state arrays (one per layer)
+    # TASK 5: Physical dissipation tracking
+    q_prev: Optional[np.ndarray] = None,  # Displacement at previous time step (for dissipation)
+    compute_dissipation: bool = False,  # Enable physical dissipation computation
 ) -> Tuple[
     sp.csr_matrix,
     np.ndarray,
@@ -134,6 +137,11 @@ def assemble_xfem_system(
 
     coh_wgt = []
     coh_delta_max = []
+
+    # TASK 5: Physical dissipation accumulators
+    D_coh_inc = 0.0  # Cohesive dissipation increment [J]
+    D_bond_inc = 0.0  # Bond-slip dissipation increment [J]
+    D_bulk_plastic_inc = 0.0  # Bulk plastic dissipation increment [J]
 
     crack_active = bool(crack.active)
     p0 = crack.p0() if crack_active else None
@@ -552,6 +560,13 @@ def assemble_xfem_system(
                 Ls = float(np.linalg.norm(v))
                 if Ls > 1e-12:
                     nvec = crack.nvec()
+                    # Tangent vector (90° rotation of normal)
+                    tvec = np.array([-nvec[1], nvec[0]], dtype=float)
+
+                    # Check if mixed-mode cohesive is enabled
+                    use_mixed_mode = (hasattr(law, 'mode') and
+                                     law.mode is not None and
+                                     law.mode.lower() == "mixed")
 
                     for igp, shat in enumerate(g):
                         p = 0.5 * (1.0 - shat) * qA + 0.5 * (1.0 + shat) * qB
@@ -569,65 +584,148 @@ def assemble_xfem_system(
                         dF_jump = Fp - Fm
 
                         edofs = []
-                        gvec = []
+                        gvec_n = []  # Normal jump operator
+                        gvec_t = []  # Tangential jump operator (for mixed-mode)
 
+                        # Build jump operators for normal direction
                         for a in range(4):
                             n = int(conn[a])
                             if dofs.H[n, 0] >= 0:
                                 edofs.append(int(dofs.H[n, 0]))
-                                gvec.append(2.0 * float(N[a]) * float(nvec[0]))
+                                gvec_n.append(2.0 * float(N[a]) * float(nvec[0]))
+                                if use_mixed_mode:
+                                    gvec_t.append(2.0 * float(N[a]) * float(tvec[0]))
                             if dofs.H[n, 1] >= 0:
                                 edofs.append(int(dofs.H[n, 1]))
-                                gvec.append(2.0 * float(N[a]) * float(nvec[1]))
+                                gvec_n.append(2.0 * float(N[a]) * float(nvec[1]))
+                                if use_mixed_mode:
+                                    gvec_t.append(2.0 * float(N[a]) * float(tvec[1]))
 
                         for a in range(4):
                             n = int(conn[a])
                             if dofs.tip[n, 0, 0] >= 0:
                                 for k in range(4):
                                     edofs.append(int(dofs.tip[n, k, 0]))
-                                    gvec.append(float(N[a]) * float(dF_jump[k]) * float(nvec[0]))
+                                    gvec_n.append(float(N[a]) * float(dF_jump[k]) * float(nvec[0]))
+                                    if use_mixed_mode:
+                                        gvec_t.append(float(N[a]) * float(dF_jump[k]) * float(tvec[0]))
                                     edofs.append(int(dofs.tip[n, k, 1]))
-                                    gvec.append(float(N[a]) * float(dF_jump[k]) * float(nvec[1]))
+                                    gvec_n.append(float(N[a]) * float(dF_jump[k]) * float(nvec[1]))
+                                    if use_mixed_mode:
+                                        gvec_t.append(float(N[a]) * float(dF_jump[k]) * float(tvec[1]))
 
                         if len(edofs) > 0:
                             edofs = np.asarray(edofs, dtype=int)
-                            gvec = np.asarray(gvec, dtype=float)
-                            delta = float(np.dot(gvec, q[edofs]))
+                            gvec_n = np.asarray(gvec_n, dtype=float)
 
-                            # --- Cohesive state update (Phase 2: value-kernel option) ---
-                            if use_numba and (coh_params is not None) and use_coh_arrays:
-                                assert isinstance(coh_states_comm, CohesiveStateArrays)
-                                dm_old, dmg_old = coh_states_comm.get_values(e, igp, k=0)
-                                T, ksec, dm_new, dmg_new = cohesive_update_values_numba(
-                                    delta,
-                                    dm_old,
-                                    dmg_old,
-                                    coh_params,
-                                    visc_damp=float(visc_damp),
-                                )
-                                assert isinstance(coh_updates, CohesiveStatePatch)
-                                coh_updates.add_values(0, e, igp, delta_max=dm_new, damage=dmg_new)
-                                dm_for_energy = float(dm_new)
+                            if use_mixed_mode:
+                                gvec_t = np.asarray(gvec_t, dtype=float)
+                                delta_n = float(np.dot(gvec_n, q[edofs]))
+                                delta_t = float(np.dot(gvec_t, q[edofs]))
                             else:
+                                # Mode I only: use normal jump
+                                delta = float(np.dot(gvec_n, q[edofs]))
+
+                            # --- Cohesive state update ---
+                            if use_mixed_mode:
+                                # Mixed-mode cohesive (Mode I + Mode II)
+                                # NOTE: Numba kernel for mixed-mode not yet implemented
                                 if use_coh_arrays:
                                     assert isinstance(coh_states_comm, CohesiveStateArrays)
                                     st = coh_states_comm.get_state(e, igp, k=0)
                                 else:
                                     st = coh_states_comm.get((e, igp), CohesiveState())
-                                T, ksec, st2 = cohesive_update(law, delta, st, visc_damp=visc_damp)
+
+                                t_vec, K_mat, st2 = cohesive_update_mixed(law, delta_n, delta_t, st, visc_damp=visc_damp)
+                                t_n = t_vec[0]
+                                t_t = t_vec[1]
+                                # K_mat is 2×2: [[∂tn/∂δn, ∂tn/∂δt], [∂tt/∂δn, ∂tt/∂δt]]
+
                                 if isinstance(coh_updates, CohesiveStatePatch):
                                     coh_updates.add(0, e, igp, st2)
                                 else:
                                     coh_updates[(e, igp)] = st2
                                 dm_for_energy = float(st2.delta_max)
+                            else:
+                                # Mode I only (backward compatible)
+                                if use_numba and (coh_params is not None) and use_coh_arrays:
+                                    assert isinstance(coh_states_comm, CohesiveStateArrays)
+                                    dm_old, dmg_old = coh_states_comm.get_values(e, igp, k=0)
+                                    T, ksec, dm_new, dmg_new = cohesive_update_values_numba(
+                                        delta,
+                                        dm_old,
+                                        dmg_old,
+                                        coh_params,
+                                        visc_damp=float(visc_damp),
+                                    )
+                                    assert isinstance(coh_updates, CohesiveStatePatch)
+                                    coh_updates.add_values(0, e, igp, delta_max=dm_new, damage=dmg_new)
+                                    dm_for_energy = float(dm_new)
+                                else:
+                                    if use_coh_arrays:
+                                        assert isinstance(coh_states_comm, CohesiveStateArrays)
+                                        st = coh_states_comm.get_state(e, igp, k=0)
+                                    else:
+                                        st = coh_states_comm.get((e, igp), CohesiveState())
+                                    T, ksec, st2 = cohesive_update(law, delta, st, visc_damp=visc_damp)
+                                    if isinstance(coh_updates, CohesiveStatePatch):
+                                        coh_updates.add(0, e, igp, st2)
+                                    else:
+                                        coh_updates[(e, igp)] = st2
+                                    dm_for_energy = float(st2.delta_max)
 
                             # Save cohesive quadrature info for energy accounting.
                             wline = float(w[igp]) * float(jac) * float(thickness)
                             coh_wgt.append(float(wline))
                             coh_delta_max.append(float(dm_for_energy))
 
-                            fint[edofs] += gvec * T * wline
-                            Kc = np.outer(gvec, gvec) * (ksec * wline)
+                            # TASK 5: Cohesive dissipation tracking
+                            if compute_dissipation and q_prev is not None:
+                                if use_mixed_mode:
+                                    # Compute old openings from q_prev
+                                    delta_n_old = float(np.dot(gvec_n, q_prev[edofs]))
+                                    delta_t_old = float(np.dot(gvec_t, q_prev[edofs]))
+
+                                    # Get old traction by evaluating law at old state
+                                    # NOTE: st is the committed state at time n, so we evaluate at old opening
+                                    t_vec_old, _, _ = cohesive_update_mixed(law, delta_n_old, delta_t_old, st, visc_damp=0.0)
+                                    t_n_old = t_vec_old[0]
+                                    t_t_old = t_vec_old[1]
+
+                                    # Trapezoidal rule for dissipation
+                                    # ΔD = 0.5 * (t_old + t_new) · Δδ
+                                    d_delta_n = delta_n - delta_n_old
+                                    d_delta_t = delta_t - delta_t_old
+                                    diss_local = 0.5 * ((t_n_old + t_n) * d_delta_n + (t_t_old + t_t) * d_delta_t) * wline
+                                    D_coh_inc += diss_local
+                                else:
+                                    # Mode I only
+                                    delta_old = float(np.dot(gvec_n, q_prev[edofs]))
+
+                                    # Get old traction
+                                    T_old, _, _ = cohesive_update(law, delta_old, st, visc_damp=0.0)
+
+                                    # Trapezoidal dissipation
+                                    d_delta = delta - delta_old
+                                    diss_local = 0.5 * (T_old + T) * d_delta * wline
+                                    D_coh_inc += diss_local
+
+                            # Assemble force and stiffness
+                            if use_mixed_mode:
+                                # Mixed-mode assembly
+                                fint[edofs] += (gvec_n * t_n + gvec_t * t_t) * wline
+
+                                # Stiffness matrix with cross-coupling
+                                K_nn = np.outer(gvec_n, gvec_n) * (K_mat[0, 0] * wline)
+                                K_nt = np.outer(gvec_n, gvec_t) * (K_mat[0, 1] * wline)
+                                K_tn = np.outer(gvec_t, gvec_n) * (K_mat[1, 0] * wline)
+                                K_tt = np.outer(gvec_t, gvec_t) * (K_mat[1, 1] * wline)
+                                Kc = K_nn + K_nt + K_tn + K_tt
+                            else:
+                                # Mode I only (backward compatible)
+                                fint[edofs] += gvec_n * T * wline
+                                Kc = np.outer(gvec_n, gvec_n) * (ksec * wline)
+
                             rr = np.repeat(edofs, len(edofs))
                             cc = np.tile(edofs, len(edofs))
                             rows.extend(rr.tolist())
@@ -787,5 +885,9 @@ def assemble_xfem_system(
         "gp_weight": np.asarray(gp_wgt, dtype=float),
         "coh_weight": np.asarray(coh_wgt, dtype=float),
         "coh_delta_max": np.asarray(coh_delta_max, dtype=float),
+        # TASK 5: Physical dissipation (only meaningful when compute_dissipation=True)
+        "D_coh_inc": float(D_coh_inc),
+        "D_bond_inc": float(D_bond_inc),
+        "D_bulk_plastic_inc": float(D_bulk_plastic_inc),
     }
     return K, fint, coh_updates, mp_updates, aux, bond_updates, reinforcement_updates, contact_updates

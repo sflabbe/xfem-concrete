@@ -96,7 +96,14 @@ def test_yielding_reduction_yielded():
     )
 
     # Compute expected Ωy manually (Eq. 3.58)
-    eps_u = 10.0 * eps_y
+    # THESIS PARITY: Compute εu using the same formula as the code
+    # εu = εy + (fu - fy) / H (bilinear hardening)
+    f_u = bond_law.f_u  # Defaults to 1.5 * f_y
+    H = bond_law.H  # Defaults to 0.01 * E_s
+    if H > 0.0 and f_u > bond_law.f_y:
+        eps_u = eps_y + (f_u - bond_law.f_y) / H
+    else:
+        eps_u = f_u / bond_law.E_s
     xi = (eps_s_yielded - eps_y) / (eps_u - eps_y)
     omega_y_expected = 1.0 - 0.85 * (1.0 - np.exp(-5.0 * xi))
 
@@ -180,7 +187,15 @@ def test_yielding_reduction_formula():
     )
 
     eps_y = bond_law.f_y / bond_law.E_s
-    eps_u = 10.0 * eps_y
+
+    # THESIS PARITY: Compute εu using the same formula as the code
+    # εu = εy + (fu - fy) / H (bilinear hardening)
+    f_u = bond_law.f_u  # Defaults to 1.5 * f_y
+    H = bond_law.H  # Defaults to 0.01 * E_s
+    if H > 0.0 and f_u > bond_law.f_y:
+        eps_u = eps_y + (f_u - bond_law.f_y) / H
+    else:
+        eps_u = f_u / bond_law.E_s
 
     # Test at various strain levels
     eps_s_values = np.array([
