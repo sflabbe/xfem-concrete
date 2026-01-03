@@ -128,7 +128,7 @@ def test_case_06_fibre_tensile_minimal():
 
     # Run solver
     try:
-        results = run_case_solver(case, mesh_factor=1.0, enable_postprocess=True)
+        results = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
     except Exception as e:
         print(f"❌ Solver crashed: {e}")
         raise

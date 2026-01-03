@@ -10,8 +10,34 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
-import matplotlib.pyplot as plt
 import csv
+
+
+# =============================================================================
+# LAZY MATPLOTLIB IMPORT
+# =============================================================================
+
+def _lazy_import_plt():
+    """
+    Lazy import matplotlib.pyplot with helpful error message.
+
+    Returns
+    -------
+    plt : module
+        matplotlib.pyplot module
+
+    Raises
+    ------
+    ImportError
+        If matplotlib is not installed
+    """
+    try:
+        import matplotlib.pyplot as plt
+        return plt
+    except ImportError as e:
+        raise ImportError(
+            "Plotting requires matplotlib. Install with: pip install matplotlib"
+        ) from e
 
 
 # =============================================================================
@@ -333,6 +359,8 @@ def plot_load_displacement(
     xlabel, ylabel : str
         Axis labels
     """
+    plt = _lazy_import_plt()
+
     # Handle different history formats
     if isinstance(history, list) and len(history) > 0 and isinstance(history[0], dict):
         # Multicrack format: list of dicts with keys 'u', 'P'
@@ -389,6 +417,8 @@ def plot_slip_profile(
     step : int
         Step number
     """
+    plt = _lazy_import_plt()
+
     plt.figure(figsize=(10, 4))
     plt.plot(x_mm, slip_mm, 'ro-', markersize=4, linewidth=1.5)
     plt.xlabel("Position along bar [mm]", fontsize=12)
@@ -422,6 +452,8 @@ def plot_bond_stress_profile(
     step : int
         Step number
     """
+    plt = _lazy_import_plt()
+
     plt.figure(figsize=(10, 4))
     plt.plot(x_mm, tau_MPa, 'bs-', markersize=4, linewidth=1.5)
     plt.xlabel("Position along bar [mm]", fontsize=12)
@@ -565,6 +597,8 @@ def postprocess_results(
 
             # Plot
             if len(w_mm) > 0:
+                plt = _lazy_import_plt()
+
                 plt.figure(figsize=(10, 4))
                 plt.plot(s_mm, w_mm, 'ro-', markersize=4, linewidth=1.5)
                 plt.xlabel("Position along crack [mm]", fontsize=12)
@@ -655,6 +689,8 @@ def postprocess_results(
                 print(f"  Steel force profile saved: {csv_file.name}")
 
                 # Plot
+                plt = _lazy_import_plt()
+
                 plt.figure(figsize=(10, 6))
 
                 # Subplot 1: Force distribution
