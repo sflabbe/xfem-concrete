@@ -227,12 +227,12 @@ def test_omega_c_infrastructure():
     assert crack_context.shape == (3, 2), \
         f"crack_context shape wrong: expected (3, 2), got {crack_context.shape}"
 
-    # With no cracks, distance should be large and tn_ratio = 0
+    # With no cracks, distance should be large and tn_ratio = 1.0 (to recover Ωc→1)
     assert np.all(crack_context[:, 0] > 1e9), \
         "Without cracks, distance should be very large (Ωc=1)"
 
-    assert np.all(crack_context[:, 1] == 0.0), \
-        "Without cracks, tn_ratio should be 0"
+    assert np.all(crack_context[:, 1] == 1.0), \
+        "Without cracks, tn_ratio should be 1.0 (to recover Ωc→1)"
 
     print(f"✓ Ωc infrastructure: crack_context shape = {crack_context.shape}, default OK")
 

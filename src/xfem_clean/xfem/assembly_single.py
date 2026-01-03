@@ -9,7 +9,11 @@ import numpy as np
 import scipy.sparse as sp
 
 from xfem_clean.cohesive_laws import CohesiveLaw, CohesiveState, cohesive_update, cohesive_update_mixed
-from xfem_clean.numba.kernels_cohesive import cohesive_update_values_numba
+from xfem_clean.numba.kernels_cohesive import (
+    cohesive_update_values_numba,
+    cohesive_update_mixed_values_numba,
+    cohesive_eval_mixed_traction_numba,
+)
 from xfem_clean.numba.kernels_bulk import (
     elastic_integrate_plane_stress_numba,
     dp_integrate_plane_stress_numba,
@@ -654,23 +658,43 @@ def assemble_xfem_system(
                             # --- Cohesive state update ---
                             if use_mixed_mode:
                                 # Mixed-mode cohesive (Mode I + Mode II)
-                                # NOTE: Numba kernel for mixed-mode not yet implemented
-                                if use_coh_arrays:
+                                # Check if Numba path is available
+                                if use_numba and (coh_params is not None) and use_coh_arrays:
+                                    # Numba path for mixed-mode
                                     assert isinstance(coh_states_comm, CohesiveStateArrays)
-                                    st = coh_states_comm.get_state(e, igp, k=0)
-                                else:
-                                    st = coh_states_comm.get((e, igp), CohesiveState())
+                                    dm_old, dmg_old = coh_states_comm.get_values(e, igp, k=0)
 
-                                t_vec, K_mat, st2 = cohesive_update_mixed(law, delta_n, delta_t, st, visc_damp=visc_damp)
-                                t_n = t_vec[0]
-                                t_t = t_vec[1]
-                                # K_mat is 2×2: [[∂tn/∂δn, ∂tn/∂δt], [∂tt/∂δn, ∂tt/∂δt]]
+                                    # Call Numba mixed-mode kernel
+                                    t_n, t_t, dtn_ddn, dtn_ddt, dtt_ddn, dtt_ddt, dm_new, dmg_new = \
+                                        cohesive_update_mixed_values_numba(
+                                            delta_n, delta_t, dm_old, dmg_old, coh_params, visc_damp=float(visc_damp)
+                                        )
 
-                                if isinstance(coh_updates, CohesiveStatePatch):
-                                    coh_updates.add(0, e, igp, st2)
+                                    # Store updated state
+                                    assert isinstance(coh_updates, CohesiveStatePatch)
+                                    coh_updates.add_values(0, e, igp, delta_max=dm_new, damage=dmg_new)
+                                    dm_for_energy = float(dm_new)
+
+                                    # Build 2x2 tangent matrix
+                                    K_mat = np.array([[dtn_ddn, dtn_ddt], [dtt_ddn, dtt_ddt]], dtype=float)
                                 else:
-                                    coh_updates[(e, igp)] = st2
-                                dm_for_energy = float(st2.delta_max)
+                                    # Python fallback for mixed-mode
+                                    if use_coh_arrays:
+                                        assert isinstance(coh_states_comm, CohesiveStateArrays)
+                                        st = coh_states_comm.get_state(e, igp, k=0)
+                                    else:
+                                        st = coh_states_comm.get((e, igp), CohesiveState())
+
+                                    t_vec, K_mat, st2 = cohesive_update_mixed(law, delta_n, delta_t, st, visc_damp=visc_damp)
+                                    t_n = t_vec[0]
+                                    t_t = t_vec[1]
+                                    # K_mat is 2×2: [[∂tn/∂δn, ∂tn/∂δt], [∂tt/∂δn, ∂tt/∂δt]]
+
+                                    if isinstance(coh_updates, CohesiveStatePatch):
+                                        coh_updates.add(0, e, igp, st2)
+                                    else:
+                                        coh_updates[(e, igp)] = st2
+                                    dm_for_energy = float(st2.delta_max)
                             else:
                                 # Mode I only (backward compatible)
                                 if use_numba and (coh_params is not None) and use_coh_arrays:
@@ -704,21 +728,35 @@ def assemble_xfem_system(
                             coh_wgt.append(float(wline))
                             coh_delta_max.append(float(dm_for_energy))
 
-                            # TASK 5: Cohesive dissipation tracking
+                            # TASK 5: Cohesive dissipation tracking (energy-consistent, for accepted steps only)
                             if compute_dissipation and q_prev is not None:
                                 if use_mixed_mode:
                                     # Compute old openings from q_prev
                                     delta_n_old = float(np.dot(gvec_n, q_prev[edofs]))
                                     delta_t_old = float(np.dot(gvec_t, q_prev[edofs]))
 
-                                    # Get old traction by evaluating law at old state
-                                    # NOTE: st is the committed state at time n, so we evaluate at old opening
-                                    t_vec_old, _, _ = cohesive_update_mixed(law, delta_n_old, delta_t_old, st, visc_damp=0.0)
-                                    t_n_old = t_vec_old[0]
-                                    t_t_old = t_vec_old[1]
+                                    # Get old traction by evaluating law at old state (without updating history)
+                                    if use_numba and (coh_params is not None) and use_coh_arrays:
+                                        # Numba path: evaluate old traction efficiently
+                                        assert isinstance(coh_states_comm, CohesiveStateArrays)
+                                        dm_committed, dmg_committed = coh_states_comm.get_values(e, igp, k=0)
+                                        t_n_old, t_t_old = cohesive_eval_mixed_traction_numba(
+                                            delta_n_old, delta_t_old, dm_committed, dmg_committed, coh_params
+                                        )
+                                    else:
+                                        # Python path: evaluate at old opening with committed state
+                                        if use_coh_arrays:
+                                            assert isinstance(coh_states_comm, CohesiveStateArrays)
+                                            st_committed = coh_states_comm.get_state(e, igp, k=0)
+                                        else:
+                                            st_committed = coh_states_comm.get((e, igp), CohesiveState())
+                                        t_vec_old, _, _ = cohesive_update_mixed(
+                                            law, delta_n_old, delta_t_old, st_committed, visc_damp=0.0
+                                        )
+                                        t_n_old = t_vec_old[0]
+                                        t_t_old = t_vec_old[1]
 
-                                    # Trapezoidal rule for dissipation
-                                    # ΔD = 0.5 * (t_old + t_new) · Δδ
+                                    # Trapezoidal rule for dissipation: ΔD = 0.5 * (t_old + t_new) · Δδ
                                     d_delta_n = delta_n - delta_n_old
                                     d_delta_t = delta_t - delta_t_old
                                     diss_local = 0.5 * ((t_n_old + t_n) * d_delta_n + (t_t_old + t_t) * d_delta_t) * wline
@@ -727,10 +765,24 @@ def assemble_xfem_system(
                                     # Mode I only
                                     delta_old = float(np.dot(gvec_n, q_prev[edofs]))
 
-                                    # Get old traction
-                                    T_old, _, _ = cohesive_update(law, delta_old, st, visc_damp=0.0)
+                                    # Get old traction (committed state, no history update)
+                                    if use_numba and (coh_params is not None) and use_coh_arrays:
+                                        # Numba path: re-evaluate at old opening
+                                        assert isinstance(coh_states_comm, CohesiveStateArrays)
+                                        dm_committed, dmg_committed = coh_states_comm.get_values(e, igp, k=0)
+                                        T_old, _, _, _ = cohesive_update_values_numba(
+                                            delta_old, dm_committed, dmg_committed, coh_params, visc_damp=0.0
+                                        )
+                                    else:
+                                        # Python path
+                                        if use_coh_arrays:
+                                            assert isinstance(coh_states_comm, CohesiveStateArrays)
+                                            st_committed = coh_states_comm.get_state(e, igp, k=0)
+                                        else:
+                                            st_committed = coh_states_comm.get((e, igp), CohesiveState())
+                                        T_old, _, _ = cohesive_update(law, delta_old, st_committed, visc_damp=0.0)
 
-                                    # Trapezoidal dissipation
+                                    # Trapezoidal dissipation: ΔD = 0.5 * (T_old + T_new) * Δδ
                                     d_delta = delta - delta_old
                                     diss_local = 0.5 * (T_old + T) * d_delta * wline
                                     D_coh_inc += diss_local
