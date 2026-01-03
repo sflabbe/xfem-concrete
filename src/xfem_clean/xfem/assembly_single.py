@@ -872,6 +872,7 @@ def assemble_xfem_system(
                 # TASK 5: Physical dissipation tracking
                 u_total_prev=q_prev,
                 compute_dissipation=compute_dissipation,
+                return_aux=True,  # Need aux dict for dissipation
             )
 
             # Accumulate contributions from all layers
@@ -924,6 +925,7 @@ def assemble_xfem_system(
             compute_dissipation=compute_dissipation,
             # THESIS PARITY: Crack deterioration mapping
             crack_context=crack_context,
+            return_aux=True,  # Need aux dict for dissipation
         )
 
         # Add bond-slip contribution to global system

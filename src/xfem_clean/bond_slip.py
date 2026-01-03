@@ -1172,6 +1172,8 @@ def assemble_bond_slip(
     # TASK 5: Physical dissipation tracking
     u_total_prev: Optional[np.ndarray] = None,  # Displacement at previous time step (for dissipation)
     compute_dissipation: bool = False,  # Enable physical dissipation computation
+    # API compatibility: conditional aux return
+    return_aux: bool = False,  # If True, return aux dict as 4th value
 ) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays, Dict[str, float]]:
     """Assemble bond-slip interface forces and stiffness.
 
@@ -1229,6 +1231,10 @@ def assemble_bond_slip(
     compute_dissipation : bool
         If True, compute physical dissipation increment using trapezoidal rule.
         Requires u_total_prev to be provided.
+    return_aux : bool, optional
+        If True, return auxiliary dict as 4th value. If False (default), return
+        only 3 values (f_bond, K_bond, bond_states_new).
+        Note: Automatically set to True when compute_dissipation=True.
 
     Returns
     -------
@@ -1238,8 +1244,8 @@ def assemble_bond_slip(
         Bond interface stiffness matrix
     bond_states_new : BondSlipStateArrays
         Updated bond-slip states (trial)
-    aux : dict
-        Auxiliary data including:
+    aux : dict, optional
+        Auxiliary data (only returned if return_aux=True), including:
         - D_bond_inc: Bond dissipation increment [J] (if compute_dissipation=True)
         - D_dowel_inc: Dowel dissipation increment [J] (if enable_dowel and compute_dissipation)
     """
@@ -1261,6 +1267,10 @@ def assemble_bond_slip(
             )
 
     # Numba kernel now supports dowel action (no need to force Python fallback)
+
+    # Auto-force return_aux=True when compute_dissipation=True (API convenience)
+    if compute_dissipation and not return_aux:
+        return_aux = True
 
     # Compute perimeter (explicit parameter takes precedence)
     if perimeter is None:
@@ -1436,7 +1446,11 @@ def assemble_bond_slip(
             compute_dissipation=compute_dissipation,
         )
 
-    return f_bond, K_bond, bond_states_new, aux
+    # API compatibility: conditionally return aux
+    if return_aux:
+        return f_bond, K_bond, bond_states_new, aux
+    else:
+        return f_bond, K_bond, bond_states_new
 
 
 # ------------------------------------------------------------------------------
@@ -1903,6 +1917,7 @@ def _bond_slip_assembly_python(
         "D_dowel_inc": float(D_dowel_inc),
     }
 
+    # Always return 4 values (conditional return handled by caller)
     return f_bond, K_bond_sp, bond_states_new, aux
 
 

@@ -68,6 +68,7 @@ def test_bond_dissipation_simple_slip():
         steel_EA=0.0,  # No steel axial for simplicity
         use_numba=False,  # Use Python path
         perimeter=np.pi * law.d_bar,
+        return_aux=True,  # Need aux dict
     )
 
     # Assemble at time n+1 with dissipation tracking
@@ -83,6 +84,7 @@ def test_bond_dissipation_simple_slip():
         perimeter=np.pi * law.d_bar,
         u_total_prev=u_n,
         compute_dissipation=True,
+        return_aux=True,  # Need aux dict for dissipation
     )
 
     D_bond = aux_np1["D_bond_inc"]
@@ -170,6 +172,7 @@ def test_bond_dissipation_cyclic():
             perimeter=np.pi * law.d_bar,
             u_total_prev=u_prev,
             compute_dissipation=True,
+            return_aux=True,  # Need aux dict for dissipation
         )
 
         D_step = aux["D_bond_inc"]
