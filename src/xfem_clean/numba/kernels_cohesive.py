@@ -201,3 +201,266 @@ def cohesive_update_values_numba(
     # Bilinear: modified Newton uses k_alg and linear relation
     T = k_alg * delta
     return T, k_alg, dm, d_new
+
+
+# ==============================================================================
+# MIXED-MODE COHESIVE (THESIS PARITY)
+# ==============================================================================
+
+def pack_cohesive_mixed_law_params(law: CohesiveLaw) -> np.ndarray:
+    """Pack a mixed-mode CohesiveLaw into a float array for Numba.
+
+    Layout (float64)
+    ----------------
+    p[0]  Kn           - Normal stiffness [Pa/m]
+    p[1]  Kt           - Tangential stiffness [Pa/m]
+    p[2]  delta0_n     - Elastic limit (normal) [m]
+    p[3]  deltaf_n     - Final opening (normal) [m]
+    p[4]  beta         - Stiffness ratio Kt/Kn for effective separation
+    p[5]  kp           - Compression penalty stiffness [Pa/m]
+    p[6]  k_res        - Residual stiffness (normal) [Pa/m]
+    p[7]  shear_model  - 0=constant, 1=wells
+    p[8]  k_s0         - Wells: initial shear stiffness [Pa/m]
+    p[9]  k_s1         - Wells: final shear stiffness [Pa/m]
+    p[10] w1           - Wells: characteristic opening [m]
+    p[11] use_cyclic   - 0=monotonic, 1=cyclic closure
+    p[12] delta0_eff   - Effective elastic limit [m]
+    p[13] deltaf_eff   - Effective final opening [m]
+    """
+    Kn = float(law.Kn)
+    Kt = float(law.Kt) if hasattr(law, 'Kt') and law.Kt is not None else Kn
+
+    delta0_n = float(law.delta0)
+    deltaf_n = float(law.deltaf)
+
+    # Compute beta for effective separation
+    beta = Kt / max(1e-30, Kn) if Kt > 0 else 1.0
+
+    # Compression penalty stiffness (typically large, e.g., 1000 * Kn)
+    kp = float(getattr(law, 'k_penalty', 1000.0 * Kn))
+
+    # Residual stiffness
+    k_res = float(law.kres_factor) * Kn if hasattr(law, 'kres_factor') else 0.0
+
+    # Shear model parameters
+    shear_model = getattr(law, 'shear_model', 'constant')
+    shear_model_id = 1.0 if shear_model == 'wells' else 0.0
+
+    k_s0 = float(getattr(law, 'k_s0', Kt))
+    k_s1 = float(getattr(law, 'k_s1', 0.01 * k_s0))
+    w1 = float(getattr(law, 'w1', 1.0e-3))  # Default: 1mm
+
+    use_cyclic = 1.0 if getattr(law, 'use_cyclic_closure', False) else 0.0
+
+    # Effective limits (precomputed for efficiency)
+    delta0_eff = math.sqrt(delta0_n**2 + beta * 0.0)  # Pure mode I at elastic limit
+    deltaf_eff = math.sqrt(deltaf_n**2 + beta * 0.0)  # Pure mode I at final opening
+
+    return np.array((
+        Kn, Kt, delta0_n, deltaf_n, beta, kp, k_res,
+        shear_model_id, k_s0, k_s1, w1, use_cyclic,
+        delta0_eff, deltaf_eff
+    ), dtype=np.float64)
+
+
+@njit(cache=True)
+def cohesive_update_mixed_values_numba(
+    delta_n: float,
+    delta_t: float,
+    delta_max_old: float,  # Stores gmax (effective separation) or wmax (cyclic)
+    damage_old: float,
+    params: np.ndarray,
+    visc_damp: float = 0.0,
+) -> tuple[float, float, float, float, float, float, float, float]:
+    """Mixed-mode cohesive update (THESIS PARITY - Numba kernel).
+
+    Implements:
+    - Unilateral opening (δn_pos = max(δn, 0))
+    - Compression penalty (if δn < 0)
+    - Effective separation: δeff = sqrt(δn_pos² + β*δt²)
+    - Damage evolution from gmax
+    - Wells shear model: ks(w) = ks0 * exp(hs*w_eff)
+    - Cyclic closure with w_max history
+
+    Returns
+    -------
+    t_n : float
+        Normal traction [Pa]
+    t_t : float
+        Tangential traction [Pa]
+    dtn_ddn : float
+        ∂t_n/∂δ_n [Pa/m]
+    dtn_ddt : float
+        ∂t_n/∂δ_t [Pa/m]
+    dtt_ddn : float
+        ∂t_t/∂δ_n [Pa/m] (Wells cross-coupling!)
+    dtt_ddt : float
+        ∂t_t/∂δ_t [Pa/m]
+    delta_max_new : float
+        Updated gmax or wmax
+    damage_new : float
+        Updated damage parameter
+    """
+
+    # Unpack parameters
+    Kn = float(params[0])
+    Kt = float(params[1])
+    delta0_n = float(params[2])
+    deltaf_n = float(params[3])
+    beta = float(params[4])
+    kp = float(params[5])
+    k_res = float(params[6])
+    shear_model_id = int(params[7] + 0.5)
+    k_s0 = float(params[8])
+    k_s1 = float(params[9])
+    w1 = float(params[10])
+    use_cyclic = int(params[11] + 0.5)
+    delta0_eff = float(params[12])
+    deltaf_eff = float(params[13])
+
+    # Step 1: Unilateral opening
+    delta_n_pos = max(0.0, delta_n)
+    delta_t_val = delta_t
+
+    # Step 2: Compression penalty (if δn < 0 and cyclic closure enabled)
+    if delta_n < 0.0 and use_cyclic == 1:
+        # Compression: penalty stiffness in normal direction
+        t_n = kp * delta_n
+        dtn_ddn = kp
+        dtn_ddt = 0.0
+
+        # Shear remains active (friction-like behavior)
+        t_t = 0.0  # Or could use residual shear
+        dtt_ddn = 0.0
+        dtt_ddt = Kt
+
+        # No damage accumulation in compression
+        return t_n, t_t, dtn_ddn, dtn_ddt, dtt_ddn, dtt_ddt, delta_max_old, damage_old
+
+    # Step 3: Effective separation
+    delta_eff = math.sqrt(delta_n_pos**2 + beta * delta_t_val**2)
+
+    # Step 4: Damage evolution from gmax
+    g_old = float(delta_max_old)
+    g_max = max(g_old, delta_eff)
+
+    # Elastic regime
+    if g_max <= delta0_eff + 1e-18:
+        d = 0.0
+        t_n = Kn * delta_n_pos
+        t_t = Kt * delta_t_val
+
+        # Elastic tangent
+        dtn_ddn = Kn if delta_n > 0.0 else 0.0
+        dtn_ddt = 0.0
+        dtt_ddn = 0.0
+        dtt_ddt = Kt
+
+        # No damage update
+        d_new = damage_old if damage_old > d else d
+        return t_n, t_t, dtn_ddn, dtn_ddt, dtt_ddn, dtt_ddt, g_max, d_new
+
+    # Softening regime: compute damage
+    if g_max >= deltaf_eff:
+        d = 1.0
+    else:
+        d = (g_max - delta0_eff) / max(1e-30, (deltaf_eff - delta0_eff))
+
+    # Viscous damage regularization
+    if visc_damp > 0.0:
+        d_new = (d + visc_damp * damage_old) / (1.0 + visc_damp)
+        if d_new < damage_old:
+            d_new = damage_old
+    else:
+        d_new = d if d > damage_old else damage_old
+
+    # Reduced stiffness
+    k_alg_n = (1.0 - d_new) * Kn
+    if k_alg_n < k_res:
+        k_alg_n = k_res
+
+    # Normal traction
+    t_n = k_alg_n * delta_n_pos
+
+    # Step 5-6: Shear model (Wells or constant)
+    if shear_model_id == 1:
+        # Wells model: ks(W) = ks0 * exp(hs * W)
+        h_s = math.log(k_s1 / max(1e-30, k_s0)) / max(1e-30, w1)
+
+        # Determine effective opening for shear degradation
+        if use_cyclic == 1:
+            # Cyclic: use maximum opening reached (stored in delta_max)
+            W = g_old  # w_max stored in delta_max field
+        else:
+            # Monotonic: use current opening
+            W = delta_n_pos
+
+        # Shear stiffness as function of opening
+        k_s_w = k_s0 * math.exp(h_s * W)
+        k_alg_t = max(k_s_w, k_res)
+
+        # Shear traction
+        t_t = k_alg_t * delta_t_val
+
+        # Tangent matrix with Wells cross-coupling
+        if delta_n > 0.0:
+            if use_cyclic == 1 and delta_n_pos < g_old - 1e-14:
+                # Unloading: W = wmax is constant, no cross-coupling
+                dtt_ddn = 0.0
+            else:
+                # Loading OR monotonic: W = current w, normal cross-coupling
+                dtt_ddn = h_s * k_alg_t * delta_t_val
+        else:
+            dtt_ddn = 0.0
+
+        dtt_ddt = k_alg_t
+
+    else:
+        # Constant shear model (damage-based)
+        k_alg_t = (1.0 - d_new) * Kt
+        if k_alg_t < k_res:
+            k_alg_t = k_res
+
+        t_t = k_alg_t * delta_t_val
+
+        # Damage-based tangent (no Wells cross-coupling)
+        # Compute damage derivative if in softening
+        if delta0_eff < g_max < deltaf_eff:
+            dd_dg = 1.0 / max(1e-30, (deltaf_eff - delta0_eff))
+        else:
+            dd_dg = 0.0
+
+        # Effective separation derivatives
+        if delta_eff > 1e-18:
+            dg_ddn = delta_n_pos / delta_eff if delta_n > 0.0 else 0.0
+            dg_ddt = beta * delta_t_val / delta_eff
+        else:
+            dg_ddn = 0.0
+            dg_ddt = 0.0
+
+        # Stiffness derivatives
+        dk_alg_t_dg = -dd_dg * Kt
+
+        # Tangent components
+        dtt_ddn = dk_alg_t_dg * dg_ddn * delta_t_val
+        dtt_ddt = dk_alg_t_dg * dg_ddt * delta_t_val + k_alg_t
+
+    # Normal direction tangent (same for both models)
+    if delta0_eff < g_max < deltaf_eff:
+        dd_dg = 1.0 / max(1e-30, (deltaf_eff - delta0_eff))
+    else:
+        dd_dg = 0.0
+
+    if delta_eff > 1e-18:
+        dg_ddn = delta_n_pos / delta_eff if delta_n > 0.0 else 0.0
+        dg_ddt = beta * delta_t_val / delta_eff
+    else:
+        dg_ddn = 0.0
+        dg_ddt = 0.0
+
+    dk_alg_n_dg = -dd_dg * Kn
+
+    dtn_ddn = dk_alg_n_dg * dg_ddn * delta_n_pos + k_alg_n if delta_n > 0.0 else 0.0
+    dtn_ddt = dk_alg_n_dg * dg_ddt * delta_n_pos
+
+    return t_n, t_t, dtn_ddn, dtn_ddt, dtt_ddn, dtt_ddt, g_max, d_new

@@ -410,6 +410,23 @@ def run_analysis_xfem(
             print(f"        [solve_step] ENTRY: u_target={u_target*1e3:.3f}mm, ndof={dofs_in.ndof}")
         q = u_guess.copy()
 
+        # THESIS PARITY: Precompute crack deterioration context Ωc for this load step
+        # This is computed ONCE per accepted step (not every Newton iteration)
+        crack_context = None
+        if model.enable_bond_slip and bond_law is not None and hasattr(bond_law, 'enable_crack_deterioration') and bond_law.enable_crack_deterioration:
+            if rebar_segs is not None and len(rebar_segs) > 0:
+                from xfem_clean.bond_slip import precompute_crack_context_for_bond
+                # Use committed cohesive states to evaluate tn for computing r = tn/ft
+                crack_list = [crack_in] if crack_in.active else None
+                crack_context = precompute_crack_context_for_bond(
+                    steel_segments=rebar_segs,
+                    nodes=nodes,
+                    cracks=crack_list,
+                    cohesive_states=coh_committed,  # Use committed cohesive state
+                    cohesive_law=law,
+                    ft=model.ft,  # Concrete tensile strength
+                )
+
         for it in range(int(model.newton_maxit)):
             total_newton_solves += 1  # Track each Newton iteration
             if model.debug_newton and it == 0:
@@ -472,6 +489,7 @@ def run_analysis_xfem(
                 subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
                 bond_layers=bond_layers,  # PART D: Multi-layer bond support
                 bond_states_list_comm=bond_committed_list if bond_layers else None,  # PART D: Per-layer states
+                crack_context=crack_context,  # THESIS PARITY: Crack deterioration mapping
             )
             if model.debug_newton:
                 print(f"        [newton] it={it:02d} assemble done, K.shape={K.shape}")
@@ -632,6 +650,7 @@ def run_analysis_xfem(
                         bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,  # BLOQUE C
                         bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,  # BLOQUE C
                         subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
+                        crack_context=crack_context,  # THESIS PARITY: Crack deterioration mapping
                     )
                     # Perfect bond rebar (only if bond-slip disabled)
                     if not model.enable_bond_slip:

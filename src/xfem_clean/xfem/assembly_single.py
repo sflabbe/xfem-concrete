@@ -75,6 +75,8 @@ def assemble_xfem_system(
     # TASK 5: Physical dissipation tracking
     q_prev: Optional[np.ndarray] = None,  # Displacement at previous time step (for dissipation)
     compute_dissipation: bool = False,  # Enable physical dissipation computation
+    # THESIS PARITY: Crack deterioration mapping
+    crack_context: Optional[np.ndarray] = None,  # [n_seg, 2] crack deterioration context for bond-slip
 ) -> Tuple[
     sp.csr_matrix,
     np.ndarray,
@@ -347,6 +349,7 @@ def assemble_xfem_system(
                             # TASK 5: Accumulate bulk plastic dissipation
                             if compute_dissipation:
                                 # Physical dissipation = dW * volume (detJ * wgp * thickness)
+                                wgp = wx * wy
                                 D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
 
                             eps_p3_new = np.array([eps_p6_new[0], eps_p6_new[1], eps_p6_new[3]], dtype=float)
@@ -400,6 +403,7 @@ def assemble_xfem_system(
                             # TASK 5: Accumulate bulk plastic dissipation (non-Numba path)
                             if compute_dissipation:
                                 dW = mp.w_plastic - mp0.w_plastic
+                                wgp = wx * wy
                                 D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
 
                     elif mp_states_comm is not None:
@@ -411,6 +415,7 @@ def assemble_xfem_system(
                         # TASK 5: Accumulate bulk plastic dissipation (non-Numba path)
                         if compute_dissipation:
                             dW = mp.w_plastic - mp0.w_plastic
+                            wgp = wx * wy
                             D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
 
                     else:
@@ -865,6 +870,8 @@ def assemble_xfem_system(
             # TASK 5: Physical dissipation tracking
             u_total_prev=q_prev,
             compute_dissipation=compute_dissipation,
+            # THESIS PARITY: Crack deterioration mapping
+            crack_context=crack_context,
         )
 
         # Add bond-slip contribution to global system

@@ -1,12 +1,81 @@
 # XFEM Bond-Cohesive Thesis Parity Implementation Status
 
-**Branch:** `claude/xfem-bond-cohesive-upgrade-tpdq9`
-**Date:** 2026-01-02
-**Objective:** Bring XFEM bond-slip and cohesive implementation to Orlando/Gutiérrez thesis parity
+**Branch:** `claude/numba-physics-parity-Moqpt`
+**Date:** 2026-01-03
+**Objective:** Complete thesis-parity performance work by porting missing physics to Numba
 
 ---
 
-## ✅ COMPLETED TASKS
+## 🎯 RECENT COMPLETION (2026-01-03)
+
+### Numba Physics Parity Complete ✅
+**Status:** All core thesis-parity physics now available in Numba with full backwards compatibility
+
+**Commits:**
+1. `9b584fb` - fix: resolve critical bugs in assembly and dofs modules
+2. `754bc69` - feat: Numba mixed-mode cohesive kernel with Wells shear
+3. `c628133` - feat: Numba bond kernel extensions for Ωc, dowel action, and dissipation
+4. `559ee29` - feat: wire crack deterioration Ωc to solver (GOAL #1 COMPLETE)
+
+**What Was Accomplished:**
+
+1. **Bug Fixes (commit 9b584fb):**
+   - Fixed `NameError: wgp` in bulk plastic dissipation (assembly_single.py)
+   - Fixed `build_xfem_dofs` backwards compatibility (tip_patch now Optional)
+   - Fixed `precompute_crack_context_for_bond` signature (nodes now Optional)
+
+2. **Numba Mixed-Mode Cohesive (commit 754bc69):**
+   - ✅ Unilateral opening: δn_pos = max(δn, 0) only contributes to damage
+   - ✅ Compression penalty: kp*δn when δn < 0 (cyclic closure)
+   - ✅ Effective separation: δeff = sqrt(δn_pos² + β*δt²) with β = Kt/Kn
+   - ✅ Damage evolution from gmax = max(gmax_old, δeff)
+   - ✅ Wells shear model: ks(w) = ks0 * exp(hs*w) where hs = ln(ks1/ks0)/w1
+   - ✅ Cyclic closure: shear degradation uses w_max (history) not current opening
+   - ✅ Cross-coupling tangent: ∂tt/∂δn = hs*ks(w)*δt (Wells model)
+   - Function: `cohesive_update_mixed_values_numba()` in kernels_cohesive.py
+
+3. **Numba Bond Extensions (commit c628133):**
+   - ✅ **Crack Deterioration (Ωc):**
+     * Accept crack_context[n_seg, 2] with [x_over_l, r] per segment
+     * Compute Ωc = 0.5*(x/l) + r*(1 - 0.5*(x/l)) for x <= 2l, else 1.0
+     * Applied as multiplicative reduction to τ and dτ/ds
+     * Combined with Ωy: omega_total = omega_y * omega_crack
+
+   - ✅ **Dowel Action (P4):**
+     * Implement Murcia & Lorrain constitutive law with analytical tangent
+     * Compute transverse opening w = (u_s - u_c) · n where n = [-cy, cx]
+     * Nonlinear stiffness: k0 = 599.96 * fc^0.75 / φ [MPa/mm units]
+     * Full 8×8 consistent tangent coupling steel ↔ concrete DOFs
+     * Proper unit conversion: MPa/mm → Pa/m for assembly
+
+   - ✅ **Dissipation Tracking:**
+     * Bond slip: ΔW_bond = 0.5*(τ_old+τ_new)*(s_new-s_old)*perimeter*L
+     * Dowel: ΔW_dowel = 0.5*(σ_old+σ_new)*(w_new-w_old)*perimeter*L
+     * Trapezoidal rule for thermodynamic consistency
+     * Only computed when compute_dissipation=True (not during Newton iterations)
+
+   - Function: `bond_slip_assembly_kernel()` in kernels_bond_slip.py
+
+4. **Solver Integration (commit 559ee29):**
+   - ✅ Compute crack_context ONCE per load step in solve_step()
+   - ✅ Use COMMITTED cohesive states to evaluate tn for r = tn/ft
+   - ✅ Pass crack_context through assemble_xfem_system() to bond assembly
+   - ✅ Applied to both main Newton iteration and line search
+   - Files: analysis_single.py (lines 413-428, 492, 653), assembly_single.py (line 79, 874)
+
+**Backwards Compatibility:**
+- All new parameters optional with sensible defaults
+- Existing code paths unchanged when parameters not provided
+- Tests pass with both old and new API usage patterns
+
+**Performance:**
+- crack_context precomputed ONCE per accepted step (not every Newton iteration)
+- Minimal overhead: only when bond_law.enable_crack_deterioration=True
+- Numba JIT compilation with cache=True for fast startup
+
+---
+
+## ✅ COMPLETED TASKS (HISTORICAL)
 
 ### TASK 0: Fix Bond Yielding Reduction Tests ✅
 **Status:** Complete and committed (commit 6a6af32)
