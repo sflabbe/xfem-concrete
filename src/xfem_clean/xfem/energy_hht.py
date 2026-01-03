@@ -66,11 +66,11 @@ class StepEnergy:
     D_numerical_cum: float = 0.0  # numerical dissipation cumulative
 
     # Mechanical energy (for checking balance)
-    E_mech_n: float     # T_n + Psi_bulk_n
-    E_mech_np1: float   # T_np1 + Psi_bulk_np1
+    E_mech_n: float = 0.0     # T_n + Psi_bulk_n
+    E_mech_np1: float = 0.0   # T_np1 + Psi_bulk_np1
 
     # Balance check (should be ~0)
-    balance_inc: float  # ΔW_dir - (ΔE_mech + ΔD_damp + ΔD_alg)
+    balance_inc: float = 0.0  # ΔW_dir - (ΔE_mech + ΔD_damp + ΔD_alg)
 
 
 def kinetic_energy(Mdiag: np.ndarray, v: np.ndarray) -> float:

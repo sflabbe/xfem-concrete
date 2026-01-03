@@ -27,25 +27,45 @@ from xfem_clean.numba.utils import njit
 
 
 def pack_cohesive_law_params(law: CohesiveLaw) -> np.ndarray:
-    """Pack a :class:`~xfem_clean.cohesive_laws.CohesiveLaw` into a float array.
+    """Pack a :class:`~xfem_clean.cohesive_laws.CohesiveLaw` into a unified float array.
 
-    The returned array is small and can be passed into Numba kernels.
+    The returned array supports both Mode I and mixed-mode cohesive laws.
 
-    Layout (float64)
-    ----------------
-    p[0]  law_id   (0=bilinear, 1=reinhardt)
-    p[1]  Kn
-    p[2]  ft
-    p[3]  delta0
-    p[4]  deltaf
-    p[5]  k_res
-    p[6]  k_cap
-    p[7]  c1
-    p[8]  c2
-    p[9]  wcrit
+    Unified Layout (float64, 21 elements)
+    --------------------------------------
+    p[0]  law_id          (0=bilinear, 1=reinhardt)
+    p[1]  mode_id         (0=Mode I, 1=mixed)
+    p[2]  Kn              [Pa/m]
+    p[3]  ft              [Pa]
+    p[4]  delta0          [m]
+    p[5]  deltaf          [m]
+    p[6]  k_res           [Pa/m] (computed as kres_factor * Kn)
+    p[7]  k_cap           [Pa/m] (computed as kcap_factor * Kn)
+    p[8]  c1              (Reinhardt parameter)
+    p[9]  c2              (Reinhardt parameter)
+    p[10] wcrit           [m] (Reinhardt critical opening)
+    p[11] Kt              [Pa/m] (tangential stiffness for mixed-mode)
+    p[12] tau_max         [Pa] (shear strength for mixed-mode)
+    p[13] Gf_II           [J/m²] (Mode II fracture energy)
+    p[14] kp              [Pa/m] (compression penalty stiffness)
+    p[15] shear_model_id  (0=constant, 1=wells)
+    p[16] k_s0            [Pa/m] (Wells: initial shear stiffness)
+    p[17] k_s1            [Pa/m] (Wells: final shear stiffness)
+    p[18] w1              [m] (Wells: characteristic opening)
+    p[19] hs              [1/m] (Wells: decay parameter = ln(k_s1/k_s0)/w1)
+    p[20] use_cyclic_closure (0=no, 1=yes)
+
+    Notes
+    -----
+    - Mode I kernels ignore mixed-mode parameters (p[11:21])
+    - Mixed-mode kernels use all parameters
+    - Backward compatible: existing Mode I code works unchanged
     """
+    # Basic parameters (Mode I)
     law_name = (law.law or "bilinear").lower()
     law_id = 1.0 if law_name.startswith("rein") else 0.0
+    mode_id = 1.0 if (hasattr(law, 'mode') and law.mode.lower() == "mixed") else 0.0
+
     Kn = float(law.Kn)
     ft = float(law.ft)
     d0 = float(law.delta0)
@@ -55,7 +75,48 @@ def pack_cohesive_law_params(law: CohesiveLaw) -> np.ndarray:
     c1 = float(getattr(law, "c1", 3.0))
     c2 = float(getattr(law, "c2", 6.93))
     wcrit = float(getattr(law, "wcrit", 0.0))
-    return np.array((law_id, Kn, ft, d0, df, k_res, k_cap, c1, c2, wcrit), dtype=np.float64)
+
+    # Mixed-mode parameters (defaults for Mode I)
+    if mode_id > 0.5:  # Mixed mode
+        Kt = float(law.Kt) if hasattr(law, 'Kt') and law.Kt > 0 else Kn
+        tau_max = float(law.tau_max) if hasattr(law, 'tau_max') and law.tau_max > 0 else ft
+        Gf_II = float(law.Gf_II) if hasattr(law, 'Gf_II') and law.Gf_II > 0 else float(law.Gf)
+        kp = float(law.kp) if hasattr(law, 'kp') and law.kp > 0 else Kn
+
+        # Wells shear model parameters
+        shear_model = getattr(law, 'shear_model', 'constant')
+        shear_model_id = 1.0 if shear_model.lower() == 'wells' else 0.0
+
+        if shear_model_id > 0.5:  # Wells model
+            k_s0 = float(law.k_s0) if hasattr(law, 'k_s0') and law.k_s0 > 0 else Kt
+            k_s1 = float(law.k_s1) if hasattr(law, 'k_s1') and law.k_s1 > 0 else 0.01 * k_s0
+            w1 = float(law.w1) if hasattr(law, 'w1') and law.w1 > 0 else 1.0e-3
+            # Compute hs = ln(k_s1/k_s0)/w1 with guard against division
+            hs = math.log(max(1e-30, k_s1) / max(1e-30, k_s0)) / max(1e-30, w1)
+        else:
+            k_s0 = Kt
+            k_s1 = 0.01 * Kt
+            w1 = 1.0e-3
+            hs = 0.0
+
+        use_cyclic_closure = 1.0 if getattr(law, 'use_cyclic_closure', False) else 0.0
+    else:
+        # Mode I: set mixed-mode params to zero
+        Kt = 0.0
+        tau_max = 0.0
+        Gf_II = 0.0
+        kp = Kn
+        shear_model_id = 0.0
+        k_s0 = 0.0
+        k_s1 = 0.0
+        w1 = 1.0e-3
+        hs = 0.0
+        use_cyclic_closure = 0.0
+
+    return np.array((
+        law_id, mode_id, Kn, ft, d0, df, k_res, k_cap, c1, c2, wcrit,
+        Kt, tau_max, Gf_II, kp, shear_model_id, k_s0, k_s1, w1, hs, use_cyclic_closure
+    ), dtype=np.float64)
 
 
 @njit(cache=True)
@@ -79,7 +140,7 @@ def cohesive_update_values_numba(
     params: np.ndarray,
     visc_damp: float = 0.0,
 ) -> tuple[float, float, float, float]:
-    """Value-based cohesive update.
+    """Value-based cohesive update (Mode I).
 
     Returns
     -------
@@ -93,18 +154,23 @@ def cohesive_update_values_numba(
     IMPORTANT: Unilateral opening behavior (P0.1 fix)
     - Only positive opening (δ > 0) contributes to damage
     - Compression (δ < 0) returns zero traction
+
+    Notes
+    -----
+    Uses unified param layout (21 elements) but ignores mixed-mode params (p[11:21]).
     """
 
     law_id = int(params[0] + 0.5)
-    Kn = float(params[1])
-    ft = float(params[2])
-    d0 = float(params[3])
-    df = float(params[4])
-    k_res = float(params[5])
-    k_cap = float(params[6])
-    c1 = float(params[7])
-    c2 = float(params[8])
-    wc = float(params[9])
+    # mode_id = params[1]  # Not used in Mode I kernel
+    Kn = float(params[2])
+    ft = float(params[3])
+    d0 = float(params[4])
+    df = float(params[5])
+    k_res = float(params[6])
+    k_cap = float(params[7])
+    c1 = float(params[8])
+    c2 = float(params[9])
+    wc = float(params[10])
 
     # P0.1 FIX: Unilateral opening - only positive opening contributes to damage
     if delta <= 0.0:
@@ -206,68 +272,15 @@ def cohesive_update_values_numba(
 # ==============================================================================
 # MIXED-MODE COHESIVE (THESIS PARITY)
 # ==============================================================================
-
-def pack_cohesive_mixed_law_params(law: CohesiveLaw) -> np.ndarray:
-    """Pack a mixed-mode CohesiveLaw into a float array for Numba.
-
-    Layout (float64)
-    ----------------
-    p[0]  Kn           - Normal stiffness [Pa/m]
-    p[1]  Kt           - Tangential stiffness [Pa/m]
-    p[2]  delta0_n     - Elastic limit (normal) [m]
-    p[3]  deltaf_n     - Final opening (normal) [m]
-    p[4]  beta         - Stiffness ratio Kt/Kn for effective separation
-    p[5]  kp           - Compression penalty stiffness [Pa/m]
-    p[6]  k_res        - Residual stiffness (normal) [Pa/m]
-    p[7]  shear_model  - 0=constant, 1=wells
-    p[8]  k_s0         - Wells: initial shear stiffness [Pa/m]
-    p[9]  k_s1         - Wells: final shear stiffness [Pa/m]
-    p[10] w1           - Wells: characteristic opening [m]
-    p[11] use_cyclic   - 0=monotonic, 1=cyclic closure
-    p[12] delta0_eff   - Effective elastic limit [m]
-    p[13] deltaf_eff   - Effective final opening [m]
-    """
-    Kn = float(law.Kn)
-    Kt = float(law.Kt) if hasattr(law, 'Kt') and law.Kt is not None else Kn
-
-    delta0_n = float(law.delta0)
-    deltaf_n = float(law.deltaf)
-
-    # Compute beta for effective separation
-    beta = Kt / max(1e-30, Kn) if Kt > 0 else 1.0
-
-    # Compression penalty stiffness (typically large, e.g., 1000 * Kn)
-    kp = float(getattr(law, 'k_penalty', 1000.0 * Kn))
-
-    # Residual stiffness
-    k_res = float(law.kres_factor) * Kn if hasattr(law, 'kres_factor') else 0.0
-
-    # Shear model parameters
-    shear_model = getattr(law, 'shear_model', 'constant')
-    shear_model_id = 1.0 if shear_model == 'wells' else 0.0
-
-    k_s0 = float(getattr(law, 'k_s0', Kt))
-    k_s1 = float(getattr(law, 'k_s1', 0.01 * k_s0))
-    w1 = float(getattr(law, 'w1', 1.0e-3))  # Default: 1mm
-
-    use_cyclic = 1.0 if getattr(law, 'use_cyclic_closure', False) else 0.0
-
-    # Effective limits (precomputed for efficiency)
-    delta0_eff = math.sqrt(delta0_n**2 + beta * 0.0)  # Pure mode I at elastic limit
-    deltaf_eff = math.sqrt(deltaf_n**2 + beta * 0.0)  # Pure mode I at final opening
-
-    return np.array((
-        Kn, Kt, delta0_n, deltaf_n, beta, kp, k_res,
-        shear_model_id, k_s0, k_s1, w1, use_cyclic,
-        delta0_eff, deltaf_eff
-    ), dtype=np.float64)
+# Note: pack_cohesive_law_params() now handles both Mode I and mixed-mode
+# in a unified layout. The old pack_cohesive_mixed_law_params() is removed.
 
 
 @njit(cache=True)
 def cohesive_update_mixed_values_numba(
     delta_n: float,
     delta_t: float,
-    delta_max_old: float,  # Stores gmax (effective separation) or wmax (cyclic)
+    delta_max_old: float,  # Stores gmax (effective separation)
     damage_old: float,
     params: np.ndarray,
     visc_damp: float = 0.0,
@@ -276,11 +289,26 @@ def cohesive_update_mixed_values_numba(
 
     Implements:
     - Unilateral opening (δn_pos = max(δn, 0))
-    - Compression penalty (if δn < 0)
+    - Compression penalty (if δn < 0 and cyclic closure enabled)
     - Effective separation: δeff = sqrt(δn_pos² + β*δt²)
     - Damage evolution from gmax
     - Wells shear model: ks(w) = ks0 * exp(hs*w_eff)
     - Cyclic closure with w_max history
+
+    Parameters
+    ----------
+    delta_n : float
+        Normal opening (positive = opening) [m]
+    delta_t : float
+        Tangential slip (signed) [m]
+    delta_max_old : float
+        Committed maximum effective separation (g_max) [m]
+    damage_old : float
+        Committed damage parameter
+    params : np.ndarray
+        Unified cohesive law parameters (21 elements, see pack_cohesive_law_params)
+    visc_damp : float
+        Viscous damping parameter (default 0.0)
 
     Returns
     -------
@@ -297,26 +325,44 @@ def cohesive_update_mixed_values_numba(
     dtt_ddt : float
         ∂t_t/∂δ_t [Pa/m]
     delta_max_new : float
-        Updated gmax or wmax
+        Updated gmax
     damage_new : float
         Updated damage parameter
+
+    Notes
+    -----
+    Uses unified param layout (21 elements):
+    p[0]=law_id, p[1]=mode_id, p[2]=Kn, p[3]=ft, p[4]=delta0, p[5]=deltaf,
+    p[6]=k_res, p[7]=k_cap, p[8]=c1, p[9]=c2, p[10]=wcrit,
+    p[11]=Kt, p[12]=tau_max, p[13]=Gf_II, p[14]=kp, p[15]=shear_model_id,
+    p[16]=k_s0, p[17]=k_s1, p[18]=w1, p[19]=hs, p[20]=use_cyclic_closure
     """
 
-    # Unpack parameters
-    Kn = float(params[0])
-    Kt = float(params[1])
-    delta0_n = float(params[2])
-    deltaf_n = float(params[3])
-    beta = float(params[4])
-    kp = float(params[5])
+    # Unpack parameters from unified layout
+    # law_id = params[0]  # Not used in mixed-mode (bilinear assumed for now)
+    # mode_id = params[1]  # Not used (caller ensures mode=mixed)
+    Kn = float(params[2])
+    ft = float(params[3])
+    delta0_n = float(params[4])
+    deltaf_n = float(params[5])
     k_res = float(params[6])
-    shear_model_id = int(params[7] + 0.5)
-    k_s0 = float(params[8])
-    k_s1 = float(params[9])
-    w1 = float(params[10])
-    use_cyclic = int(params[11] + 0.5)
-    delta0_eff = float(params[12])
-    deltaf_eff = float(params[13])
+    # k_cap = params[7]  # Not used in this kernel
+    # c1, c2, wcrit = params[8:11]  # Reinhardt params, not used for mixed-mode
+    Kt = float(params[11])
+    tau_max = float(params[12])
+    Gf_II = float(params[13])
+    kp = float(params[14])
+    shear_model_id = int(params[15] + 0.5)
+    k_s0 = float(params[16])
+    k_s1 = float(params[17])
+    w1 = float(params[18])
+    hs = float(params[19])
+    use_cyclic = int(params[20] + 0.5)
+
+    # Compute derived parameters
+    beta = Kt / max(1e-30, Kn)  # Stiffness ratio for effective separation
+    delta0_eff = delta0_n  # Simplified: use normal mode critical separation
+    deltaf_eff = deltaf_n
 
     # Step 1: Unilateral opening
     delta_n_pos = max(0.0, delta_n)
@@ -464,3 +510,37 @@ def cohesive_update_mixed_values_numba(
     dtn_ddt = dk_alg_n_dg * dg_ddt * delta_n_pos
 
     return t_n, t_t, dtn_ddn, dtn_ddt, dtt_ddn, dtt_ddt, g_max, d_new
+
+
+@njit(cache=True)
+def cohesive_eval_mixed_traction_numba(
+    delta_n: float,
+    delta_t: float,
+    delta_max: float,
+    damage: float,
+    params: np.ndarray,
+) -> tuple[float, float]:
+    """Evaluate mixed-mode traction WITHOUT updating state (for dissipation tracking).
+
+    This is used to compute old tractions at previous time step for energy-consistent
+    dissipation computation. It does NOT update the history variables.
+
+    Parameters
+    ----------
+    delta_n, delta_t : float
+        Normal and tangential openings [m]
+    delta_max, damage : float
+        Committed state (not updated)
+    params : np.ndarray
+        Unified cohesive law parameters (21 elements)
+
+    Returns
+    -------
+    t_n, t_t : float
+        Normal and tangential tractions [Pa]
+    """
+    # Call the full kernel but discard state updates and tangents
+    t_n, t_t, _, _, _, _, _, _ = cohesive_update_mixed_values_numba(
+        delta_n, delta_t, delta_max, damage, params, visc_damp=0.0
+    )
+    return t_n, t_t

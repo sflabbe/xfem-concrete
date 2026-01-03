@@ -218,8 +218,8 @@ def precompute_crack_context_for_bond(
 
 ---
 
-### TASK 3: Mixed-Mode Cohesive (Mode I + II) 🟢 **Medium** ✅ PYTHON COMPLETE
-**Status:** Python assembly integration complete | Numba kernel pending ⏳
+### TASK 3: Mixed-Mode Cohesive (Mode I + II) ✅ **COMPLETE**
+**Status:** Full implementation with Numba parity ✅
 
 **Completed:**
 - ✅ `cohesive_update_mixed()` function implemented (lines 241-531 in cohesive_laws.py)
@@ -230,17 +230,43 @@ def precompute_crack_context_for_bond(
 - ✅ Full 2×2 tangent matrix assembly with cross-coupling
 - ✅ Integration tests (`test_mixed_mode_assembly_integration.py`) - all passing
 - ✅ Backward compatibility verified: Mode I-only tests still pass
+- ✅ **Numba kernel** `cohesive_update_mixed_values_numba()` in kernels_cohesive.py
+- ✅ **Unified param packing** supports both Mode I and mixed-mode (21-element array)
+- ✅ **Assembly integration** with Numba path in assembly_single.py (lines 661-678)
+- ✅ **Energy-consistent dissipation** for mixed-mode (trapezoidal rule)
+- ✅ **Parity tests** (`test_cohesive_mixed_numba_parity.py`) verify Python ≈ Numba
+
+**Implementation Details:**
+
+1. **Unified Parameter Packing** (kernels_cohesive.py):
+   ```
+   Layout (21 float64 elements):
+   p[0]=law_id, p[1]=mode_id, p[2]=Kn, p[3]=ft, p[4]=delta0, p[5]=deltaf,
+   p[6]=k_res, p[7]=k_cap, p[8]=c1, p[9]=c2, p[10]=wcrit,
+   p[11]=Kt, p[12]=tau_max, p[13]=Gf_II, p[14]=kp, p[15]=shear_model_id,
+   p[16]=k_s0, p[17]=k_s1, p[18]=w1, p[19]=hs, p[20]=use_cyclic_closure
+   ```
+   - Mode I kernels ignore mixed-mode params (p[11:21])
+   - Backward compatible: existing Mode I code works unchanged
+
+2. **Numba Mixed-Mode Kernel** (cohesive_update_mixed_values_numba):
+   - Unilateral opening: δn_pos = max(δn, 0)
+   - Compression penalty: kp*δn when δn < 0 (cyclic closure)
+   - Effective separation: δeff = sqrt(δn_pos² + β*δt²) with β = Kt/Kn
+   - Damage evolution from gmax = max(gmax_old, δeff)
+   - Wells shear: ks(w) = ks0 * exp(hs*w) with hs = ln(ks1/ks0)/w1
+   - Cyclic closure: shear uses w_max (history), not current opening
+   - Full 2×2 tangent with cross-coupling: ∂tt/∂δn = hs*ks(w)*δt
+   - Returns: t_n, t_t, dtn_ddn, dtn_ddt, dtt_ddn, dtt_ddt, gmax, damage
+
+3. **Dissipation Tracking** (assembly_single.py:731-788):
+   - Helper function `cohesive_eval_mixed_traction_numba()` evaluates old tractions
+   - Trapezoidal rule: ΔD = 0.5*(t_old + t_new)·Δδ for both normal and tangential
+   - Works for both Numba and Python paths
+   - Computed only for accepted steps (not Newton iterations)
 
 **Remaining:**
-1. **Create Numba Kernel** (`src/xfem_clean/numba/kernels_cohesive_mixed.py`):
-   - Port `cohesive_update_mixed()` to Numba
-   - Inline Wells-type shear logic: `k_s(w) = k_s0 * exp(h_s * w)`
-   - Compute full 2×2 tangent matrix with cross-coupling
-   - **Challenge:** Numba doesn't support complex dataclasses; use plain arrays
-
-2. **Extend multicrack assembly** (`multicrack.py`):
-   - Apply same δn/δs jump operator logic to multi-crack solver
-   - Ensure consistency with single-crack implementation
+- **Extend multicrack assembly** (optional): Apply to multi-crack solver for consistency
 
 ---
 
@@ -342,10 +368,10 @@ def precompute_crack_context_for_bond(
 | TASK 0: Fix tests & docs | ✅ Done | Easy | High | ~2h | ~2h |
 | Python/Numba parity fix | ✅ Done | Medium | High | ~1h | ~1h |
 | TASK 1: Crack Ωc (Python) | ✅ Done | Hard | Medium | ~6-8h | ~6h |
-| TASK 1: Crack Ωc (Numba) | 🟡 Pending | Medium | Low | ~2-4h | - |
+| TASK 1: Crack Ωc (Numba) | ✅ Done | Medium | Medium | ~2-4h | ~3h |
 | TASK 2: BondLayer wiring | ✅ Done | Medium | High | ~4-6h | ~5h |
 | TASK 3: Mixed-mode (Python) | ✅ Done | Medium | Medium | ~6-8h | ~7h |
-| TASK 3: Mixed-mode (Numba) | 🔴 Not Started | Medium | Low | ~4-6h | - |
+| TASK 3: Mixed-mode (Numba) | ✅ Done | Medium | Medium | ~4-6h | ~5h |
 | TASK 4: Dowel Numba | 🔴 Not Started | Easy | Low | ~3-4h | - |
 | TASK 5: Cohesive dissipation | ✅ Done | Medium | Medium | ~3-4h | ~3h |
 | TASK 5: Bond dissipation (Python) | ✅ Done | Medium | Medium | ~2-3h | ~2.5h |
@@ -353,8 +379,8 @@ def precompute_crack_context_for_bond(
 | TASK 5: Energy framework | ✅ Done | Medium | Medium | ~1-2h | ~1.5h |
 | TASK 5: Bond dissipation (Numba) | 🔴 Deferred | Medium | Low | ~2-3h | - |
 
-**Completed:** ~34 hours (TASK 0, 1 Python, 2, 3 Python, 5 Complete)
-**Total Remaining Estimated Time:** 9-14 hours (optional Numba optimizations)
+**Completed:** ~42 hours (TASK 0, 1 Complete, 2, 3 Complete, 5 Complete)
+**Total Remaining Estimated Time:** 5-7 hours (optional Numba optimizations for dowel + bond dissipation)
 
 ---
 
