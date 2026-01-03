@@ -278,7 +278,7 @@ def assemble_xfem_system(
                                 wpl_new = wpl0
                                 wft_new = wft0
                                 wfc_new = wfc0
-                                dW = 0.0
+                                dW = 0.0  # Elastic: no plastic dissipation
                             elif int(bulk_kind) == 2:
                                 E = float(bulk_params[0])
                                 nu = float(bulk_params[1])
@@ -339,8 +339,15 @@ def assemble_xfem_system(
                                     Gf_c,
                                     lch,
                                 )
+                                # CDP: plastic work increment is wpl_new - wpl0
+                                dW = wpl_new - wpl0
                             else:
                                 raise ValueError(f"Unknown bulk_kind={bulk_kind}")
+
+                            # TASK 5: Accumulate bulk plastic dissipation
+                            if compute_dissipation:
+                                # Physical dissipation = dW * volume (detJ * wgp * thickness)
+                                D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
 
                             eps_p3_new = np.array([eps_p6_new[0], eps_p6_new[1], eps_p6_new[3]], dtype=float)
                             if isinstance(mp_updates, BulkStatePatch):
@@ -389,14 +396,27 @@ def assemble_xfem_system(
                                 mp_updates.add(e, ipid, mp)
                             else:
                                 mp_updates[(e, ipid)] = mp
+
+                            # TASK 5: Accumulate bulk plastic dissipation (non-Numba path)
+                            if compute_dissipation:
+                                dW = mp.w_plastic - mp0.w_plastic
+                                D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
+
                     elif mp_states_comm is not None:
                         mp0 = mp_states_comm.get((e, ipid), mp_default())
                         mp = mp0.copy_shallow()
                         sig, Ct = material.integrate(mp, eps)
                         mp_updates[(e, ipid)] = mp
+
+                        # TASK 5: Accumulate bulk plastic dissipation (non-Numba path)
+                        if compute_dissipation:
+                            dW = mp.w_plastic - mp0.w_plastic
+                            D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
+
                     else:
                         mp = mp_default().copy_shallow()
                         sig, Ct = material.integrate(mp, eps)
+                        # No committed state, so no dissipation accumulation
 
                     # Apply penalty factor for void elements
                     if is_void_elem:
@@ -778,7 +798,7 @@ def assemble_xfem_system(
             layer_perimeter = layer.perimeter
             layer_mask = layer.segment_mask  # May be None
 
-            f_bond, K_bond, layer_updates = assemble_bond_slip(
+            f_bond, K_bond, layer_updates, bond_aux = assemble_bond_slip(
                 u_total=q,
                 steel_segments=layer_segs,
                 steel_dof_offset=dofs.steel_dof_offset,
@@ -792,12 +812,20 @@ def assemble_xfem_system(
                 bond_gamma=bond_gamma,
                 bond_k_cap=bond_k_cap,
                 bond_s_eps=bond_s_eps,
+                # TASK 5: Physical dissipation tracking
+                u_total_prev=q_prev,
+                compute_dissipation=compute_dissipation,
             )
 
             # Accumulate contributions from all layers
             fint += f_bond
             K = K + K_bond
             bond_updates_list.append(layer_updates)
+
+            # TASK 5: Accumulate bond dissipation from all layers
+            if compute_dissipation:
+                D_bond_inc += bond_aux.get("D_bond_inc", 0.0)
+                # Note: Dowel dissipation would be separate if implemented
 
         # For backward compatibility, return first layer's updates
         bond_updates = bond_updates_list[0] if len(bond_updates_list) > 0 else None
@@ -820,7 +848,7 @@ def assemble_xfem_system(
         if bond_disabled_x_range is not None:
             segment_mask = get_bond_disabled_segments(rebar_segs, nodes, bond_disabled_x_range)
 
-        f_bond, K_bond, bond_updates = assemble_bond_slip(
+        f_bond, K_bond, bond_updates, bond_aux = assemble_bond_slip(
             u_total=q,
             steel_segments=rebar_segs,
             steel_dof_offset=dofs.steel_dof_offset,
@@ -834,11 +862,18 @@ def assemble_xfem_system(
             bond_gamma=bond_gamma,  # BLOQUE B: Bond-slip continuation parameter
             bond_k_cap=bond_k_cap,  # BLOQUE C: Tangent regularization cap
             bond_s_eps=bond_s_eps,  # BLOQUE C: Tangent regularization epsilon
+            # TASK 5: Physical dissipation tracking
+            u_total_prev=q_prev,
+            compute_dissipation=compute_dissipation,
         )
 
         # Add bond-slip contribution to global system
         fint += f_bond
         K = K + K_bond
+
+        # TASK 5: Accumulate bond dissipation
+        if compute_dissipation:
+            D_bond_inc += bond_aux.get("D_bond_inc", 0.0)
 
     # Reinforcement layers contribution (Dissertation Chapter 4.5, Eq. 4.92-4.103)
     reinforcement_updates = None

@@ -1169,7 +1169,10 @@ def assemble_bond_slip(
     dowel_model: Optional[DowelActionModel] = None,  # Dowel action constitutive model
     # THESIS PARITY: Crack deterioration context (Ωc, GOAL #1)
     crack_context: Optional[np.ndarray] = None,  # [n_seg, 2]: [crack_dist, tn_ratio] for Ωc
-) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
+    # TASK 5: Physical dissipation tracking
+    u_total_prev: Optional[np.ndarray] = None,  # Displacement at previous time step (for dissipation)
+    compute_dissipation: bool = False,  # Enable physical dissipation computation
+) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays, Dict[str, float]]:
     """Assemble bond-slip interface forces and stiffness.
 
     Parameters
@@ -1220,6 +1223,12 @@ def assemble_bond_slip(
         crack_context[i, 0] = distance to nearest crack [m]
         crack_context[i, 1] = tn/ft ratio at crack location [-]
         If None, Ωc = 1.0 everywhere (no deterioration).
+    u_total_prev : np.ndarray, optional
+        Displacement vector at previous time step (for dissipation tracking).
+        If None and compute_dissipation=True, dissipation will be zero.
+    compute_dissipation : bool
+        If True, compute physical dissipation increment using trapezoidal rule.
+        Requires u_total_prev to be provided.
 
     Returns
     -------
@@ -1229,6 +1238,10 @@ def assemble_bond_slip(
         Bond interface stiffness matrix
     bond_states_new : BondSlipStateArrays
         Updated bond-slip states (trial)
+    aux : dict
+        Auxiliary data including:
+        - D_bond_inc: Bond dissipation increment [J] (if compute_dissipation=True)
+        - D_dowel_inc: Dowel dissipation increment [J] (if enable_dowel and compute_dissipation)
     """
     n_seg = steel_segments.shape[0]
     ndof_total = u_total.shape[0]
@@ -1376,9 +1389,13 @@ def assemble_bond_slip(
             tau_current=np.zeros(n_seg),  # Computed inline; could extract if needed
         )
 
+        # TASK 5: Dissipation tracking (Numba path - not yet implemented)
+        # TODO: Extend Numba kernel to accumulate dissipation
+        aux = {"D_bond_inc": 0.0, "D_dowel_inc": 0.0}
+
     else:
         # Part A4: Pure Python fallback for debugging
-        f_bond, K_bond, bond_states_new = _bond_slip_assembly_python(
+        f_bond, K_bond, bond_states_new, aux = _bond_slip_assembly_python(
             u_total=u_total,
             steel_segments=steel_segments,
             steel_dof_map=steel_dof_map if steel_dof_map is not None else _build_legacy_dof_map(ndof_total, steel_dof_offset),
@@ -1395,9 +1412,12 @@ def assemble_bond_slip(
             dowel_model=dowel_model,
             # THESIS PARITY: Crack deterioration (Ωc)
             crack_context=crack_context,
+            # TASK 5: Physical dissipation tracking
+            u_total_prev=u_total_prev,
+            compute_dissipation=compute_dissipation,
         )
 
-    return f_bond, K_bond, bond_states_new
+    return f_bond, K_bond, bond_states_new, aux
 
 
 # ------------------------------------------------------------------------------
@@ -1431,7 +1451,10 @@ def _bond_slip_assembly_python(
     dowel_model: Optional[DowelActionModel] = None,
     # THESIS PARITY: Crack deterioration (Ωc, GOAL #1)
     crack_context: Optional[np.ndarray] = None,  # [n_seg, 2]: [crack_dist, tn_ratio]
-) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays]:
+    # TASK 5: Physical dissipation tracking
+    u_total_prev: Optional[np.ndarray] = None,
+    compute_dissipation: bool = False,
+) -> Tuple[np.ndarray, sp.csr_matrix, BondSlipStateArrays, Dict[str, float]]:
     """Pure Python fallback for bond-slip assembly (for debugging).
 
     This implementation has explicit bounds checks and assertions
@@ -1445,6 +1468,10 @@ def _bond_slip_assembly_python(
     cols = []
     data = []
     s_current = np.zeros(n_seg, dtype=float)
+
+    # TASK 5: Dissipation accumulators
+    D_bond_inc = 0.0  # Bond dissipation increment [J]
+    D_dowel_inc = 0.0  # Dowel dissipation increment [J]
 
     # Use provided perimeter or compute from bond_law.d_bar
     if perimeter is None:
@@ -1656,6 +1683,48 @@ def _bond_slip_assembly_python(
         if bond_k_cap is not None and dtau_ds > bond_k_cap:
             dtau_ds = bond_k_cap
 
+        # TASK 5: Bond dissipation tracking (trapezoidal rule)
+        if compute_dissipation and u_total_prev is not None:
+            # Compute slip at previous time step
+            u_c1x_old = u_total_prev[dof_c1x]
+            u_c1y_old = u_total_prev[dof_c1y]
+            u_c2x_old = u_total_prev[dof_c2x]
+            u_c2y_old = u_total_prev[dof_c2y]
+            u_s1x_old = u_total_prev[dof_s1x]
+            u_s1y_old = u_total_prev[dof_s1y]
+            u_s2x_old = u_total_prev[dof_s2x]
+            u_s2y_old = u_total_prev[dof_s2y]
+
+            u_c_mid_x_old = 0.5 * (u_c1x_old + u_c2x_old)
+            u_c_mid_y_old = 0.5 * (u_c1y_old + u_c2y_old)
+            u_s_mid_x_old = 0.5 * (u_s1x_old + u_s2x_old)
+            u_s_mid_y_old = 0.5 * (u_s1y_old + u_s2y_old)
+
+            du_x_old = u_s_mid_x_old - u_c_mid_x_old
+            du_y_old = u_s_mid_y_old - u_c_mid_y_old
+            s_old = du_x_old * cx + du_y_old * cy
+
+            # Compute tau at old slip using committed state (do not update state history)
+            # Use committed s_max from bond_states (not the updated s_max)
+            s_max_committed = float(bond_states.s_max[i])
+
+            # Compute eps_s at old state
+            eps_s_old = 0.0
+            if steel_EA > 0.0 and L0 > 1e-14:
+                du_steel_x_old = u_s2x_old - u_s1x_old
+                du_steel_y_old = u_s2y_old - u_s1y_old
+                axial_old = du_steel_x_old * cx + du_steel_y_old * cy
+                eps_s_old = axial_old / L0
+
+            # Evaluate tau_old using same bond law (with committed s_max, no viscosity)
+            tau_old, _ = bond_law.tau_and_tangent(s_old, s_max_committed, eps_s=eps_s_old, omega_crack=omega_crack)
+
+            # Trapezoidal dissipation:
+            # ΔD = 0.5 * (tau_old + tau_new) * (s_new - s_old) * perimeter * L0
+            d_slip = s - s_old
+            diss_local = 0.5 * (tau_old + tau) * d_slip * perimeter * L0
+            D_bond_inc += diss_local
+
         # Bond force
         F_bond = tau * perimeter * L0
 
@@ -1689,6 +1758,23 @@ def _bond_slip_assembly_python(
 
             # Compute dowel stress and tangent
             sigma_dowel, dsigma_dw = dowel_model.sigma_and_tangent(w_pos)
+
+            # TASK 5: Dowel dissipation tracking (trapezoidal rule)
+            if compute_dissipation and u_total_prev is not None:
+                # Compute opening at previous time step
+                du_x_old = u_s_mid_x_old - u_c_mid_x_old  # Already computed above
+                du_y_old = u_s_mid_y_old - u_c_mid_y_old
+                w_old = du_x_old * nx + du_y_old * ny
+                w_old_pos = max(w_old, 0.0)
+
+                # Compute sigma_old
+                sigma_dowel_old, _ = dowel_model.sigma_and_tangent(w_old_pos)
+
+                # Trapezoidal dissipation:
+                # ΔD = 0.5 * (sigma_old + sigma_new) * (w_new - w_old) * perimeter * L0
+                d_opening = w_pos - w_old_pos
+                diss_dowel_local = 0.5 * (sigma_dowel_old + sigma_dowel) * d_opening * perimeter * L0
+                D_dowel_inc += diss_dowel_local
 
             # Convert traction to force: F = sigma * perimeter * L0
             F_dowel = sigma_dowel * perimeter * L0
@@ -1792,7 +1878,13 @@ def _bond_slip_assembly_python(
         tau_current=np.zeros(n_seg),
     )
 
-    return f_bond, K_bond_sp, bond_states_new
+    # Auxiliary data (TASK 5: dissipation)
+    aux = {
+        "D_bond_inc": float(D_bond_inc),
+        "D_dowel_inc": float(D_dowel_inc),
+    }
+
+    return f_bond, K_bond_sp, bond_states_new, aux
 
 
 # ------------------------------------------------------------------------------

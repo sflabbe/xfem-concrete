@@ -53,6 +53,18 @@ class StepEnergy:
     D_alg_inc: float    # increment for this step
     D_alg_cum: float    # cumulative
 
+    # TASK 5: Physical dissipation components
+    D_coh_inc: float = 0.0      # cohesive dissipation increment
+    D_coh_cum: float = 0.0      # cohesive dissipation cumulative
+    D_bond_inc: float = 0.0     # bond-slip dissipation increment
+    D_bond_cum: float = 0.0     # bond-slip dissipation cumulative
+    D_bulk_plastic_inc: float = 0.0  # bulk plastic dissipation increment
+    D_bulk_plastic_cum: float = 0.0  # bulk plastic dissipation cumulative
+    D_physical_inc: float = 0.0 # total physical dissipation increment
+    D_physical_cum: float = 0.0 # total physical dissipation cumulative
+    D_numerical_inc: float = 0.0  # numerical dissipation (D_alg - D_physical)
+    D_numerical_cum: float = 0.0  # numerical dissipation cumulative
+
     # Mechanical energy (for checking balance)
     E_mech_n: float     # T_n + Psi_bulk_n
     E_mech_np1: float   # T_np1 + Psi_bulk_np1
@@ -196,7 +208,16 @@ def compute_step_energy(
     dir_dofs: List[int],
     W_dir_cum_prev: float,
     D_damp_cum_prev: float,
-    D_alg_cum_prev: float
+    D_alg_cum_prev: float,
+    # TASK 5: Physical dissipation components
+    D_coh_inc: float = 0.0,
+    D_bond_inc: float = 0.0,
+    D_bulk_plastic_inc: float = 0.0,
+    D_coh_cum_prev: float = 0.0,
+    D_bond_cum_prev: float = 0.0,
+    D_bulk_plastic_cum_prev: float = 0.0,
+    D_physical_cum_prev: float = 0.0,
+    D_numerical_cum_prev: float = 0.0,
 ) -> StepEnergy:
     """
     Compute complete energy ledger for step n→n+1 using trapezoidal formulas.
@@ -257,6 +278,10 @@ def compute_step_energy(
     # Algorithmic dissipation (remainder)
     ΔD_alg = ΔW_dir - (ΔE_mech + ΔD_damp)
 
+    # TASK 5: Physical dissipation components
+    ΔD_physical = D_coh_inc + D_bond_inc + D_bulk_plastic_inc
+    ΔD_numerical = ΔD_alg - ΔD_physical
+
     # Balance check (should be ~0 by construction)
     balance_inc = ΔW_dir - (ΔE_mech + ΔD_damp + ΔD_alg)
 
@@ -264,6 +289,13 @@ def compute_step_energy(
     W_dir_cum = W_dir_cum_prev + ΔW_dir
     D_damp_cum = D_damp_cum_prev + ΔD_damp
     D_alg_cum = D_alg_cum_prev + ΔD_alg
+
+    # TASK 5: Cumulative physical dissipation
+    D_coh_cum = D_coh_cum_prev + D_coh_inc
+    D_bond_cum = D_bond_cum_prev + D_bond_inc
+    D_bulk_plastic_cum = D_bulk_plastic_cum_prev + D_bulk_plastic_inc
+    D_physical_cum = D_physical_cum_prev + ΔD_physical
+    D_numerical_cum = D_numerical_cum_prev + ΔD_numerical
 
     return StepEnergy(
         step=step,
@@ -279,6 +311,17 @@ def compute_step_energy(
         D_damp_cum=D_damp_cum,
         D_alg_inc=ΔD_alg,
         D_alg_cum=D_alg_cum,
+        # TASK 5: Physical dissipation components
+        D_coh_inc=D_coh_inc,
+        D_coh_cum=D_coh_cum,
+        D_bond_inc=D_bond_inc,
+        D_bond_cum=D_bond_cum,
+        D_bulk_plastic_inc=D_bulk_plastic_inc,
+        D_bulk_plastic_cum=D_bulk_plastic_cum,
+        D_physical_inc=ΔD_physical,
+        D_physical_cum=D_physical_cum,
+        D_numerical_inc=ΔD_numerical,
+        D_numerical_cum=D_numerical_cum,
         E_mech_n=E_mech_n,
         E_mech_np1=E_mech_np1,
         balance_inc=balance_inc
@@ -301,6 +344,17 @@ def energy_to_dict(energy: StepEnergy) -> Dict[str, float]:
         'D_damp_cum': energy.D_damp_cum,
         'D_alg_inc': energy.D_alg_inc,
         'D_alg_cum': energy.D_alg_cum,
+        # TASK 5: Physical dissipation components
+        'D_coh_inc': energy.D_coh_inc,
+        'D_coh_cum': energy.D_coh_cum,
+        'D_bond_inc': energy.D_bond_inc,
+        'D_bond_cum': energy.D_bond_cum,
+        'D_bulk_plastic_inc': energy.D_bulk_plastic_inc,
+        'D_bulk_plastic_cum': energy.D_bulk_plastic_cum,
+        'D_physical_inc': energy.D_physical_inc,
+        'D_physical_cum': energy.D_physical_cum,
+        'D_numerical_inc': energy.D_numerical_inc,
+        'D_numerical_cum': energy.D_numerical_cum,
         'E_mech_n': energy.E_mech_n,
         'E_mech_np1': energy.E_mech_np1,
         'balance_inc': energy.balance_inc
