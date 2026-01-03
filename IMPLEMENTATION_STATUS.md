@@ -149,43 +149,29 @@ def precompute_crack_context_for_bond(
 
 ---
 
-### TASK 3: Mixed-Mode Cohesive (Mode I + II) with Numba 🟡 **Medium**
-**Status:** Python implementation exists in `cohesive_laws.py`, not wired to solvers
+### TASK 3: Mixed-Mode Cohesive (Mode I + II) 🟢 **Medium** ✅ PYTHON COMPLETE
+**Status:** Python assembly integration complete | Numba kernel pending ⏳
 
-**Current State:**
-- `cohesive_update_mixed()` function implemented (lines 241-531 in cohesive_laws.py)
-- Supports Wells-type shear degradation with cross-coupling
-- **Gap:** Assembly code only uses Mode I (normal opening)
+**Completed:**
+- ✅ `cohesive_update_mixed()` function implemented (lines 241-531 in cohesive_laws.py)
+- ✅ Wells-type shear degradation with cross-coupling
+- ✅ Comprehensive tests (`test_mixed_mode_cohesive.py`) - all passing
+- ✅ Assembly integration (`assembly_single.py:554-694`) with δn/δs jump operators
+- ✅ Mode detection via `law.mode == "mixed"`
+- ✅ Full 2×2 tangent matrix assembly with cross-coupling
+- ✅ Integration tests (`test_mixed_mode_assembly_integration.py`) - all passing
+- ✅ Backward compatibility verified: Mode I-only tests still pass
 
-**Required Changes:**
-
-1. **Update Assembly** (`assembly_single.py`, `multicrack.py`):
-   - Compute both `δn` (normal) and `δs` (tangential) jumps at each cohesive GP
-   - Define unit normal `n` and unit tangent `t = rotate90(n)`
-   - Build jump operators: `g_n` and `g_s` such that:
-     ```python
-     δn = g_n @ q  # Normal jump
-     δs = g_s @ q  # Tangential jump
-     ```
-   - Call `cohesive_update_mixed(law, δn, δs, state)` if `law.mode == "mixed"`
-   - Returns `t = [tn, ts]` and `K = [[∂tn/∂δn, ∂tn/∂δs], [∂ts/∂δn, ∂ts/∂δs]]`
-   - Assemble:
-     ```python
-     f_loc = g_n.T @ tn + g_s.T @ ts
-     K_loc = g_n.T @ K[0,0] @ g_n + g_n.T @ K[0,1] @ g_s + \
-             g_s.T @ K[1,0] @ g_n + g_s.T @ K[1,1] @ g_s
-     ```
-
-2. **Create Numba Kernel** (`src/xfem_clean/numba/kernels_cohesive_mixed.py`):
+**Remaining:**
+1. **Create Numba Kernel** (`src/xfem_clean/numba/kernels_cohesive_mixed.py`):
    - Port `cohesive_update_mixed()` to Numba
    - Inline Wells-type shear logic: `k_s(w) = k_s0 * exp(h_s * w)`
    - Compute full 2×2 tangent matrix with cross-coupling
    - **Challenge:** Numba doesn't support complex dataclasses; use plain arrays
 
-3. **Add Tests**:
-   - Pure Mode I (δs=0) → matches old results
-   - Pure shear (δn=0, δs≠0) → verify `ts = k_s0*δs` and cross-coupling `∂ts/∂δn`
-   - Cyclic closure: verify `κ = wmax` is used for shear stiffness
+2. **Extend multicrack assembly** (`multicrack.py`):
+   - Apply same δn/δs jump operator logic to multi-crack solver
+   - Ensure consistency with single-crack implementation
 
 ---
 
@@ -281,12 +267,13 @@ def precompute_crack_context_for_bond(
 | TASK 1: Crack Ωc (Python) | ✅ Done | Hard | Medium | ~6-8h | ~6h |
 | TASK 1: Crack Ωc (Numba) | 🟡 Pending | Medium | Low | ~2-4h | - |
 | TASK 2: BondLayer wiring | ✅ Done | Medium | High | ~4-6h | ~5h |
-| TASK 3: Mixed-mode cohesive | 🔴 Not Started | Medium | Medium | ~6-8h | - |
+| TASK 3: Mixed-mode (Python) | ✅ Done | Medium | Medium | ~6-8h | ~7h |
+| TASK 3: Mixed-mode (Numba) | 🔴 Not Started | Medium | Low | ~4-6h | - |
 | TASK 4: Dowel Numba | 🔴 Not Started | Easy | Low | ~3-4h | - |
 | TASK 5: Energy tracking | 🔴 Not Started | Hard | Low | ~8-10h | - |
 
-**Completed:** ~14 hours
-**Total Remaining Estimated Time:** 19-34 hours
+**Completed:** ~21 hours (TASK 0, 1 Python, 2, 3 Python)
+**Total Remaining Estimated Time:** 13-24 hours
 
 ---
 
