@@ -278,7 +278,7 @@ def assemble_xfem_system(
                                 wpl_new = wpl0
                                 wft_new = wft0
                                 wfc_new = wfc0
-                                dW = 0.0
+                                dW = 0.0  # Elastic: no plastic dissipation
                             elif int(bulk_kind) == 2:
                                 E = float(bulk_params[0])
                                 nu = float(bulk_params[1])
@@ -339,8 +339,15 @@ def assemble_xfem_system(
                                     Gf_c,
                                     lch,
                                 )
+                                # CDP: plastic work increment is wpl_new - wpl0
+                                dW = wpl_new - wpl0
                             else:
                                 raise ValueError(f"Unknown bulk_kind={bulk_kind}")
+
+                            # TASK 5: Accumulate bulk plastic dissipation
+                            if compute_dissipation:
+                                # Physical dissipation = dW * volume (detJ * wgp * thickness)
+                                D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
 
                             eps_p3_new = np.array([eps_p6_new[0], eps_p6_new[1], eps_p6_new[3]], dtype=float)
                             if isinstance(mp_updates, BulkStatePatch):
@@ -389,14 +396,27 @@ def assemble_xfem_system(
                                 mp_updates.add(e, ipid, mp)
                             else:
                                 mp_updates[(e, ipid)] = mp
+
+                            # TASK 5: Accumulate bulk plastic dissipation (non-Numba path)
+                            if compute_dissipation:
+                                dW = mp.w_plastic - mp0.w_plastic
+                                D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
+
                     elif mp_states_comm is not None:
                         mp0 = mp_states_comm.get((e, ipid), mp_default())
                         mp = mp0.copy_shallow()
                         sig, Ct = material.integrate(mp, eps)
                         mp_updates[(e, ipid)] = mp
+
+                        # TASK 5: Accumulate bulk plastic dissipation (non-Numba path)
+                        if compute_dissipation:
+                            dW = mp.w_plastic - mp0.w_plastic
+                            D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
+
                     else:
                         mp = mp_default().copy_shallow()
                         sig, Ct = material.integrate(mp, eps)
+                        # No committed state, so no dissipation accumulation
 
                     # Apply penalty factor for void elements
                     if is_void_elem:

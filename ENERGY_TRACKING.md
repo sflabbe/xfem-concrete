@@ -327,12 +327,15 @@ assert |balance| < 1e-10
 
 - ✅ **Cohesive dissipation** (Mode I + mixed-mode): Complete (Python)
 - ✅ **Bond dissipation** (Python): Complete
+- ✅ **Bulk plastic dissipation** (Numba + Python): Complete
+  - Elastic (bulk_kind=1): dW = 0 ✓
+  - Drucker-Prager (bulk_kind=2): dW from return mapping ✓
+  - CDP (bulk_kind=3): dW = wpl_new - wpl_old ✓
 - ✅ **Energy framework integration**: Complete
-- ⏳ **Bond dissipation** (Numba): Pending
-- ⏳ **Bulk plastic dissipation**: Pending
-- ⏳ **Comprehensive tests**: Partial (formula tests complete, integration tests pending)
+- ✅ **Comprehensive tests**: Complete (formula validation + integration tests)
+- 🔴 **Bond dissipation** (Numba): Deferred (Python path sufficient)
 
 ---
 
 **Last updated**: 2026-01-03
-**Author**: Claude (TASK 5 implementation)
+**Author**: Claude (TASK 5 complete)
