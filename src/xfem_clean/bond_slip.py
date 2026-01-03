@@ -1260,9 +1260,7 @@ def assemble_bond_slip(
                 "enable_dowel=True requires dowel_model or bond_law with d_bar and f_cm attributes"
             )
 
-    # Note: Numba kernel does not yet support dowel action; force Python fallback
-    if enable_dowel:
-        use_numba = False
+    # Numba kernel now supports dowel action (no need to force Python fallback)
 
     # Compute perimeter (explicit parameter takes precedence)
     if perimeter is None:
@@ -1359,7 +1357,25 @@ def assemble_bond_slip(
             if segment_mask is not None:
                 segment_mask_numba = np.ascontiguousarray(segment_mask, dtype=np.bool_)
 
-            f_bond, rows, cols, data, s_curr = bond_slip_assembly_kernel(
+            # Prepare crack_context for Numba (if provided)
+            crack_context_numba = None
+            if crack_context is not None:
+                crack_context_numba = np.ascontiguousarray(crack_context, dtype=np.float64)
+
+            # Prepare dowel_params for Numba (if dowel enabled)
+            dowel_params_numba = None
+            if enable_dowel and dowel_model is not None:
+                # Extract phi and fc from dowel model
+                phi = dowel_model.d_bar  # Bar diameter [m]
+                fc = dowel_model.f_c     # Concrete compressive strength [Pa]
+                dowel_params_numba = np.array([phi, fc], dtype=np.float64)
+
+            # Prepare u_total_prev for Numba (if dissipation tracking enabled)
+            u_total_prev_numba = None
+            if compute_dissipation and u_total_prev is not None:
+                u_total_prev_numba = np.ascontiguousarray(u_total_prev, dtype=np.float64)
+
+            f_bond, rows, cols, data, s_curr, D_bond_inc, D_dowel_inc = bond_slip_assembly_kernel(
                 u_total,
                 steel_segments,
                 steel_dof_map,
@@ -1367,6 +1383,10 @@ def assemble_bond_slip(
                 s_max_hist,
                 steel_EA,
                 segment_mask_numba,
+                crack_context_numba,
+                dowel_params_numba,
+                u_total_prev_numba,
+                compute_dissipation,
             )
         except Exception as e:
             # Enhanced error reporting for kernel failures
@@ -1389,9 +1409,8 @@ def assemble_bond_slip(
             tau_current=np.zeros(n_seg),  # Computed inline; could extract if needed
         )
 
-        # TASK 5: Dissipation tracking (Numba path - not yet implemented)
-        # TODO: Extend Numba kernel to accumulate dissipation
-        aux = {"D_bond_inc": 0.0, "D_dowel_inc": 0.0}
+        # TASK 5: Dissipation tracking (Numba path - now implemented)
+        aux = {"D_bond_inc": D_bond_inc, "D_dowel_inc": D_dowel_inc}
 
     else:
         # Part A4: Pure Python fallback for debugging
