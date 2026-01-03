@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -54,7 +54,7 @@ def build_xfem_dofs(
     elems: np.ndarray,
     crack: XFEMCrack,
     H_region_ymax: float,
-    tip_patch: Tuple[float, float, float, float],
+    tip_patch: Optional[Tuple[float, float, float, float]] = None,
     rebar_segs: np.ndarray = None,
     enable_bond_slip: bool = False,
     enable_dolbow_removal: bool = False,
@@ -122,8 +122,12 @@ def build_xfem_dofs(
             tol_dolbow=tol_dolbow,
         )
 
-    xmin, xmax, ymin, ymax = tip_patch
-    tip_nodes = (xs >= xmin) & (xs <= xmax) & (ys >= ymin) & (ys <= ymax)
+    # If tip_patch is None, use empty patch (no tip enrichment)
+    if tip_patch is None:
+        tip_nodes = np.zeros(nnode, dtype=bool)
+    else:
+        xmin, xmax, ymin, ymax = tip_patch
+        tip_nodes = (xs >= xmin) & (xs <= xmax) & (ys >= ymin) & (ys <= ymax)
 
     H = -np.ones((nnode, 2), dtype=int)
     tip = -np.ones((nnode, 4, 2), dtype=int)

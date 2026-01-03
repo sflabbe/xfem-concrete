@@ -2014,7 +2014,7 @@ def assemble_dowel_action(
 
 def precompute_crack_context_for_bond(
     steel_segments: np.ndarray,
-    nodes: np.ndarray,
+    nodes: Optional[np.ndarray] = None,
     cracks: Optional[List[Any]] = None,  # List of XFEMCrack objects
     cohesive_states: Optional[Any] = None,  # CohesiveStateArrays or None
     cohesive_law: Optional[Any] = None,  # CohesiveLaw for tn(wmax) evaluation
@@ -2086,6 +2086,10 @@ def precompute_crack_context_for_bond(
     # Default: no cracks (large distance → Ωc = 1.0)
     crack_context[:, 0] = 1e10  # Very large distance
     crack_context[:, 1] = 1.0   # r = 1.0 → no deterioration
+
+    # If nodes is None, return default context (no deterioration)
+    if nodes is None:
+        return crack_context
 
     if cracks is None or len(cracks) == 0:
         return crack_context  # No cracks: Ωc = 1 everywhere
