@@ -220,15 +220,19 @@ def precompute_crack_context_for_bond(
 
 ---
 
-### TASK 5: Efficient Physical Energy Dissipation Tracking 🔴 **Complex**
-**Status:** HHT energy tracking exists (`energy_hht.py`), no physical dissipation breakdown
+### TASK 5: Efficient Physical Energy Dissipation Tracking 🟡 **Complex** ⏳ IN PROGRESS
+**Status:** Cohesive dissipation complete | Bond & bulk dissipation pending
 
-**Current State:**
-- `energy_hht.py` computes total energy balance
-- Tracks kinetic, bulk, damping, constraint work
-- **Gap:** No decomposition of physical dissipation (bulk vs cohesive vs bond)
+**Completed (Cohesive Dissipation):**
+- ✅ Added `q_prev` and `compute_dissipation` parameters to assembly
+- ✅ Cohesive dissipation via trapezoidal rule: `ΔD = 0.5*(t_old + t_new)·Δδ`
+- ✅ Works for both Mode I and mixed-mode cohesive
+- ✅ No extra assembly passes (efficient, computed during final assembly)
+- ✅ Returns `D_coh_inc` in aux dictionary
+- ✅ Formula validated: total dissipation matches Gf within 0.056%
+- ✅ Supports mixed-mode: `ΔD = 0.5*[(tn_old + tn_new)·Δδn + (tt_old + tt_new)·Δδt]`
 
-**Required Implementation:**
+**Remaining Implementation:**
 
 1. **Bulk Dissipation** (if CDP or damage model used):
    - During constitutive update, compute `ΔD_bulk = ∫ σ : dε_plastic`
@@ -270,10 +274,12 @@ def precompute_crack_context_for_bond(
 | TASK 3: Mixed-mode (Python) | ✅ Done | Medium | Medium | ~6-8h | ~7h |
 | TASK 3: Mixed-mode (Numba) | 🔴 Not Started | Medium | Low | ~4-6h | - |
 | TASK 4: Dowel Numba | 🔴 Not Started | Easy | Low | ~3-4h | - |
-| TASK 5: Energy tracking | 🔴 Not Started | Hard | Low | ~8-10h | - |
+| TASK 5: Cohesive dissipation | ✅ Done | Medium | Medium | ~3-4h | ~3h |
+| TASK 5: Bond dissipation | 🔴 Not Started | Medium | Low | ~2-3h | - |
+| TASK 5: Bulk dissipation | 🔴 Not Started | Medium | Low | ~3-4h | - |
 
-**Completed:** ~21 hours (TASK 0, 1 Python, 2, 3 Python)
-**Total Remaining Estimated Time:** 13-24 hours
+**Completed:** ~24 hours (TASK 0, 1 Python, 2, 3 Python, 5 Cohesive)
+**Total Remaining Estimated Time:** 12-21 hours
 
 ---
 
