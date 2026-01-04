@@ -412,16 +412,27 @@ def cohesive_update_mixed_values_numba(
     else:
         d = (g_max - delta0_eff) / max(1e-30, (deltaf_eff - delta0_eff))
 
-    # Viscous damage regularization
-    if visc_damp > 0.0:
-        d_new = (d + visc_damp * damage_old) / (1.0 + visc_damp)
-        if d_new < damage_old:
-            d_new = damage_old
-    else:
-        d_new = d if d > damage_old else damage_old
+    # Clamp damage (Python parity)
+    d = min(1.0, max(0.0, d))
 
-    # Reduced stiffness
-    k_alg_n = (1.0 - d_new) * Kn
+    # PYTHON PARITY: In mixed mode, damage is a derived quantity from g_max
+    # (not an independent history variable). No irreversibility constraint on damage itself.
+    # g_max already enforces monotonicity, so damage is automatically monotonic.
+    d_new = d
+
+    # PYTHON PARITY: Secant stiffness formulation
+    # Envelope traction at g_max
+    T_env_n = ft * (1.0 - d_new)
+
+    # Secant stiffness
+    k_sec_n = T_env_n / max(1e-15, g_max)
+
+    # Cap at initial stiffness
+    if k_sec_n > Kn:
+        k_sec_n = Kn
+
+    # Apply residual floor
+    k_alg_n = k_sec_n
     if k_alg_n < k_res:
         k_alg_n = k_res
 
@@ -462,14 +473,26 @@ def cohesive_update_mixed_values_numba(
         dtt_ddt = k_alg_t
 
     else:
-        # Constant shear model (damage-based)
-        k_alg_t = (1.0 - d_new) * Kt
-        if k_alg_t < k_res:
-            k_alg_t = k_res
+        # PYTHON PARITY: Constant shear model (secant stiffness formulation)
+        # Envelope traction at g_max
+        T_env_t = tau_max * (1.0 - d_new)
+
+        # Secant stiffness
+        k_sec_t = T_env_t / max(1e-15, g_max)
+
+        # Cap at initial stiffness
+        if k_sec_t > Kt:
+            k_sec_t = Kt
+
+        # Apply residual floor (proportional to normal residual)
+        k_res_t = k_res * (Kt / max(1e-30, Kn))
+        k_alg_t = k_sec_t
+        if k_alg_t < k_res_t:
+            k_alg_t = k_res_t
 
         t_t = k_alg_t * delta_t_val
 
-        # Damage-based tangent (no Wells cross-coupling)
+        # PYTHON PARITY: Damage-based tangent (consistent with secant formulation)
         # Compute damage derivative if in softening
         if delta0_eff < g_max < deltaf_eff:
             dd_dg = 1.0 / max(1e-30, (deltaf_eff - delta0_eff))
@@ -484,30 +507,52 @@ def cohesive_update_mixed_values_numba(
             dg_ddn = 0.0
             dg_ddt = 0.0
 
-        # Stiffness derivatives
-        dk_alg_t_dg = -dd_dg * Kt
+        # PYTHON PARITY: Stiffness derivatives with secant formulation
+        # dk_alg_t/dg = -tau_max/g * dd/dg - k_alg_t/g
+        if g_max > 1e-18:
+            dk_alg_t_dg = -tau_max / g_max * dd_dg - k_alg_t / g_max
+        else:
+            dk_alg_t_dg = 0.0
 
         # Tangent components
         dtt_ddn = dk_alg_t_dg * dg_ddn * delta_t_val
         dtt_ddt = dk_alg_t_dg * dg_ddt * delta_t_val + k_alg_t
 
-    # Normal direction tangent (same for both models)
-    if delta0_eff < g_max < deltaf_eff:
-        dd_dg = 1.0 / max(1e-30, (deltaf_eff - delta0_eff))
+    # PYTHON PARITY: Normal direction tangent (model-dependent)
+    if delta_n > 0.0:
+        # Damage derivative if in softening
+        if delta0_eff < g_max < deltaf_eff:
+            dd_dg = 1.0 / max(1e-30, (deltaf_eff - delta0_eff))
+        else:
+            dd_dg = 0.0
+
+        # Effective separation derivatives
+        if delta_eff > 1e-18:
+            dg_ddn = delta_n_pos / delta_eff
+            dg_ddt = beta * delta_t_val / delta_eff
+        else:
+            dg_ddn = 0.0
+            dg_ddt = 0.0
+
+        # PYTHON PARITY: Stiffness derivative with secant formulation
+        # dk_alg_n/dg = -ft/g * dd/dg - k_alg_n/g
+        if g_max > 1e-18:
+            dk_alg_n_dg = -ft / g_max * dd_dg - k_alg_n / g_max
+        else:
+            dk_alg_n_dg = 0.0
+
+        # Tangent components
+        dtn_ddn = dk_alg_n_dg * dg_ddn * delta_n_pos + k_alg_n
+
+        # PYTHON PARITY: For Wells model, dtn_ddt = 0.0 (no slip-to-normal coupling)
+        if shear_model_id == 1:
+            dtn_ddt = 0.0
+        else:
+            dtn_ddt = dk_alg_n_dg * dg_ddt * delta_n_pos
     else:
-        dd_dg = 0.0
-
-    if delta_eff > 1e-18:
-        dg_ddn = delta_n_pos / delta_eff if delta_n > 0.0 else 0.0
-        dg_ddt = beta * delta_t_val / delta_eff
-    else:
-        dg_ddn = 0.0
-        dg_ddt = 0.0
-
-    dk_alg_n_dg = -dd_dg * Kn
-
-    dtn_ddn = dk_alg_n_dg * dg_ddn * delta_n_pos + k_alg_n if delta_n > 0.0 else 0.0
-    dtn_ddt = dk_alg_n_dg * dg_ddt * delta_n_pos
+        # Compression: no normal traction or tangent
+        dtn_ddn = 0.0
+        dtn_ddt = 0.0
 
     return t_n, t_t, dtn_ddn, dtn_ddt, dtt_ddn, dtt_ddt, g_max, d_new
 
