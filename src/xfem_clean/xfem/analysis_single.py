@@ -369,6 +369,8 @@ def run_analysis_xfem(
         if dofs_obj.steel is None:
             return
 
+        case_id = getattr(model, "case_id", "unknown")
+
         # Resolve prescribed_dofs (load_dofs)
         resolved_load_dofs = []
         for dof_marker in bc_spec.prescribed_dofs:
@@ -379,11 +381,16 @@ def run_analysis_xfem(
                 component = 0  # ux for pullout
 
                 if node_id >= 0 and node_id < nnode:
+                    if not dofs_obj.steel_nodes[node_id]:
+                        raise ValueError(
+                            "Invalid steel DOF mapping: "
+                            f"case_id={case_id}, node_id={node_id}, "
+                            f"dof_marker={dof_marker}, "
+                            "hint=BC refiere a bond-layer node pero no hay bond segments en ese node"
+                        )
                     steel_dof = dofs_obj.steel[node_id, component]
                     if steel_dof >= 0:
                         resolved_load_dofs.append(steel_dof)
-                    else:
-                        print(f"WARNING: Steel DOF for node {node_id} not allocated")
             else:
                 # Positive: already a concrete DOF
                 resolved_load_dofs.append(dof_marker)
@@ -399,6 +406,13 @@ def run_analysis_xfem(
                     component = 0
 
                     if node_id >= 0 and node_id < nnode:
+                        if not dofs_obj.steel_nodes[node_id]:
+                            raise ValueError(
+                                "Invalid steel DOF mapping: "
+                                f"case_id={case_id}, node_id={node_id}, "
+                                f"dof_marker={dof_marker}, "
+                                "hint=BC refiere a bond-layer node pero no hay bond segments en ese node"
+                            )
                         steel_dof = dofs_obj.steel[node_id, component]
                         if steel_dof >= 0:
                             resolved_reaction_dofs.append(steel_dof)

@@ -91,7 +91,7 @@ print(f"Convergence tolerance: ||r|| < 1e-3 N\n")
 
 # Extended Newton loop
 for it in range(100):
-    K, fint, _, _, _, bond_new = assemble_xfem_system(
+    K, fint, _, _, _, bond_new, _, _ = assemble_xfem_system(
         nodes=nodes,
         elems=elems,
         dofs=dofs,

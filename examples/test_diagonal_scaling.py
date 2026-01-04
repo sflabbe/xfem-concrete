@@ -139,7 +139,7 @@ def test_realistic_xfem_system():
     q = np.zeros(dofs.ndof)
 
     print(f"\nAssembling system...")
-    K, fint, _, _, _, _ = assemble_xfem_system(
+    K, fint, _, _, _, _, _, _ = assemble_xfem_system(
         nodes=nodes,
         elems=elems,
         dofs=dofs,

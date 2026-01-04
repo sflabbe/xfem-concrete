@@ -163,7 +163,6 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
 
     try:
         from examples.gutierrez_thesis.solver_interface import run_case_solver
-        from examples.gutierrez_thesis.postprocess_comprehensive import postprocess_results
 
         results = run_case_solver(case_config, mesh_factor=mesh_factor, enable_postprocess=enable_postprocess, cli_args=cli_args)
 
@@ -197,9 +196,6 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
                 ]
                 writer.writerow(row_out)
         print(f"  → {history_file}")
-
-        # Comprehensive postprocessing (FASE G)
-        postprocess_results(results, case_config, output_dir)
 
     except Exception as e:
         import traceback
@@ -393,7 +389,7 @@ Examples:
         for case_id, factory in CASE_REGISTRY.items():
             case_config = factory()
             enable_post = not args.no_post
-        run_case(case_config, mesh_factor, args.dry_run, enable_postprocess=enable_post, cli_args=args)
+            run_case(case_config, mesh_factor, args.dry_run, enable_postprocess=enable_post, cli_args=args)
 
     else:
         # Run single case
