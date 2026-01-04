@@ -131,6 +131,10 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
     print(f"Output dir: {case_config.outputs.output_dir}\n")
 
     # Apply CLI overrides to case_config
+    if cli_args and hasattr(cli_args, 'bulk') and cli_args.bulk is not None:
+        case_config.concrete.model_type = cli_args.bulk
+        print(f"Override: concrete.model_type = {cli_args.bulk}")
+
     if cli_args and hasattr(cli_args, 'nsteps') and cli_args.nsteps is not None:
         if hasattr(case_config.loading, 'n_steps'):
             case_config.loading.n_steps = cli_args.nsteps
@@ -262,6 +266,7 @@ Examples:
   python -m examples.gutierrez_thesis.run --case pullout
   python -m examples.gutierrez_thesis.run --case STN12 --mesh fine
   python -m examples.gutierrez_thesis.run --case all --mesh coarse
+  python -m examples.gutierrez_thesis.run --case t5a1 --bulk dp --dry-run
         """
     )
 
@@ -306,6 +311,11 @@ Examples:
         "--mesh-factor",
         type=float,
         help="Override mesh factor (alternative to --mesh preset)"
+    )
+    parser.add_argument(
+        "--bulk",
+        choices=["elastic", "dp", "cdp_lite", "cdp_full"],
+        help="Override concrete bulk material model_type (default: case config)"
     )
     parser.add_argument(
         "--output-dir",
