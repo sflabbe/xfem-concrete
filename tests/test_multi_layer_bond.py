@@ -109,11 +109,11 @@ def test_build_bond_layers_two_horizontal_rebars():
     print(f"  Layer 1: {layer1.segments.shape[0]} segments, EA={layer1.EA/1e6:.2f} MN")
 
 
-def test_build_bond_layers_vertical_rebar():
+def test_build_bond_layers_vertical_rebar(tmp_path):
     """Test building vertical rebar layer (orientation=90°)."""
     from examples.gutierrez_thesis.case_config import (
         CaseConfig, GeometryConfig, ConcreteConfig, SteelConfig,
-        RebarLayer, CEBFIPBondLaw
+        RebarLayer, CEBFIPBondLaw, OutputConfig
     )
     from examples.gutierrez_thesis.solver_interface import build_bond_layers_from_case
 
@@ -145,13 +145,33 @@ def test_build_bond_layers_vertical_rebar():
         orientation_deg=90.0,  # Vertical!
     )
 
+    # Minimal OutputConfig (all outputs disabled for unit test)
+    outputs = OutputConfig(
+        output_dir=str(tmp_path),
+        case_name="test_vertical",
+        save_load_displacement=False,
+        save_crack_data=False,
+        save_energy=False,
+        save_crack_pattern=False,
+        save_damage_field=False,
+        save_deformed_shape=False,
+        save_metrics=False,
+        save_vtk=False,
+        compute_crack_widths=False,
+        compute_slip_profiles=False,
+        compute_bond_profiles=False,
+        compute_steel_forces=False,
+    )
+
     case = CaseConfig(
         case_id="test_vertical",
+        description="unit-test: vertical rebar bond layer builder",
         geometry=GeometryConfig(length=1000, height=1000, thickness=100, n_elem_x=nx, n_elem_y=ny),
         concrete=ConcreteConfig(E=30e3, nu=0.2, f_c=30.0, f_t=3.0, G_f=0.1),
+        loading=None,
+        outputs=outputs,
         rebar_layers=[rebar_vert],
         frp_sheets=[],
-        loading=None,
     )
 
     bond_layers = build_bond_layers_from_case(case, nodes)
@@ -173,11 +193,11 @@ def test_build_bond_layers_vertical_rebar():
     print(f"  Tangent vectors: cy ≈ {layer.segments[:, 4].mean():.3f} (should be ≈1)")
 
 
-def test_segment_mask():
+def test_segment_mask(tmp_path):
     """Test bond-disabled regions (segment masking)."""
     from examples.gutierrez_thesis.case_config import (
         CaseConfig, GeometryConfig, ConcreteConfig, SteelConfig,
-        RebarLayer, CEBFIPBondLaw
+        RebarLayer, CEBFIPBondLaw, OutputConfig
     )
     from examples.gutierrez_thesis.solver_interface import build_bond_layers_from_case
 
@@ -205,13 +225,33 @@ def test_segment_mask():
         bond_disabled_x_range=(800.0, 1200.0),  # mm
     )
 
+    # Minimal OutputConfig (all outputs disabled for unit test)
+    outputs = OutputConfig(
+        output_dir=str(tmp_path),
+        case_name="test_mask",
+        save_load_displacement=False,
+        save_crack_data=False,
+        save_energy=False,
+        save_crack_pattern=False,
+        save_damage_field=False,
+        save_deformed_shape=False,
+        save_metrics=False,
+        save_vtk=False,
+        compute_crack_widths=False,
+        compute_slip_profiles=False,
+        compute_bond_profiles=False,
+        compute_steel_forces=False,
+    )
+
     case = CaseConfig(
         case_id="test_mask",
+        description="unit-test: segment masking",
         geometry=GeometryConfig(length=2000, height=400, thickness=100, n_elem_x=nx, n_elem_y=ny),
         concrete=ConcreteConfig(E=30e3, nu=0.2, f_c=30.0, f_t=3.0, G_f=0.1),
+        loading=None,
+        outputs=outputs,
         rebar_layers=[rebar],
         frp_sheets=[],
-        loading=None,
     )
 
     bond_layers = build_bond_layers_from_case(case, nodes)
