@@ -36,7 +36,7 @@ def bond_slip_assembly_kernel(
     bond_params: np.ndarray,    # [tau_max, s1, s2, s3, tau_f, alpha, perimeter, dtau_max, gamma, f_y, E_s, enable_omega_y]
     s_max_hist: np.ndarray,     # [n_seg] history
     steel_EA: float = 0.0,      # E * A for steel (if > 0, adds axial stiffness)
-    segment_mask: np.ndarray = None,  # [n_seg] bool: True = bond disabled for segment
+    segment_mask: np.ndarray = None,  # [n_seg] uint8: 1 = bond disabled, 0 = active (always provided)
     crack_context: np.ndarray = None,  # [n_seg, 2]: [x_over_l, r] for Ωc computation
     dowel_params: np.ndarray = None,   # [phi, fc] for dowel action (if enabled)
     u_total_prev: np.ndarray = None,   # Previous displacements (for dissipation)
@@ -76,9 +76,9 @@ def bond_slip_assembly_kernel(
         Maximum historical slip [n_seg]
     steel_EA : float, optional
         Steel axial stiffness E*A [N]. If > 0, adds truss element.
-    segment_mask : np.ndarray, optional
-        Boolean mask [n_seg] where True = bond disabled for that segment.
-        If None, all segments are active.
+    segment_mask : np.ndarray
+        Integer mask [n_seg] (uint8) where 1 = bond disabled, 0 = active.
+        Always provided (zeros array if no masking).
         CRITICAL (Part A): Masked segments skip bond/dowel but RETAIN steel axial element.
     crack_context : np.ndarray, optional
         Crack deterioration context [n_seg, 2] for computing Ωc.
@@ -254,7 +254,8 @@ def bond_slip_assembly_kernel(
         # =====================================================================
         # CRITICAL FIX: Masked segments (bond disabled) skip bond/dowel contributions
         # but STILL include steel axial element (already assembled above).
-        if segment_mask is not None and segment_mask[i]:
+        # segment_mask is always provided as uint8: 1 = masked, 0 = active
+        if segment_mask[i] != 0:
             # Set slip to zero for disabled segments (no bond forces/stiffness)
             s_current[i] = 0.0
             continue

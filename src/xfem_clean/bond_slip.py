@@ -1362,10 +1362,13 @@ def assemble_bond_slip(
 
         # Call Numba kernel (from dedicated module with cache=True)
         try:
-            # Prepare segment_mask for Numba (needs to be None or contiguous bool array)
-            segment_mask_numba = None
-            if segment_mask is not None:
-                segment_mask_numba = np.ascontiguousarray(segment_mask, dtype=np.bool_)
+            # Prepare segment_mask for Numba (always pass uint8 array for deterministic typing)
+            # True = masked (1), False = active (0)
+            if segment_mask is None:
+                segment_mask_numba = np.zeros(n_seg, dtype=np.uint8)
+            else:
+                # Convert bool mask to uint8: True (masked) -> 1, False (active) -> 0
+                segment_mask_numba = np.ascontiguousarray(segment_mask.astype(np.uint8), dtype=np.uint8)
 
             # Prepare crack_context for Numba (if provided)
             crack_context_numba = None
