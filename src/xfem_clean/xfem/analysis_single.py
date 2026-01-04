@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import Dict, Tuple, Optional, Union, List
+from typing import Any, Dict, Tuple, Optional, Union, List
 from dataclasses import dataclass
 
 import numpy as np
@@ -61,6 +61,19 @@ class BCSpec:
     prescribed_scale: float = 1.0
     reaction_dofs: Optional[List[int]] = None
     nodal_forces: Optional[Dict[int, float]] = None
+
+
+def _concat_bond_layer_segments(bond_layers: List[Any]) -> Optional[np.ndarray]:
+    if not bond_layers:
+        return None
+    segs_list = []
+    for layer in bond_layers:
+        segs = getattr(layer, "segments", None)
+        if segs is not None and len(segs) > 0:
+            segs_list.append(segs)
+    if not segs_list:
+        return None
+    return np.ascontiguousarray(np.vstack(segs_list), dtype=float)
 
 
 def run_analysis_xfem(
@@ -140,9 +153,11 @@ def run_analysis_xfem(
         # PART D: Use provided bond layers (explicit geometry)
         # Rebar segments will be extracted from layers when needed
         rebar_segs = bond_layers[0].segments  # Use first layer for legacy rebar_segs (if needed)
+        rebar_segs_dofs = _concat_bond_layer_segments(bond_layers)
     else:
         # Legacy: auto-generate rebar segments from cover distance
         rebar_segs = prepare_rebar_segments(nodes, cover=model.cover)
+        rebar_segs_dofs = rebar_segs
 
     if model.cand_windows is not None:
         windows = list(model.cand_windows)
@@ -302,13 +317,13 @@ def run_analysis_xfem(
         steel_nodes = None
         ndof = 2 * nnode
 
-        if model.enable_bond_slip and rebar_segs is not None and len(rebar_segs) > 0:
+        if model.enable_bond_slip and rebar_segs_dofs is not None and len(rebar_segs_dofs) > 0:
             steel_dof_offset = ndof  # Steel DOFs start after standard DOFs
             steel_nodes = np.zeros(nnode, dtype=bool)
             steel = -np.ones((nnode, 2), dtype=int)
 
             # Identify nodes used by rebar segments
-            for seg in rebar_segs:
+            for seg in rebar_segs_dofs:
                 n1 = int(seg[0])
                 n2 = int(seg[1])
                 steel_nodes[n1] = True
@@ -795,7 +810,7 @@ def run_analysis_xfem(
                         yH = float(min(crack.tip_y, crack.stop_y))
                         dofs = build_xfem_dofs(
                             nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch(),
-                            rebar_segs=rebar_segs, enable_bond_slip=model.enable_bond_slip
+                            rebar_segs=rebar_segs_dofs, enable_bond_slip=model.enable_bond_slip
                         )
                         # Resolve steel DOFs from bc_spec markers (first time crack activates)
                         if bc_spec is not None:
@@ -963,7 +978,7 @@ def run_analysis_xfem(
                             yH = float(min(crack.tip_y, crack.stop_y))
                             dofs_new = build_xfem_dofs(
                                 nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch(),
-                                rebar_segs=rebar_segs, enable_bond_slip=model.enable_bond_slip
+                                rebar_segs=rebar_segs_dofs, enable_bond_slip=model.enable_bond_slip
                             )
                             q_sol = transfer_q_between_dofs(q_sol, dofs_local, dofs_new)
                             dofs = dofs_new
@@ -1010,7 +1025,7 @@ def run_analysis_xfem(
                                 yH = float(min(crack.tip_y, crack.stop_y))
                                 dofs_new = build_xfem_dofs(
                                     nodes, elems, crack, H_region_ymax=yH, tip_patch=_tip_patch(),
-                                    rebar_segs=rebar_segs, enable_bond_slip=model.enable_bond_slip
+                                    rebar_segs=rebar_segs_dofs, enable_bond_slip=model.enable_bond_slip
                                 )
 
                                 # Junction detection (Dissertation Eq. 4.64-4.66)
@@ -1149,5 +1164,3 @@ def run_analysis_xfem(
         return nodes, elems, q_n, np.asarray(results, dtype=float), crack, mp_states
     else:
         return nodes, elems, q_n, np.asarray(results, dtype=float), crack
-
-
