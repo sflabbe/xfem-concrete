@@ -176,15 +176,33 @@ def build_bond_layers_from_case(
                 # This requires a different segment generation approach
                 x_position = rebar_config.y_position * 1e-3  # mm → m
 
-                # Generate vertical segments: find nodes at x ≈ x_position
+                # Snap to nearest x-grid to avoid empty selections on coarse meshes
+                x_levels = np.unique(np.round(nodes[:, 0], 12))
+                if x_levels.size == 0:
+                    raise ValueError(
+                        "No x-levels available to place vertical rebars for case "
+                        f"{case.case_id}, layer {layer_idx}."
+                    )
+
+                x_bar = x_levels[np.argmin(np.abs(x_levels - x_position))]
+
+                # Generate vertical segments: find nodes at x ≈ x_bar
                 tol = 1e-6  # Tolerance for node matching
-                nodes_at_x = np.where(np.abs(nodes[:, 0] - x_position) < tol)[0]
+                nodes_at_x = np.where(np.abs(nodes[:, 0] - x_bar) < tol)[0]
 
                 # Sort by y-coordinate
                 nodes_at_x = nodes_at_x[np.argsort(nodes[nodes_at_x, 1])]
 
                 # Create segments connecting consecutive nodes
                 n_segs = len(nodes_at_x) - 1
+                if n_segs < 1:
+                    raise ValueError(
+                        "Insufficient nodes for vertical rebar placement: "
+                        f"case={case.case_id}, layer={layer_idx}, "
+                        f"x_target={x_position:.6f} m, x_snapped={x_bar:.6f} m, "
+                        f"nodes_at_x={len(nodes_at_x)}"
+                    )
+
                 segments = np.zeros((n_segs, 5), dtype=float)
                 for i in range(n_segs):
                     n1 = nodes_at_x[i]
