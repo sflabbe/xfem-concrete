@@ -34,7 +34,11 @@ from xfem_clean.fem.mesh import structured_quad_mesh
 # BOND LAW MAPPER
 # =============================================================================
 
-_WARNED_CASES = set()
+_WARNED_BOND_UNITS_CASES: set[str] = set()
+
+
+def _reset_warned_cases_for_tests() -> None:
+    _WARNED_BOND_UNITS_CASES.clear()
 
 
 def map_bond_law(bond_law_config: Any, case_id: str = "unknown") -> Any:
@@ -70,15 +74,16 @@ def map_bond_law(bond_law_config: Any, case_id: str = "unknown") -> Any:
         elif ok_m and not ok_mm:
             s1, s2, s3 = s_m
         elif ok_mm and ok_m:
-            if case_id not in _WARNED_CASES:
+            case_key = case_id or "__unknown__"
+            if case_key not in _WARNED_BOND_UNITS_CASES:
                 import warnings
                 warnings.warn(
                     "Ambiguous bond-slip units for case "
-                    f"{case_id}: raw={s_raw}, mm->m={s_mm}, m={s_m}. "
+                    f"{case_key}: raw={s_raw}, mm->m={s_mm}, m={s_m}. "
                     "Defaulting to mm->m conversion.",
                     RuntimeWarning,
                 )
-                _WARNED_CASES.add(case_id)
+                _WARNED_BOND_UNITS_CASES.add(case_key)
             s1, s2, s3 = s_mm
         else:
             raise ValueError(
