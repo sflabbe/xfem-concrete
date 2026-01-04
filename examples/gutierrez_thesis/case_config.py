@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
 import json
-import yaml
 
 
 class LoadingType(Enum):
@@ -682,6 +681,7 @@ class CaseConfig:
 
     def save_yaml(self, filepath: str):
         """Save to YAML file"""
+        import yaml
         with open(filepath, 'w') as f:
             yaml.dump(self.to_dict(), f, default_flow_style=False)
 
@@ -695,6 +695,7 @@ class CaseConfig:
     @classmethod
     def load_yaml(cls, filepath: str) -> 'CaseConfig':
         """Load from YAML file"""
+        import yaml
         with open(filepath, 'r') as f:
             data = yaml.safe_load(f)
         return cls.from_dict(data)

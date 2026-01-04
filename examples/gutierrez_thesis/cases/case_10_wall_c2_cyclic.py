@@ -80,7 +80,7 @@ def create_case_10() -> CaseConfig:
     # Ø10
     bond_law_10 = CEBFIPBondLaw(
         s1=0.95,  # mm
-        s2=0.95,  # mm
+        s2=1.90,  # mm
         s3=2.0,  # mm
         tau_max=14.38,  # MPa
         tau_f=5.75,  # MPa

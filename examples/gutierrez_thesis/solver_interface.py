@@ -34,7 +34,7 @@ from xfem_clean.fem.mesh import structured_quad_mesh
 # BOND LAW MAPPER
 # =============================================================================
 
-def map_bond_law(bond_law_config: Any) -> Any:
+def map_bond_law(bond_law_config: Any, case_id: str = "unknown") -> Any:
     """
     Map case config bond law to solver bond law.
 
@@ -42,6 +42,8 @@ def map_bond_law(bond_law_config: Any) -> Any:
     ----------
     bond_law_config : CEBFIPBondLaw | BilinearBondLawConfig | BanholzerBondLawConfig
         Bond law from case configuration
+    case_id : str, optional
+        Case identifier for diagnostics
 
     Returns
     -------
@@ -49,11 +51,42 @@ def map_bond_law(bond_law_config: Any) -> Any:
         Bond law for solver
     """
     if isinstance(bond_law_config, CEBFIPBondLaw):
-        # Convert mm to m, MPa to Pa
+        def _valid_slips(slips: Tuple[float, float, float]) -> bool:
+            s1, s2, s3 = slips
+            return s1 > 0.0 and s1 < s2 < s3
+
+        s_raw = (bond_law_config.s1, bond_law_config.s2, bond_law_config.s3)
+        s_mm = tuple(s * 1e-3 for s in s_raw)  # mm → m
+        s_m = s_raw
+
+        ok_mm = _valid_slips(s_mm)
+        ok_m = _valid_slips(s_m)
+
+        if ok_mm and not ok_m:
+            s1, s2, s3 = s_mm
+        elif ok_m and not ok_mm:
+            s1, s2, s3 = s_m
+        elif ok_mm and ok_m:
+            import warnings
+            warnings.warn(
+                "Ambiguous bond-slip units for case "
+                f"{case_id}: raw={s_raw}, mm->m={s_mm}, m={s_m}. "
+                "Defaulting to mm->m conversion.",
+                RuntimeWarning,
+            )
+            s1, s2, s3 = s_mm
+        else:
+            raise ValueError(
+                "Invalid bond-slip params for case="
+                f"{case_id}: raw={s_raw}, mm->m={s_mm}, m={s_m}. "
+                "Require 0 < s1 < s2 < s3."
+            )
+
+        # Convert MPa to Pa
         return CustomBondSlipLaw(
-            s1=bond_law_config.s1 * 1e-3,  # mm → m
-            s2=bond_law_config.s2 * 1e-3,
-            s3=bond_law_config.s3 * 1e-3,
+            s1=s1,
+            s2=s2,
+            s3=s3,
             tau_max=bond_law_config.tau_max * 1e6,  # MPa → Pa
             tau_f=bond_law_config.tau_f * 1e6,
             alpha=bond_law_config.alpha,
@@ -180,7 +213,7 @@ def build_bond_layers_from_case(
                 )
 
             # Convert bond law
-            bond_law = map_bond_law(rebar_config.bond_law)
+            bond_law = map_bond_law(rebar_config.bond_law, case_id=case.case_id)
 
             # Compute EA and perimeter
             d_bar = rebar_config.diameter * 1e-3  # mm → m
@@ -231,7 +264,7 @@ def build_bond_layers_from_case(
             frp_segments = prepare_edge_segments(nodes, edge_nodes)
 
             # Convert FRP bond law
-            bond_law = map_bond_law(frp_config.bond_law)
+            bond_law = map_bond_law(frp_config.bond_law, case_id=case.case_id)
 
             # FRP properties
             t_frp = frp_config.thickness * 1e-3  # mm → m
@@ -968,7 +1001,7 @@ def run_case_solver(
                     frp_segment_mask[i] = True
 
             # Map FRP bond law
-            bond_law = map_bond_law(frp_sheet.bond_law)
+            bond_law = map_bond_law(frp_sheet.bond_law, case_id=case.case_id)
 
             # Store in model for analysis
             model.frp_segs = frp_segs
@@ -1033,7 +1066,7 @@ def run_case_solver(
             bond_segs = model.frp_segs
         elif case.rebar_layers and rebar_segs is not None:
             # Rebar case: use first rebar layer's bond law
-            bond_law = map_bond_law(case.rebar_layers[0].bond_law)
+            bond_law = map_bond_law(case.rebar_layers[0].bond_law, case_id=case.case_id)
             bond_segs = rebar_segs
             # perimeter will be computed from bond_law.d_bar (legacy)
             bond_perimeter = None
