@@ -1138,6 +1138,13 @@ def run_analysis_xfem_multicrack(
             return {}
 
         fixed_dict = {}
+        case_id = getattr(model, "case_id", "unknown")
+
+        def _marker_context(dof_marker: int) -> Optional[str]:
+            marker_meta = getattr(bc_spec, "steel_dof_markers", None)
+            if marker_meta and dof_marker in marker_meta:
+                return marker_meta[dof_marker].get("layer_id")
+            return None
 
         # Fixed DOFs from bc_spec
         for dof, val in bc_spec.fixed_dofs.items():
@@ -1151,10 +1158,38 @@ def run_analysis_xfem_multicrack(
                 node_id = -(dof_marker + 2 * nnode) // 2
                 component = 0  # ux for pullout
 
-                if dofs_obj.steel is not None and node_id >= 0 and node_id < nnode:
-                    steel_dof = dofs_obj.steel[node_id, component]
-                    if steel_dof >= 0:
-                        fixed_dict[int(steel_dof)] = prescribed_scale * float(u_target)
+                layer_id_meta = _marker_context(dof_marker)
+
+                if dofs_obj.steel is None:
+                    raise ValueError(
+                        "Invalid steel DOF mapping: "
+                        f"case_id={case_id}, node_id={node_id}, "
+                        f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                        "reason=steel DOFs not allocated"
+                    )
+                if node_id < 0 or node_id >= nnode:
+                    raise ValueError(
+                        "Invalid steel DOF mapping: "
+                        f"case_id={case_id}, node_id={node_id}, "
+                        f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                        "reason=node_id out of range"
+                    )
+                if not dofs_obj.steel_nodes[node_id]:
+                    raise ValueError(
+                        "Invalid steel DOF mapping: "
+                        f"case_id={case_id}, node_id={node_id}, "
+                        f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                        "reason=no steel DOFs allocated for node"
+                    )
+                steel_dof = dofs_obj.steel[node_id, component]
+                if steel_dof < 0:
+                    raise ValueError(
+                        "Invalid steel DOF mapping: "
+                        f"case_id={case_id}, node_id={node_id}, "
+                        f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                        "reason=steel DOF index invalid"
+                    )
+                fixed_dict[int(steel_dof)] = prescribed_scale * float(u_target)
             else:
                 # Positive: concrete DOF
                 fixed_dict[int(dof_marker)] = prescribed_scale * float(u_target)
