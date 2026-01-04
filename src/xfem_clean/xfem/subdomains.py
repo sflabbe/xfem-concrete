@@ -21,7 +21,11 @@ class ElementProperties:
     material_type : str
         "bulk" (normal concrete), "void" (no stiffness), or "rigid" (very stiff)
     E_override : Optional[float]
-        Override Young's modulus [Pa] (None = use material default)
+        Override Young's modulus [Pa] (None = use material default).
+        For void/rigid types, this is clamped to preserve semantic bounds:
+        - void: E <= 1e-6 * E_default (upper-bounded, near-zero)
+        - rigid: E >= 1e6 * E_default (lower-bounded, very large)
+        - bulk: E_override used directly (no clamping)
     thickness_override : Optional[float]
         Override thickness [m] (None = use global thickness)
     bond_disabled : bool
@@ -146,6 +150,11 @@ class SubdomainManager:
         """
         Get effective Young's modulus for element.
 
+        For void/rigid elements, E_override is clamped to preserve semantics:
+        - void: E <= VOID_E_FACTOR * E_default (near-zero upper bound)
+        - rigid: E >= RIGID_E_FACTOR * E_default (very large lower bound)
+        - bulk: E_override used directly (no clamping)
+
         Parameters
         ----------
         elem_id : int
@@ -158,21 +167,29 @@ class SubdomainManager:
         E : float
             Effective Young's modulus [Pa]
         """
+        # Semantic factors for void/rigid types
+        VOID_E_FACTOR = 1e-6
+        RIGID_E_FACTOR = 1e6
+
         props = self.get_property(elem_id)
 
-        # Override if specified
-        if props.E_override is not None:
-            return props.E_override
-
-        # Void elements: E ≈ 0 (use very small value to avoid singularity)
+        # Void elements: E ≈ 0 (upper-bounded)
         if props.material_type == "void":
-            return 1e-6 * E_default  # Essentially zero
+            E_void = VOID_E_FACTOR * E_default
+            if props.E_override is not None:
+                return min(float(props.E_override), E_void)
+            return E_void
 
-        # Rigid elements: E >> E_default
+        # Rigid elements: E >> E_default (lower-bounded)
         if props.material_type == "rigid":
-            return 1e6 * E_default  # Very stiff
+            E_rigid = RIGID_E_FACTOR * E_default
+            if props.E_override is not None:
+                return max(float(props.E_override), E_rigid)
+            return E_rigid
 
-        # Normal elements: use default
+        # Bulk (normal): use override or default, no clamping
+        if props.E_override is not None:
+            return float(props.E_override)
         return E_default
 
     def get_effective_thickness(self, elem_id: int, b_default: float) -> float:
