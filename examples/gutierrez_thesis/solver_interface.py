@@ -343,6 +343,7 @@ def build_bcs_from_case(
     model: XFEMModel,
     rebar_segs: Optional[np.ndarray] = None,
     frp_nodes: Optional[np.ndarray] = None,
+    bond_layers: Optional[List[Any]] = None,
 ) -> BCSpec:
     """
     Build boundary condition specification from case configuration.
@@ -359,6 +360,8 @@ def build_bcs_from_case(
         Rebar segments for bond-slip cases
     frp_nodes : np.ndarray, optional
         Node IDs that have FRP DOFs allocated (from prepare_edge_segments)
+    bond_layers : list, optional
+        Bond layers with explicit segments (preferred for BC mapping)
 
     Returns
     -------
@@ -370,6 +373,22 @@ def build_bcs_from_case(
     prescribed_dofs = []
     prescribed_scale = 1.0
     reaction_dofs = []
+    steel_dof_markers: Dict[int, Dict[str, Any]] = {}
+
+    def _collect_nodes_and_layers(layers: List[Any]) -> Tuple[np.ndarray, Dict[int, List[str]]]:
+        node_ids: set[int] = set()
+        node_layers: Dict[int, set[str]] = {}
+        for layer in layers:
+            segs = getattr(layer, "segments", None)
+            if segs is None or len(segs) == 0:
+                continue
+            layer_nodes = np.unique(segs[:, :2].astype(int))
+            for node_id in layer_nodes:
+                node_ids.add(node_id)
+                node_layers.setdefault(node_id, set()).add(getattr(layer, "layer_id", "unknown"))
+        node_array = np.array(sorted(node_ids), dtype=int) if node_ids else np.array([], dtype=int)
+        layer_map = {node_id: sorted(layer_ids) for node_id, layer_ids in node_layers.items()}
+        return node_array, layer_map
 
     # Determine BC type from case geometry and loading
     # For now, we implement pullout and beam (3PB) configurations
@@ -404,20 +423,22 @@ def build_bcs_from_case(
             load_halfwidth = 0.05  # 50 mm
 
         # Find rebar nodes in load element region
-        if rebar_segs is not None and len(rebar_segs) > 0:
-            # Identify rebar nodes
-            rebar_nodes = set()
-            for seg in rebar_segs:
-                n1, n2 = int(seg[0]), int(seg[1])
-                rebar_nodes.add(n1)
-                rebar_nodes.add(n2)
+        rebar_nodes = None
+        rebar_node_layers = {}
+        if bond_layers and case.rebar_layers:
+            rebar_layers = bond_layers[: len(case.rebar_layers)]
+            rebar_nodes, rebar_node_layers = _collect_nodes_and_layers(rebar_layers)
+        elif rebar_segs is not None and len(rebar_segs) > 0:
+            rebar_nodes = np.unique(rebar_segs[:, :2].astype(int))
+            rebar_node_layers = {int(n): ["legacy_rebar"] for n in rebar_nodes}
 
+        if rebar_nodes is not None and len(rebar_nodes) > 0:
             # Filter rebar nodes in load region
             load_rebar_nodes = []
             for n in rebar_nodes:
                 x_n = nodes[n, 0]
                 if abs(x_n - load_x_center) <= load_halfwidth:
-                    load_rebar_nodes.append(n)
+                    load_rebar_nodes.append(int(n))
 
             # Steel DOFs: [steel_dof_offset + 2*local_idx, ...]
             # Since we don't have steel_dof_offset yet, store node indices
@@ -427,8 +448,14 @@ def build_bcs_from_case(
             for n in load_rebar_nodes:
                 # Mark steel DOFs for this node (to be resolved later)
                 # Use a marker: -(nnode + steel_node_id) to distinguish from concrete DOFs
-                prescribed_dofs.append(-(2 * nnode + n * 2))  # steel ux
-                reaction_dofs.append(-(2 * nnode + n * 2))
+                marker = -(2 * nnode + n * 2)
+                prescribed_dofs.append(marker)  # steel ux
+                reaction_dofs.append(marker)
+                layer_ids = rebar_node_layers.get(n, ["unknown"])
+                steel_dof_markers[marker] = {
+                    "node_id": int(n),
+                    "layer_id": ",".join(layer_ids),
+                }
 
         # Positive scale for pullout (pull in +x direction)
         prescribed_scale = 1.0
@@ -464,20 +491,36 @@ def build_bcs_from_case(
             load_x_center = L  # Right edge
 
         # Find FRP nodes in load region
-        # Use frp_nodes if provided (contains only nodes with FRP DOFs allocated),
-        # otherwise fall back to bottom_nodes
-        candidate_nodes = frp_nodes if frp_nodes is not None and len(frp_nodes) > 0 else bottom_nodes
+        # Use bond_layers if provided, otherwise fall back to frp_nodes/bottom_nodes
+        frp_candidate_nodes = None
+        frp_node_layers = {}
+        if bond_layers and case.frp_sheets:
+            start_idx = len(case.rebar_layers)
+            frp_layers = bond_layers[start_idx:start_idx + len(case.frp_sheets)]
+            frp_candidate_nodes, frp_node_layers = _collect_nodes_and_layers(frp_layers)
+        elif frp_nodes is not None and len(frp_nodes) > 0:
+            frp_candidate_nodes = np.array(sorted(set(frp_nodes)), dtype=int)
+            frp_node_layers = {int(n): ["legacy_frp"] for n in frp_candidate_nodes}
+        else:
+            frp_candidate_nodes = bottom_nodes
+            frp_node_layers = {int(n): ["legacy_frp"] for n in frp_candidate_nodes}
         frp_load_nodes = []
-        for n in candidate_nodes:
+        for n in frp_candidate_nodes:
             x_n = nodes[n, 0]
             if abs(x_n - load_x_center) <= load_halfwidth:
-                frp_load_nodes.append(n)
+                frp_load_nodes.append(int(n))
 
         # Mark FRP DOFs for prescription (negative marker for steel DOFs)
         for n in frp_load_nodes:
             # FRP DOF marker: -(2*nnode + 2*node_id) for x-component
-            prescribed_dofs.append(-(2 * nnode + 2 * n))  # FRP ux
-            reaction_dofs.append(-(2 * nnode + 2 * n))
+            marker = -(2 * nnode + 2 * n)
+            prescribed_dofs.append(marker)  # FRP ux
+            reaction_dofs.append(marker)
+            layer_ids = frp_node_layers.get(n, ["unknown"])
+            steel_dof_markers[marker] = {
+                "node_id": int(n),
+                "layer_id": ",".join(layer_ids),
+            }
 
         # Positive scale (pull in +x direction)
         prescribed_scale = 1.0
@@ -616,6 +659,7 @@ def build_bcs_from_case(
         prescribed_scale=prescribed_scale,
         reaction_dofs=reaction_dofs,
         nodal_forces=final_nodal_forces,
+        steel_dof_markers=steel_dof_markers or None,
     )
 
 
@@ -977,17 +1021,58 @@ def run_case_solver(
         x_min, x_max = case.rebar_layers[0].bond_disabled_x_range
         model.bond_disabled_x_range = (x_min * 1e-3, x_max * 1e-3)  # mm → m
 
+    def _concat_layer_segments(layers: List[Any]) -> Optional[np.ndarray]:
+        segs_list = []
+        for layer in layers:
+            segs = getattr(layer, "segments", None)
+            if segs is not None and len(segs) > 0:
+                segs_list.append(segs)
+        if not segs_list:
+            return None
+        return np.ascontiguousarray(np.vstack(segs_list), dtype=float)
+
+    def _nodes_from_layers(layers: List[Any]) -> Optional[np.ndarray]:
+        segs = _concat_layer_segments(layers)
+        if segs is None:
+            return None
+        return np.unique(segs[:, :2].astype(int))
+
+    # TASK 2: Build bond layers from case configuration (multi-layer support)
+    bond_layers = None
+    bond_law = None  # Legacy fallback
+
+    if case.rebar_layers or case.frp_sheets:
+        try:
+            # Try multi-layer approach first
+            bond_layers = build_bond_layers_from_case(case, nodes, elems)
+            if bond_layers:
+                print(f"  Built {len(bond_layers)} bond layer(s):")
+                for layer in bond_layers:
+                    print(f"    - {layer.layer_id}: {layer.segments.shape[0]} segments, "
+                          f"EA={layer.EA/1e6:.1f} MN, perimeter={layer.perimeter*1e3:.1f} mm")
+        except Exception as e:
+            print(f"  Warning: build_bond_layers_from_case() failed: {e}")
+            print(f"  Falling back to legacy single-layer approach")
+            bond_layers = None
+
     # Prepare rebar/FRP segments for BC mapping
     from xfem_clean.rebar import prepare_rebar_segments, prepare_edge_segments
     rebar_segs = None
-    if case.rebar_layers:
+    if bond_layers and case.rebar_layers:
+        rebar_layers = bond_layers[: len(case.rebar_layers)]
+        rebar_segs = _concat_layer_segments(rebar_layers)
+    elif case.rebar_layers:
         rebar_layer = case.rebar_layers[0]
         cover = rebar_layer.y_position * 1e-3  # mm → m
         rebar_segs = prepare_rebar_segments(nodes, cover=cover)
 
     # Pre-generate FRP nodes for BC mapping (needed before build_bcs_from_case)
     frp_nodes_for_bc = None
-    if case.frp_sheets:
+    if bond_layers and case.frp_sheets:
+        start_idx = len(case.rebar_layers)
+        frp_layers = bond_layers[start_idx:start_idx + len(case.frp_sheets)]
+        frp_nodes_for_bc = _nodes_from_layers(frp_layers)
+    elif case.frp_sheets:
         frp_sheet = case.frp_sheets[0]
         y_pos = frp_sheet.y_position * 1e-3  # mm → m
         _, frp_nodes_for_bc = prepare_edge_segments(
@@ -999,7 +1084,14 @@ def run_case_solver(
         )
 
     # Build boundary conditions from case configuration
-    bc_spec = build_bcs_from_case(case, nodes, model, rebar_segs=rebar_segs, frp_nodes=frp_nodes_for_bc)
+    bc_spec = build_bcs_from_case(
+        case,
+        nodes,
+        model,
+        rebar_segs=rebar_segs,
+        frp_nodes=frp_nodes_for_bc,
+        bond_layers=bond_layers,
+    )
 
     # FRP sheets handling (BLOQUE 5)
     frp_segs = None
@@ -1086,24 +1178,6 @@ def run_case_solver(
               f"± {fibre_bridging_cfg.orientation_std_deg:.1f}°")
         print(f"  Explicit fraction: {fibre_bridging_cfg.explicit_fraction*100:.0f}% " +
               f"(forces scaled by {1/fibre_bridging_cfg.explicit_fraction:.0f}x)")
-
-    # TASK 2: Build bond layers from case configuration (multi-layer support)
-    bond_layers = None
-    bond_law = None  # Legacy fallback
-
-    if case.rebar_layers or case.frp_sheets:
-        try:
-            # Try multi-layer approach first
-            bond_layers = build_bond_layers_from_case(case, nodes, elems)
-            if bond_layers:
-                print(f"  Built {len(bond_layers)} bond layer(s):")
-                for layer in bond_layers:
-                    print(f"    - {layer.layer_id}: {layer.segments.shape[0]} segments, "
-                          f"EA={layer.EA/1e6:.1f} MN, perimeter={layer.perimeter*1e3:.1f} mm")
-        except Exception as e:
-            print(f"  Warning: build_bond_layers_from_case() failed: {e}")
-            print(f"  Falling back to legacy single-layer approach")
-            bond_layers = None
 
     # Legacy fallback: single bond law (for backward compatibility)
     if bond_layers is None:

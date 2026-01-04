@@ -56,12 +56,16 @@ class BCSpec:
     nodal_forces : Dict[int, float], optional
         External nodal forces (e.g., axial load for wall cases)
         Format: {dof: force_value}
+    steel_dof_markers : Dict[int, Dict[str, Any]], optional
+        Metadata for negative DOF markers (steel/FRP), keyed by marker.
+        Can include fields like node_id and layer_id for diagnostics.
     """
     fixed_dofs: Dict[int, float]
     prescribed_dofs: List[int]
     prescribed_scale: float = 1.0
     reaction_dofs: Optional[List[int]] = None
     nodal_forces: Optional[Dict[int, float]] = None
+    steel_dof_markers: Optional[Dict[int, Dict[str, Any]]] = None
 
 
 def _concat_bond_layer_segments(bond_layers: List[Any]) -> Optional[np.ndarray]:
@@ -365,8 +369,24 @@ def run_analysis_xfem(
         if bc_spec is None:
             return
 
+        def _marker_context(dof_marker: int) -> Tuple[Optional[int], Optional[str]]:
+            node_id_meta = None
+            layer_id_meta = None
+            marker_meta = getattr(bc_spec, "steel_dof_markers", None)
+            if marker_meta and dof_marker in marker_meta:
+                node_id_meta = marker_meta[dof_marker].get("node_id")
+                layer_id_meta = marker_meta[dof_marker].get("layer_id")
+            return node_id_meta, layer_id_meta
+
         # Check if we have steel DOFs to resolve
         if dofs_obj.steel is None:
+            if any(dof < 0 for dof in bc_spec.prescribed_dofs) or any(
+                dof < 0 for dof in (bc_spec.reaction_dofs or [])
+            ):
+                raise ValueError(
+                    "Invalid steel DOF mapping: "
+                    f"case_id={case_id}, reason=steel DOFs not allocated"
+                )
             return
 
         case_id = getattr(model, "case_id", "unknown")
@@ -380,17 +400,33 @@ def run_analysis_xfem(
                 node_id = -(dof_marker + 2 * nnode) // 2
                 component = 0  # ux for pullout
 
-                if node_id >= 0 and node_id < nnode:
-                    if not dofs_obj.steel_nodes[node_id]:
-                        raise ValueError(
-                            "Invalid steel DOF mapping: "
-                            f"case_id={case_id}, node_id={node_id}, "
-                            f"dof_marker={dof_marker}, "
-                            "hint=BC refiere a bond-layer node pero no hay bond segments en ese node"
-                        )
-                    steel_dof = dofs_obj.steel[node_id, component]
-                    if steel_dof >= 0:
-                        resolved_load_dofs.append(steel_dof)
+                node_id_meta, layer_id_meta = _marker_context(dof_marker)
+
+                if node_id < 0 or node_id >= nnode:
+                    raise ValueError(
+                        "Invalid steel DOF mapping: "
+                        f"case_id={case_id}, node_id={node_id}, "
+                        f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                        "reason=node_id out of range"
+                    )
+
+                if not dofs_obj.steel_nodes[node_id]:
+                    raise ValueError(
+                        "Invalid steel DOF mapping: "
+                        f"case_id={case_id}, node_id={node_id}, "
+                        f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                        "reason=no steel DOFs allocated for node"
+                    )
+
+                steel_dof = dofs_obj.steel[node_id, component]
+                if steel_dof < 0:
+                    raise ValueError(
+                        "Invalid steel DOF mapping: "
+                        f"case_id={case_id}, node_id={node_id}, "
+                        f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                        "reason=steel DOF index invalid"
+                    )
+                resolved_load_dofs.append(steel_dof)
             else:
                 # Positive: already a concrete DOF
                 resolved_load_dofs.append(dof_marker)
@@ -404,18 +440,31 @@ def run_analysis_xfem(
                 if dof_marker < 0:
                     node_id = -(dof_marker + 2 * nnode) // 2
                     component = 0
+                    node_id_meta, layer_id_meta = _marker_context(dof_marker)
 
-                    if node_id >= 0 and node_id < nnode:
-                        if not dofs_obj.steel_nodes[node_id]:
-                            raise ValueError(
-                                "Invalid steel DOF mapping: "
-                                f"case_id={case_id}, node_id={node_id}, "
-                                f"dof_marker={dof_marker}, "
-                                "hint=BC refiere a bond-layer node pero no hay bond segments en ese node"
-                            )
-                        steel_dof = dofs_obj.steel[node_id, component]
-                        if steel_dof >= 0:
-                            resolved_reaction_dofs.append(steel_dof)
+                    if node_id < 0 or node_id >= nnode:
+                        raise ValueError(
+                            "Invalid steel DOF mapping: "
+                            f"case_id={case_id}, node_id={node_id}, "
+                            f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                            "reason=node_id out of range"
+                        )
+                    if not dofs_obj.steel_nodes[node_id]:
+                        raise ValueError(
+                            "Invalid steel DOF mapping: "
+                            f"case_id={case_id}, node_id={node_id}, "
+                            f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                            "reason=no steel DOFs allocated for node"
+                        )
+                    steel_dof = dofs_obj.steel[node_id, component]
+                    if steel_dof < 0:
+                        raise ValueError(
+                            "Invalid steel DOF mapping: "
+                            f"case_id={case_id}, node_id={node_id}, "
+                            f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                            "reason=steel DOF index invalid"
+                        )
+                    resolved_reaction_dofs.append(steel_dof)
                 else:
                     resolved_reaction_dofs.append(dof_marker)
 
