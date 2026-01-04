@@ -69,3 +69,46 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "slow" in item.keywords:
             item.add_marker(skip_slow)
+
+
+# PHASE 1: Per-test telemetry for slow-suite performance debugging
+# PHASE 3: Add matplotlib cleanup to prevent figure accumulation
+import time
+import gc
+import resource
+
+
+@pytest.fixture(autouse=True)
+def _perf_guard(request):
+    """
+    Lightweight per-test telemetry: timing + RSS + GC cleanup.
+
+    Also ensures matplotlib figures are closed to prevent accumulation
+    in slow test suite (Fix #15).
+    """
+    t0 = time.perf_counter()
+    rss_before_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    yield
+
+    dt = time.perf_counter() - t0
+    rss_after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # ru_maxrss is KB on Linux, bytes on macOS
+
+    # Only report if test is marked slow or took >0.5s
+    if "slow" in request.keywords or dt > 0.5:
+        print(f"\n[PERF] {request.node.nodeid}")
+        print(f"       dt={dt:.2f}s  rss_before={rss_before_kb/1024:.1f}MB  rss_after={rss_after_kb/1024:.1f}MB")
+
+    # CRITICAL FIX #15: Close all matplotlib figures to prevent accumulation
+    # Postprocessing creates plots; without cleanup, figures accumulate and
+    # cause catastrophic slowdown (140x) in test suite execution.
+    try:
+        import matplotlib.pyplot as plt
+        plt.close("all")
+    except (ImportError, Exception):
+        # matplotlib not installed or other error - safe to ignore
+        pass
+
+    # Force GC to prevent accumulation
+    gc.collect()
