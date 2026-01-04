@@ -72,11 +72,13 @@ def test_cohesive_dissipation_elastic_loading():
     q_np1 = np.zeros(dofs.ndof, dtype=float)
 
     # Apply displacement to enriched DOFs (H enrichment)
-    # Nodes 2 and 3 are above the crack (y > 0.5)
-    # Find enriched DOFs and apply opening
-    for node_id in [2, 3]:
-        if dofs.H[node_id, 1] >= 0:  # y-direction Heaviside enrichment
-            q_np1[dofs.H[node_id, 1]] = 1e-5 / 2.0  # Half opening on each side
+    # With the jump operator (2*N), setting both enriched nodes to δ_target
+    # yields δ≈δ_target on the crack line for this 1×1 mesh
+    target_opening = 1e-5  # 10 μm - small enough to stay elastic
+    for node_id in range(nodes.shape[0]):
+        jH = dofs.H[node_id, 1]  # y-direction Heaviside enrichment
+        if jH >= 0:
+            q_np1[jH] = target_opening
 
     # Assemble without dissipation (baseline)
     K_np1, f_np1, coh_states, _, aux, _, _, _ = assemble_xfem_system(
@@ -114,11 +116,18 @@ def test_cohesive_dissipation_elastic_loading():
     D_coh = aux_diss["D_coh_inc"]
     D_bond = aux_diss["D_bond_inc"]
     D_bulk = aux_diss["D_bulk_plastic_inc"]
+    coh_delta_max = aux_diss["coh_delta_max"]
+
     print(f"  Cohesive dissipation: {D_coh:.6e} J")
     print(f"  Bond dissipation: {D_bond:.6e} J")
     print(f"  Bulk dissipation: {D_bulk:.6e} J")
     print(f"  Cohesive weights: {aux_diss['coh_weight']}")
-    print(f"  Cohesive delta_max: {aux_diss['coh_delta_max']}")
+    print(f"  Cohesive delta_max: {coh_delta_max}")
+
+    # Verify that test actually creates cohesive opening (prevent regression)
+    assert len(coh_delta_max) > 0, "Expected cohesive integration points"
+    assert np.max(coh_delta_max) > 0.5 * target_opening, \
+        f"Test should create cohesive opening, got max delta={np.max(coh_delta_max):.3e}, expected > {0.5*target_opening:.3e}"
 
     # Elastic loading should have zero dissipation (energy is recoverable)
     # Actually, even elastic loading has some dissipation if we're using trapezoidal rule
@@ -199,19 +208,22 @@ def test_cohesive_dissipation_softening():
     thickness = 0.1
 
     # Step n: at peak (δ = ft/Kn)
+    # Use Heaviside DOFs (dofs.H) to create cohesive opening
+    # With the jump operator (2*N), setting both enriched nodes to δ_target
+    # yields δ≈δ_target on the crack line for this 1×1 mesh
     delta_peak = law.ft / law.Kn
     q_n = np.zeros(dofs.ndof, dtype=float)
-    if dofs.std[3, 1] >= 0:
-        q_n[dofs.std[3, 1]] = delta_peak
-    if dofs.std[2, 1] >= 0:
-        q_n[dofs.std[2, 1]] = delta_peak
+    for node_id in range(nodes.shape[0]):
+        jH = dofs.H[node_id, 1]  # Heaviside y DOF
+        if jH >= 0:
+            q_n[jH] = delta_peak  # δ at peak
 
     # Step n+1: into softening (δ = 2*δ_peak)
     q_np1 = np.zeros(dofs.ndof, dtype=float)
-    if dofs.std[3, 1] >= 0:
-        q_np1[dofs.std[3, 1]] = 2.0 * delta_peak
-    if dofs.std[2, 1] >= 0:
-        q_np1[dofs.std[2, 1]] = 2.0 * delta_peak
+    for node_id in range(nodes.shape[0]):
+        jH = dofs.H[node_id, 1]  # Heaviside y DOF
+        if jH >= 0:
+            q_np1[jH] = 2.0 * delta_peak  # δ into softening
 
     # First assemble at step n to get committed state
     _, _, coh_states_n, _, _, _, _, _ = assemble_xfem_system(
@@ -244,10 +256,18 @@ def test_cohesive_dissipation_softening():
     )
 
     D_coh = aux_diss["D_coh_inc"]
+    coh_delta_max = aux_diss["coh_delta_max"]
+
     print(f"\n  Softening step:")
     print(f"    δ_n = {delta_peak*1e6:.2f} μm (peak)")
     print(f"    δ_n+1 = {2.0*delta_peak*1e6:.2f} μm (softening)")
+    print(f"    Cohesive delta_max: {coh_delta_max}")
     print(f"    Cohesive dissipation: {D_coh:.6e} J")
+
+    # Verify that test actually creates cohesive opening (prevent regression)
+    assert len(coh_delta_max) > 0, "Expected cohesive integration points"
+    assert np.max(coh_delta_max) > 0.5 * delta_peak, \
+        f"Test should create cohesive opening, got max delta={np.max(coh_delta_max):.3e}, expected > {0.5*delta_peak:.3e}"
 
     # In softening regime, should have positive dissipation
     assert D_coh > 0, f"Softening should produce positive dissipation, got {D_coh:.3e} J"
@@ -308,18 +328,19 @@ def test_cohesive_dissipation_mixed_mode():
     thickness = 0.1
 
     # Step n: small opening
+    # Use Heaviside DOFs (dofs.H) to create cohesive opening
     q_n = np.zeros(dofs.ndof, dtype=float)
-    if dofs.std[3, 1] >= 0:
-        q_n[dofs.std[3, 1]] = 1e-6  # 1 μm
-    if dofs.std[2, 1] >= 0:
-        q_n[dofs.std[2, 1]] = 1e-6
+    for node_id in range(nodes.shape[0]):
+        jH = dofs.H[node_id, 1]  # Heaviside y DOF
+        if jH >= 0:
+            q_n[jH] = 1e-6  # 1 μm
 
     # Step n+1: larger opening (into softening)
     q_np1 = np.zeros(dofs.ndof, dtype=float)
-    if dofs.std[3, 1] >= 0:
-        q_np1[dofs.std[3, 1]] = 5e-6  # 5 μm
-    if dofs.std[2, 1] >= 0:
-        q_np1[dofs.std[2, 1]] = 5e-6
+    for node_id in range(nodes.shape[0]):
+        jH = dofs.H[node_id, 1]  # Heaviside y DOF
+        if jH >= 0:
+            q_np1[jH] = 5e-6  # 5 μm
 
     # Assemble at step n
     _, _, coh_states_n, _, _, _, _, _ = assemble_xfem_system(
@@ -352,10 +373,18 @@ def test_cohesive_dissipation_mixed_mode():
     )
 
     D_coh = aux_diss["D_coh_inc"]
+    coh_delta_max = aux_diss["coh_delta_max"]
+
     print(f"\n  Mixed-mode dissipation:")
     print(f"    δ_n = 1.0 μm")
     print(f"    δ_n+1 = 5.0 μm")
+    print(f"    Cohesive delta_max: {coh_delta_max}")
     print(f"    D_coh = {D_coh:.6e} J")
+
+    # Verify that test actually creates cohesive opening (prevent regression)
+    assert len(coh_delta_max) > 0, "Expected cohesive integration points"
+    assert np.max(coh_delta_max) > 0.5e-6, \
+        f"Test should create cohesive opening, got max delta={np.max(coh_delta_max):.3e}, expected > {0.5e-6:.3e}"
 
     # Should have positive dissipation
     assert np.isfinite(D_coh), "Dissipation should be finite"
