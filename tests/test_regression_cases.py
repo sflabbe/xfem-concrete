@@ -12,6 +12,9 @@ Usage:
 import pytest
 from pathlib import Path
 
+# Mark all tests in this module as slow (including wrapper functions)
+pytestmark = pytest.mark.slow
+
 try:
     import numpy as np
     import yaml
