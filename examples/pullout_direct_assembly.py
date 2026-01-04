@@ -108,7 +108,7 @@ for step in range(1, nsteps+1):
     converged = False
     for it in range(30):
         # Assembly
-        K, fint, _, _, _, bond_new = assemble_xfem_system(
+        K, fint, _, _, _, bond_new, _, _ = assemble_xfem_system(
             nodes=nodes,
             elems=elems,
             dofs=dofs,

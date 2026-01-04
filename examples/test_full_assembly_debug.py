@@ -66,7 +66,7 @@ bond_states = BondSlipStateArrays.zeros(len(rebar_segs))
 q = np.zeros(dofs.ndof)
 
 print(f"\nAssembling full system at q=0...")
-K, fint, _, _, _, _ = assemble_xfem_system(
+K, fint, _, _, _, _, _, _ = assemble_xfem_system(
     nodes=nodes,
     elems=elems,
     dofs=dofs,

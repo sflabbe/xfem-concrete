@@ -74,7 +74,7 @@ print(f"Fixed DOFs: {len(fixed)}")
 print(f"Load DOFs: {load_dofs}")
 
 # Assemble
-K, fint, _, _, _, _ = assemble_xfem_system(
+    K, fint, _, _, _, _, _, _ = assemble_xfem_system(
     nodes=nodes,
     elems=elems,
     dofs=dofs,

@@ -208,7 +208,7 @@ def test_assembly_routine():
     law = CohesiveLaw(Kn=1e10, ft=2.9e6, Gf=120)
 
     # Assemble
-    K, fint, _, _, _, _ = assemble_xfem_system(
+    K, fint, _, _, _, _, _, _ = assemble_xfem_system(
         nodes=nodes,
         elems=elems,
         dofs=dofs,

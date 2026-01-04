@@ -283,13 +283,14 @@ def build_bond_layers_from_case(
         from xfem_clean.rebar import prepare_edge_segments
 
         for frp_idx, frp_config in enumerate(case.frp_sheets):
-            # FRP sheets are bonded to edges
-            # Assume bottom edge for now (y=0)
-            edge_nodes = np.where(np.isclose(nodes[:, 1], 0.0, atol=1e-6))[0]
-
-            # Generate segments along edge
-            edge_nodes = edge_nodes[np.argsort(nodes[edge_nodes, 0])]  # Sort by x
-            frp_segments = prepare_edge_segments(nodes, edge_nodes)
+            y_target = frp_config.y_position * 1e-3  # mm → m
+            frp_segments, _ = prepare_edge_segments(
+                nodes,
+                y_target=y_target,
+                x_min=None,
+                x_max=None,
+                tol=1e-6,
+            )
 
             # Convert FRP bond law
             bond_law = map_bond_law(frp_config.bond_law, case_id=case.case_id)
@@ -302,13 +303,27 @@ def build_bond_layers_from_case(
             EA_frp = E_frp * t_frp * b_frp
             perimeter_frp = b_frp  # Effective bond width
 
+            # Segment mask based on bonded length (disable unbonded region)
+            segment_mask = None
+            bonded_length_mm = getattr(frp_config, "bonded_length", None)
+            if bonded_length_mm is not None and len(frp_segments) > 0:
+                bonded_length = bonded_length_mm * 1e-3  # mm → m
+                specimen_length = case.geometry.length * 1e-3
+                x_bonded_min = max(0.0, specimen_length - bonded_length)
+                x_bonded_max = specimen_length
+
+                n1_indices = frp_segments[:, 0].astype(int)
+                n2_indices = frp_segments[:, 1].astype(int)
+                seg_x_mid = 0.5 * (nodes[n1_indices, 0] + nodes[n2_indices, 0])
+                segment_mask = (seg_x_mid < x_bonded_min) | (seg_x_mid > x_bonded_max)
+
             # Create FRP BondLayer
             layer = BondLayer(
                 segments=frp_segments,
                 EA=EA_frp,
                 perimeter=perimeter_frp,
                 bond_law=bond_law,
-                segment_mask=None,
+                segment_mask=segment_mask,
                 enable_dowel=False,
                 dowel_model=None,
                 layer_id=f"frp_sheet_{frp_idx}",
@@ -750,6 +765,8 @@ def case_config_to_xfem_model(case: CaseConfig) -> XFEMModel:
         debug_newton=False,
     )
 
+    model.case_id = case.case_id
+
     return model
 
 
@@ -962,7 +979,11 @@ def run_case_solver(
 
     # Prepare rebar/FRP segments for BC mapping
     from xfem_clean.rebar import prepare_rebar_segments, prepare_edge_segments
-    rebar_segs = prepare_rebar_segments(nodes, cover=model.cover) if case.rebar_layers else None
+    rebar_segs = None
+    if case.rebar_layers:
+        rebar_layer = case.rebar_layers[0]
+        cover = rebar_layer.y_position * 1e-3  # mm → m
+        rebar_segs = prepare_rebar_segments(nodes, cover=cover)
 
     # Pre-generate FRP nodes for BC mapping (needed before build_bcs_from_case)
     frp_nodes_for_bc = None
