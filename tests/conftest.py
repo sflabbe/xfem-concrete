@@ -9,6 +9,21 @@ Implements fast/slow test split:
 - With --runslow (pytest -q --runslow): runs EVERYTHING (including heavy solver analyses)
 """
 
+# Early diagnostic guard: check for numpy before any imports that depend on it
+try:
+    import numpy as np
+except Exception as e:
+    import sys
+    raise RuntimeError(
+        "numpy is required to run tests but is not importable.\n"
+        f"Python executable: {sys.executable}\n"
+        "You are likely running pytest with the wrong interpreter.\n"
+        "Fix:\n"
+        "  1) Install deps: pip install -e '.[test]'\n"
+        "  2) Run tests via: python -m pytest -q -m 'not slow'\n"
+        "  or use the wrapper: python scripts/run_tests.py\n"
+    ) from e
+
 import sys
 import os
 import pytest
