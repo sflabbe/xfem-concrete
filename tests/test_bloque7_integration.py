@@ -30,6 +30,7 @@ except ImportError as e:
     pytest.skip(f"Import error: {e}", allow_module_level=True)
 
 
+@pytest.mark.slow
 def test_case_01_pullout_coarse():
     """
     Test Case 01: Simple elastic beam (simplified - no bond-slip for stability).
@@ -115,6 +116,7 @@ def test_case_01_pullout_coarse():
         raise  # Let pytest capture the failure
 
 
+@pytest.mark.slow
 def test_case_03_tensile_coarse():
     """
     Test Case 03: Tensile specimen (multicrack) - versión coarse.
@@ -206,6 +208,7 @@ def test_case_03_tensile_coarse():
         raise  # Let pytest capture the failure
 
 
+@pytest.mark.slow
 def test_case_04_beam_coarse():
     """
     Test Case 04: 3PB Beam (simple elastic) - versión coarse.
@@ -289,6 +292,7 @@ def test_case_04_beam_coarse():
         raise  # Let pytest capture the failure
 
 
+@pytest.mark.slow
 def test_case_05_wall_coarse():
     """
     Test Case 05: RC Wall cyclic (BLOQUE 4) - versión coarse.

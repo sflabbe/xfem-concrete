@@ -15,6 +15,7 @@ try:
 except ImportError as e:
     pytest.skip(f"Import error: {e}", allow_module_level=True)
 
+@pytest.mark.slow
 def test_multicrack_return_bundle():
     """Test que multicrack retorna bundle completo con return_bundle=True."""
     print("\n🧪 Test: multicrack return_bundle...")

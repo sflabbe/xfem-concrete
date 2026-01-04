@@ -158,6 +158,7 @@ def test_subdomain_manager_integration():
     return True
 
 
+@pytest.mark.slow
 def test_multicrack_bondslip_crack_initiation():
     """
     Test crítico: valida bugfix de BLOQUE 1.
