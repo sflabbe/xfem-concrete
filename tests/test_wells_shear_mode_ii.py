@@ -2,12 +2,17 @@
 
 This test verifies that:
 1. Shear stiffness degrades exponentially with opening: k_s(w) = k_s0 * exp(h_s * w)
+   where h_s = ln(k_s1/k_s0) / w1  [SI units: 1/m]
+   and w1 is the reference opening (default: 1 mm for thesis parity, Gutierrez Eq. 3.26-3.27)
 2. Shear traction scales linearly with slip: t_t = k_s(w) * s
 3. Cross-coupling tangent: dt_t/dw = h_s * k_s(w) * s
 4. Pure Mode I (s=0) reproduces standard behavior
 5. Mixed-mode 2x2 tangent has correct structure
 
-Thesis reference: Wells-type cohesive model
+Thesis reference: Gutierrez dissertation (KIT IR 10.5445/IR/1000124842)
+  - Eq. (3.26): k_s(ω_n) = d0 * exp[ln(d1/d0) * ω_n/ω_ref]
+  - Eq. (3.27): h_s corresponds to ln(d1/d0)/ω_ref (normalized by reference opening)
+  - ω_ref = w1 = 1 mm (default in this codebase for thesis parity)
 """
 
 import sys
@@ -39,7 +44,11 @@ def test_wells_shear_stiffness_degradation():
     s = 0.1e-3  # 0.1 mm slip (constant)
     openings = np.array([0.0, 0.5e-3, 1.0e-3, 2.0e-3, 5.0e-3])  # mm
 
-    h_s = math.log(law.k_s1 / law.k_s0)  # Decay parameter
+    # Decay parameter (Thesis Eq. 3.26-3.27: h_s = ln(k_s1/k_s0) / w1)
+    h_s = math.log(law.k_s1 / law.k_s0) / law.w1
+
+    # Residual stiffness floor (implementation detail for numerical stability)
+    k_res = law.kres_factor * law.Kn
 
     print("\n  Wells Shear Stiffness Degradation:")
     print("  w (mm)    k_s(w) / k_s0    t_t (MPa)    Expected k_s/k_s0")
@@ -54,8 +63,8 @@ def test_wells_shear_stiffness_degradation():
         t_n = t[0]
         t_t = t[1]
 
-        # Expected shear stiffness
-        k_s_expected = law.k_s0 * math.exp(h_s * w)
+        # Expected shear stiffness (with residual floor applied)
+        k_s_expected = max(law.k_s0 * math.exp(h_s * w), k_res)
         k_s_actual = t_t / s if s > 1e-14 else 0.0
 
         # Verify exponential degradation
@@ -88,8 +97,12 @@ def test_wells_linear_in_slip():
     w = 1.0e-3  # 1 mm opening (fixed)
     slips = np.array([0.0, 0.05e-3, 0.1e-3, 0.2e-3, 0.5e-3])  # mm
 
-    h_s = math.log(law.k_s1 / law.k_s0)
-    k_s_w = law.k_s0 * math.exp(h_s * w)  # Shear stiffness at w
+    # Decay parameter (Thesis Eq. 3.26-3.27: h_s = ln(k_s1/k_s0) / w1)
+    h_s = math.log(law.k_s1 / law.k_s0) / law.w1
+
+    # Residual stiffness floor (implementation detail for numerical stability)
+    k_res = law.kres_factor * law.Kn
+    k_s_w = max(law.k_s0 * math.exp(h_s * w), k_res)  # Shear stiffness at w (with floor)
 
     print("\n  Wells Shear Traction (Linear in Slip):")
     print("  s (mm)    t_t (MPa)    t_t/s (Pa/m)    k_s(w) (Pa/m)")
@@ -147,7 +160,11 @@ def test_wells_cross_coupling_tangent():
         (2.0e-3, 0.5e-3),  # Large opening, large slip
     ]
 
-    h_s = math.log(law.k_s1 / law.k_s0)
+    # Decay parameter (Thesis Eq. 3.26-3.27: h_s = ln(k_s1/k_s0) / w1)
+    h_s = math.log(law.k_s1 / law.k_s0) / law.w1
+
+    # Residual stiffness floor (implementation detail for numerical stability)
+    k_res = law.kres_factor * law.Kn
 
     print("\n  Wells Cross-Coupling Tangent (dt_t/dw):")
     print("  w (mm)  s (mm)   dt_t/dw (Pa/m^2)   Expected")
@@ -161,9 +178,15 @@ def test_wells_cross_coupling_tangent():
 
         dt_t_dw = K_mat[1, 0]  # Cross-coupling term
 
-        # Expected cross-coupling
-        k_s_w = law.k_s0 * math.exp(h_s * w)
-        dt_t_dw_expected = h_s * k_s_w * s
+        # Expected cross-coupling (accounting for residual floor)
+        k_s_w_unfloored = law.k_s0 * math.exp(h_s * w)
+        k_s_w = max(k_s_w_unfloored, k_res)
+        # dt_t/dw = h_s * k_s(w) * s, but only if k_s(w) > k_res (not floored)
+        # If floored, dt_t/dw = 0 (constant at floor)
+        if k_s_w_unfloored > k_res:
+            dt_t_dw_expected = h_s * k_s_w * s
+        else:
+            dt_t_dw_expected = 0.0  # Floored, no derivative
 
         # Verify cross-coupling
         assert np.isclose(dt_t_dw, dt_t_dw_expected, rtol=1e-3), (
