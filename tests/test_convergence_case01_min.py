@@ -7,9 +7,38 @@ Runs Case 01 with coarse mesh and few steps to verify that:
 
 This is a fast smoke test to catch regressions.
 """
+import numpy as np
 import pytest
 from examples.gutierrez_thesis.cases.case_01_pullout_lettow import create_case_01
 from examples.gutierrez_thesis.solver_interface import run_case_solver
+
+
+def _get_u_value(record):
+    """Extract displacement value from history record (handles both dict and numeric formats).
+
+    History records can be:
+    - dict-like with keys 'u_max', 'u', or 'displacement'
+    - numpy structured array with named fields
+    - plain numeric row where u is at index 1
+
+    Returns:
+        float: displacement value, or 0.0 if not found
+    """
+    # dict-like record
+    if hasattr(record, "get"):
+        return record.get("u_max", record.get("u", record.get("displacement", 0.0)))
+
+    # numpy structured record with named fields
+    if hasattr(record, "dtype") and getattr(record.dtype, "names", None):
+        for key in ("u_max", "u", "displacement"):
+            if key in record.dtype.names:
+                return float(record[key])
+
+    # plain numeric row (current format): u is column 1
+    try:
+        return float(record[1])
+    except Exception:
+        return 0.0
 
 
 @pytest.mark.slow
@@ -49,10 +78,17 @@ def test_case01_pullout_minimal_convergence():
     # Check: no NaN in displacement history
     # History format varies, check common fields
     for i, record in enumerate(history):
-        # Try different possible field names
-        u_val = record.get("u_max", record.get("u", record.get("displacement", 0.0)))
-        if isinstance(u_val, (int, float)):
-            assert not (u_val != u_val), f"NaN found in history at step {i} (u={u_val})"
+        # Extract displacement using robust helper
+        u_val = _get_u_value(record)
+
+        # For numeric row format (ndarray), check all columns are finite
+        if isinstance(record, np.ndarray):
+            assert np.all(np.isfinite(record)), f"NaN/Inf found in history at step {i}"
+            # Anti-regression: numeric row must have length >= 2 (so col[1] exists)
+            assert len(record) >= 2, f"Numeric row at step {i} too short (len={len(record)})"
+
+        # Check displacement value is finite
+        assert np.isfinite(u_val), f"NaN/Inf displacement at step {i} (u={u_val})"
 
     # Check: no "Substepping exceeded" (would show in records or raise exception)
     # If we got here without exception, substepping didn't exceed
@@ -66,7 +102,7 @@ def test_case01_pullout_minimal_convergence():
     print(f"✓ Case 01 pullout minimal test passed ({len(history)} steps completed)")
     if len(history) > 0:
         last_record = history[-1]
-        u_last = last_record.get("u_max", last_record.get("u", last_record.get("displacement", 0.0)))
+        u_last = _get_u_value(last_record)
         if isinstance(u_last, (int, float)):
             print(f"  Final displacement: {u_last*1e3:.3f} mm")
 
