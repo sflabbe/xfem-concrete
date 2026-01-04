@@ -143,6 +143,7 @@ def test_wall_bcs_structure():
     return True
 
 
+@pytest.mark.slow
 def test_wall_minimal_analysis():
     """Test que el análisis de muro corre sin crashes (BLOQUE 4)."""
     print("\n🧪 Test: Wall minimal analysis...")

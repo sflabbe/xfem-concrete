@@ -21,6 +21,7 @@ except ImportError as e:
     pytest.skip(f"Import error: {e}", allow_module_level=True)
 
 
+@pytest.mark.slow
 def test_cyclic_u_targets_single_crack():
     """Test que single-crack acepta u_targets y corre ciclos sin crash."""
     print("\n🧪 Test: Cyclic u_targets con single-crack...")

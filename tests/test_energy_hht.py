@@ -82,6 +82,7 @@ def make_test_model(hht_alpha=0.0, rayleigh_aM=0.0, rayleigh_aK=0.0):
     return model
 
 
+@pytest.mark.slow
 def test_alpha0_no_damping_energy_conservation():
     """
     Test 1: alpha=0, no damping, near energy conservation.
@@ -136,6 +137,7 @@ def test_alpha0_no_damping_energy_conservation():
     print(f"  Final: W_dir={final.W_dir_cum:.3e}, ΔE_mech={E_mech_change:.3e}, D_alg={final.D_alg_cum:.3e}")
 
 
+@pytest.mark.slow
 def test_alpha_negative_shows_algorithmic_dissipation():
     """
     Test 2: alpha < 0 shows positive algorithmic dissipation.
@@ -184,6 +186,7 @@ def test_alpha_negative_shows_algorithmic_dissipation():
     print(f"  alpha=-0.2: D_alg={final_alpha_neg.D_alg_cum:.3e}")
 
 
+@pytest.mark.slow
 def test_damping_dissipation_is_nonnegative():
     """
     Test 3: damping dissipation is non-negative.
@@ -240,6 +243,7 @@ def test_damping_dissipation_is_nonnegative():
     print(f"  Final D_damp={final.D_damp_cum:.3e}")
 
 
+@pytest.mark.slow
 def test_constraint_work_sign_sanity():
     """
     Test 4: constraint work sign sanity.
@@ -279,6 +283,7 @@ def test_constraint_work_sign_sanity():
     print(f"  Positive increments: {positive_count}/{len(energy_history)}")
 
 
+@pytest.mark.slow
 def test_energy_balance_all_steps():
     """
     Additional test: verify energy balance for all steps.

@@ -30,6 +30,7 @@ except ImportError as e:
     pytest.skip(f"Import error: {e}", allow_module_level=True)
 
 
+@pytest.mark.slow
 def test_case_06_fibre_tensile_minimal():
     """
     Test Case 06: Fibre-reinforced tensile specimen.

@@ -94,6 +94,7 @@ def test_junction_no_false_positive():
     print("✓ No false positives: cracks far apart, no junction detected")
 
 
+@pytest.mark.slow
 def test_multicrack_with_junction_integration():
     """Test multicrack solver with junction detection enabled.
 

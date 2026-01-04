@@ -30,6 +30,7 @@ except ImportError as e:
     pytest.skip(f"Import error: {e}", allow_module_level=True)
 
 
+@pytest.mark.slow
 def test_case_02_frp_sspot_minimal():
     """
     Test Case 02: FRP sheet debonding (SSPOT test).
