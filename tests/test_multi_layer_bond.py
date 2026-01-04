@@ -66,6 +66,7 @@ def test_build_bond_layers_two_horizontal_rebars():
 
     # Create minimal case mock object
     class MockCase:
+        case_id = "test_mock_case"
         rebar_layers = [rebar1, rebar2]
         frp_sheets = []
 

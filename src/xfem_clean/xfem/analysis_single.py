@@ -35,6 +35,7 @@ from xfem_clean.xfem.state_arrays import (
     CohesiveStateArrays,
     CohesiveStatePatch,
 )
+from xfem_clean.xfem.solver_state import SolverState
 
 
 @dataclass
@@ -255,6 +256,9 @@ def run_analysis_xfem(
                 condition=model.bond_condition,
             )
 
+    # Phase-1 Refactor: Encapsulate state in SolverState
+    state = SolverState(mp=mp_states, coh=coh_states, bond=bond_states_list if bond_states_list else bond_states)
+
     # Subdomain manager (Phase C - thesis cases)
     subdomain_mgr = getattr(model, 'subdomain_mgr', None)
 
@@ -414,16 +418,26 @@ def run_analysis_xfem(
         u_guess: np.ndarray,
         crack_in: XFEMCrack,
         dofs_in: XFEMDofs,
-        coh_committed,
-        mp_committed,
-        bond_committed=None,
+        state_committed: SolverState,
         bond_gamma: float = 1.0,  # BLOQUE A: Bond-slip continuation parameter
-        bond_committed_list=None,  # PART D: List of bond states (one per layer)
     ):
         nonlocal total_newton_solves
         if model.debug_newton:
             print(f"        [solve_step] ENTRY: u_target={u_target*1e3:.3f}mm, ndof={dofs_in.ndof}")
         q = u_guess.copy()
+
+        # Unpack state for convenience/compatibility
+        mp_committed = state_committed.mp
+        coh_committed = state_committed.coh
+        bond_committed = state_committed.bond
+        
+        # Bond-slip: handle list vs single object
+        bond_committed_list = None
+        if isinstance(bond_committed, list):
+            bond_committed_list = bond_committed
+            bond_committed_single = None # Logic inside assemble handles this
+        else:
+            bond_committed_single = bond_committed
 
         # THESIS PARITY: Precompute crack deterioration context Ωc for this load step
         # This is computed ONCE per accepted step (not every Newton iteration)
@@ -471,6 +485,9 @@ def run_analysis_xfem(
 
             if model.debug_newton:
                 print(f"        [newton] it={it:02d} calling assemble_xfem_system...")
+            
+            # NOTE: assemble_xfem_system still expects individual state objects for now
+            # We will refactor it later, or keep it as adapter layer
             K, fint, coh_updates, mp_updates, aux, bond_updates, reinforcement_updates, contact_updates = assemble_xfem_system(
                 nodes,
                 elems,
@@ -493,24 +510,23 @@ def run_analysis_xfem(
                 tip_enrichment_type=model.tip_enrichment_type,
                 rebar_segs=rebar_segs,
                 bond_law=bond_law,
-                bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
+                bond_states_comm=bond_committed_single,
                 enable_bond_slip=model.enable_bond_slip,
-                steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
+                steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,
                 rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
-                bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
-                bond_gamma=bond_gamma,  # BLOQUE B: Bond-slip continuation parameter
-                bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,  # BLOQUE C
-                bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,  # BLOQUE C
-                subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
-                bond_layers=bond_layers,  # PART D: Multi-layer bond support
-                bond_states_list_comm=bond_committed_list if bond_layers else None,  # PART D: Per-layer states
-                crack_context=crack_context,  # THESIS PARITY: Crack deterioration mapping
+                bond_disabled_x_range=bond_disabled_x_range,
+                bond_gamma=bond_gamma,
+                bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,
+                bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,
+                subdomain_mgr=subdomain_mgr,
+                bond_layers=bond_layers,
+                bond_states_list_comm=bond_committed_list,
+                crack_context=crack_context,
             )
             if model.debug_newton:
                 print(f"        [newton] it={it:02d} assemble done, K.shape={K.shape}")
 
             # Perfect bond rebar contribution (legacy: only if bond-slip disabled)
-            # When bond-slip is enabled, rebar forces are handled in assemble_bond_slip()
             if not model.enable_bond_slip:
                 f_rb, K_rb = rebar_contrib(
                     nodes,
@@ -542,30 +558,19 @@ def run_analysis_xfem(
                 # P0.2: Reset residual history on convergence
                 if hasattr(solve_step, '_residual_history'):
                     solve_step._residual_history = []
-                # Apply trial history updates as a *patch* (Phase-1) or as
-                # direct dict updates (legacy).
-                if isinstance(coh_committed, CohesiveStateArrays):
-                    assert isinstance(coh_updates, CohesiveStatePatch)
-                    coh_trial = coh_committed.copy()
-                    coh_updates.apply_to(coh_trial)
-                else:
-                    coh_trial = dict(coh_committed)
-                    coh_trial.update(coh_updates)
+                
+                # Apply trial history updates using SolverState.update()
+                # Create a trial copy first
+                state_trial = state_committed.copy()
+                
+                # Patch updates
+                state_trial.update(
+                    mp_patch=mp_updates,
+                    coh_patch=coh_updates,
+                    bond_new=bond_updates, # bond_updates is full state (list or single)
+                )
 
-                if isinstance(mp_committed, BulkStateArrays):
-                    assert isinstance(mp_updates, BulkStatePatch)
-                    mp_trial = mp_committed.copy()
-                    mp_updates.apply_to(mp_trial)
-                else:
-                    mp_trial = dict(mp_committed)
-                    mp_trial.update(mp_updates)
-
-                # Bond-slip state update (Phase 2)
-                bond_trial = None
-                if bond_updates is not None:
-                    bond_trial = bond_updates  # Already a fresh copy from assemble_bond_slip
-
-                return True, q, coh_trial, mp_trial, aux, float(P), bond_trial
+                return True, q, state_trial, aux, float(P)
 
             # Diagonal equilibration for ill-conditioned systems (Priority #0 fix)
             if model.enable_diagonal_scaling:
@@ -588,7 +593,6 @@ def run_analysis_xfem(
             norm_du = float(np.linalg.norm(du_f))
 
             # P0.2 FIX: Improved stagnation detection - avoid false positives
-            # Track residual history to distinguish true stagnation from small steps
             if not hasattr(solve_step, '_residual_history'):
                 solve_step._residual_history = []
             solve_step._residual_history.append(norm_r)
@@ -609,7 +613,7 @@ def run_analysis_xfem(
                                 f"    [newton] stagnated(true) it={it+1:02d} ||du||={norm_du:.3e} ||rhs||={norm_r:.3e} reduction={r_reduction_factor:.2f} u={u_target*1e3:.3f}mm"
                             )
                         solve_step._residual_history = []  # Reset for next step
-                        return False, q, coh_committed, mp_committed, aux, 0.0, bond_states
+                        return False, q, state_committed, aux, 0.0
                     else:
                         # False stagnation: residual still decreasing, continue
                         if model.debug_newton:
@@ -617,7 +621,7 @@ def run_analysis_xfem(
                                 f"    [newton] small ||du|| but residual decreasing (reduction={r_reduction_factor:.2f}), continuing..."
                             )
                 else:
-                    # Not enough history yet, continue (give it a chance)
+                    # Not enough history yet, continue
                     if model.debug_newton:
                         print(
                             f"    [newton] small ||du|| but insufficient history, continuing..."
@@ -656,16 +660,18 @@ def run_analysis_xfem(
                         bulk_params=bulk_params,
                         rebar_segs=rebar_segs,
                         bond_law=bond_law,
-                        bond_states_comm=bond_committed,  # FIX 2: Use bond_committed, not global bond_states
+                        bond_states_comm=bond_committed_single,  
                         enable_bond_slip=model.enable_bond_slip,
-                        steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,  # Min stiffness to avoid rigid mode
+                        steel_EA=model.steel_EA_min if model.enable_bond_slip else 0.0,
                         rebar_diameter=model.rebar_diameter if model.enable_bond_slip else None,
-                        bond_disabled_x_range=bond_disabled_x_range,  # Empty element bond masking
-                        bond_gamma=bond_gamma,  # BLOQUE B: Bond-slip continuation parameter
-                        bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,  # BLOQUE C
-                        bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,  # BLOQUE C
-                        subdomain_mgr=subdomain_mgr,  # FASE C: Pass subdomain manager
-                        crack_context=crack_context,  # THESIS PARITY: Crack deterioration mapping
+                        bond_disabled_x_range=bond_disabled_x_range,
+                        bond_gamma=bond_gamma,
+                        bond_k_cap=model.bond_k_cap if model.enable_bond_slip else None,
+                        bond_s_eps=model.bond_s_eps if model.enable_bond_slip else 0.0,
+                        subdomain_mgr=subdomain_mgr,
+                        bond_layers=bond_layers,
+                        bond_states_list_comm=bond_committed_list,
+                        crack_context=crack_context,
                     )
                     # Perfect bond rebar (only if bond-slip disabled)
                     if not model.enable_bond_slip:
@@ -707,7 +713,7 @@ def run_analysis_xfem(
         # P0.2: Reset residual history on failure (max iterations)
         if hasattr(solve_step, '_residual_history'):
             solve_step._residual_history = []
-        return False, q, coh_committed, mp_committed, aux, 0.0, bond_committed
+        return False, q, state_committed, aux, 0.0
 
     def curvature_mid(q_full: np.ndarray) -> float:
         y0 = float(np.min(nodes[:, 1]))
@@ -784,11 +790,9 @@ def run_analysis_xfem(
                 angle_deg=getattr(crack, "angle_deg", 90.0),
                 active=crack.active,
             )
-            coh_backup = coh_states.copy() if hasattr(coh_states, "copy") else copy.deepcopy(coh_states)
-            mp_backup = mp_states.copy() if hasattr(mp_states, "copy") else {k: v.copy_shallow() for k, v in mp_states.items()}
+            # Phase-1 Refactor: Unified state backup
+            state_backup = state.copy()
             dofs_backup = dofs
-            # FIX 1: Backup bond_states to enable rollback in case of substep failure
-            bond_backup = bond_states.copy() if (bond_states is not None and hasattr(bond_states, "copy")) else bond_states
 
             inner_updates = 0
             q_guess = None
@@ -830,11 +834,9 @@ def run_analysis_xfem(
                     q_guess_loc = transfer_q_between_dofs(base, base_dofs, dofs_local)
 
                 # BLOQUE B: Bond-slip gamma continuation
-                # If bond-slip is enabled and gamma ramping is active, solve multiple times
-                # with increasing gamma to improve convergence
                 use_gamma_ramp = (
                     model.enable_bond_slip
-                    and bond_states is not None
+                    and state.bond is not None
                     and model.bond_gamma_strategy == "ramp_steps"
                     and model.bond_gamma_ramp_steps > 1
                 )
@@ -855,62 +857,49 @@ def run_analysis_xfem(
 
                     # Ramp through gammas
                     q_cur = q_guess_loc
-                    coh_cur = coh_states
-                    mp_cur = mp_states
-                    bond_cur = bond_states
+                    state_cur = state
                     ok_final = False
 
                     for i_gamma, gamma in enumerate(gamma_vals):
                         if model.debug_substeps or getattr(model, "debug_bond_gamma", False):
                             print(f"    [bond-gamma] step={i_gamma+1}/{len(gamma_vals)}, gamma={gamma:.3f}, u={u1*1e3:.3f}mm")
 
-                        ok, q_sol, coh_trial, mp_trial, aux, P, bond_trial = solve_step(
+                        ok, q_sol, state_trial, aux, P = solve_step(
                             u1,
                             q_cur,
                             crack,
                             dofs_local,
-                            coh_cur,
-                            mp_cur,
-                            bond_cur,
+                            state_cur,
                             bond_gamma=gamma,
-                            bond_committed_list=bond_states_list,  # PART D
                         )
 
                         if not ok:
                             if model.debug_substeps:
                                 print(f"    [bond-gamma] failed at gamma={gamma:.3f}")
-                            # If a gamma substep fails, abandon this increment (trigger substepping)
                             ok_final = False
                             break
 
                         # Accept this gamma step (use as initial guess for next gamma)
                         q_cur = q_sol
-                        coh_cur = coh_trial
-                        mp_cur = mp_trial
-                        bond_cur = bond_trial
+                        state_cur = state_trial
                         ok_final = True
 
                     # Use final result
                     ok = ok_final
                     if ok:
                         q_sol = q_cur
-                        coh_trial = coh_cur
-                        mp_trial = mp_cur
-                        bond_trial = bond_cur
+                        state_trial = state_cur
                 else:
                     # No gamma ramp: single solve_step with gamma=1
                     if model.debug_substeps:
                         print(f"    [inner] calling solve_step with u1={u1*1e3:.3f}mm")
-                    ok, q_sol, coh_trial, mp_trial, aux, P, bond_trial = solve_step(
+                    ok, q_sol, state_trial, aux, P = solve_step(
                         u1,
                         q_guess_loc,
                         crack,
                         dofs_local,
-                        coh_states,
-                        mp_states,
-                        bond_states,
+                        state,
                         bond_gamma=1.0,
-                        bond_committed_list=bond_states_list,  # PART D
                     )
 
                 if model.debug_substeps:
@@ -1028,16 +1017,6 @@ def run_analysis_xfem(
                                     rebar_segs=rebar_segs_dofs, enable_bond_slip=model.enable_bond_slip
                                 )
 
-                                # Junction detection (Dissertation Eq. 4.64-4.66)
-                                # NOTE: Full junction enrichment requires multi-crack support.
-                                # For future multi-crack solver, detect coalescence here:
-                                # if model.enable_junction_enrichment:
-                                #     from xfem_clean.junction import detect_crack_coalescence
-                                #     junctions = detect_crack_coalescence(
-                                #         cracks=[crack], nodes=nodes, elems=elems,
-                                #         tol_merge=model.junction_merge_tolerance
-                                #     )
-
                                 # L2 DOF projection (Dissertation Eq. 4.60-4.63)
                                 if model.enable_dof_projection and dofs_new.ndof != dofs_local.ndof:
                                     from xfem_clean.dof_mapping import project_dofs_l2
@@ -1064,17 +1043,11 @@ def run_analysis_xfem(
                                 )
 
                 if force_accept:
-                    coh_states = coh_trial
-                    mp_states = mp_trial
-                    if bond_trial is not None:
-                        bond_states = bond_trial
+                    state = state_trial
                     break
 
                 if not changed:
-                    coh_states = coh_trial
-                    mp_states = mp_trial
-                    if bond_trial is not None:
-                        bond_states = bond_trial
+                    state = state_trial
                     break
 
                 inner_updates += 1
@@ -1083,24 +1056,48 @@ def run_analysis_xfem(
                     split_reason = "crack_updates"
                     break
 
-                coh_states = coh_trial
-                mp_states = mp_trial
-                if bond_trial is not None:
-                    bond_states = bond_trial
+                state = state_trial
                 q_guess = q_sol.copy()
                 continue
 
             if need_split:
                 q_n = q_backup
                 crack = crack_backup
-                coh_states = coh_backup
-                mp_states = mp_backup
+                state = state_backup
                 dofs = dofs_backup
                 # FIX 1: Restore bond_states to previous state when substep fails
-                bond_states = bond_backup
+                # (Unified state backup handles this now)
+
                 if level >= int(model.max_subdiv):
+                    # DIAGNOSTIC DUMP
+                    print("\n[WATCHDOG] Substepping limit exceeded. Dumping state diagnostics:")
+                    print(f"  Reason: {split_reason}")
+                    print(f"  Load level: u={u1:.6e} m (target={u_target:.6e})")
+                    print(f"  Crack active: {crack.active}")
+                    if crack.active:
+                        print(f"  Tip: ({crack.tip_x:.4f}, {crack.tip_y:.4f})")
+                        print(f"  DOFs: {dofs.ndof}")
+                    
+                    # Analyze damage extremes
+                    if isinstance(state.mp, BulkStateArrays):
+                        max_d_t = np.max(state.mp.damage_t)
+                        max_d_c = np.max(state.mp.damage_c)
+                        print(f"  Bulk Max Damage: T={max_d_t:.4f}, C={max_d_c:.4f}")
+                    
+                    if isinstance(state.coh, CohesiveStateArrays):
+                        max_d_coh = np.max(state.coh.damage)
+                        print(f"  Cohesive Max Damage: {max_d_coh:.4f}")
+
+                    # Attempt to suggest what went wrong
+                    hint = "Possible causes: unstable crack growth, loop in damage logic, or overly larger step."
+                    if split_reason == "newton":
+                         hint += " Newton solver failed to converge."
+                    elif split_reason == "crack_updates":
+                         hint += " Crack geometry updates failing to settle."
+
                     raise RuntimeError(
-                        f"Substepping exceeded max_subdiv={model.max_subdiv} (reason={split_reason}) at u={u1} m"
+                        f"Substepping exceeded max_subdiv={model.max_subdiv} (reason={split_reason}) at u={u1} m.\n"
+                        f"{hint}\nSee stdout for detailed diagnostics."
                     )
                 stack.append((u0 + 0.5 * du, 0.5 * du, level + 1))
                 stack.append((u0, 0.5 * du, level + 1))
@@ -1114,7 +1111,7 @@ def run_analysis_xfem(
             R = 1e20 if abs(kappa) < 1e-16 else 1.0 / kappa  # Use large value instead of inf
             M = P * model.L / 4.0
             ang = math.degrees(math.atan2(crack.tvec()[1], crack.tvec()[0])) if crack.active else 0.0
-            ed = _compute_global_dissipation(aux, mp_states, coh_states)
+            ed = _compute_global_dissipation(aux, state.mp, state.coh)
             results.append(
                 [
                     step_counter,
@@ -1148,19 +1145,20 @@ def run_analysis_xfem(
     # Return format selection
     if return_bundle:
         # Comprehensive bundle for postprocessing (FASE G)
+        # For legacy compatibility, we unpack state
         return {
             'nodes': nodes,
             'elems': elems,
             'u': q_n,
             'history': np.asarray(results, dtype=float),
             'crack': crack,
-            'mp_states': mp_states,
-            'bond_states': bond_states,
+            'mp_states': state.mp,
+            'bond_states': state.bond,
             'rebar_segs': rebar_segs,
             'dofs': dofs,
-            'coh_states': coh_states,
+            'coh_states': state.coh,
         }
     elif return_states:
-        return nodes, elems, q_n, np.asarray(results, dtype=float), crack, mp_states
+        return nodes, elems, q_n, np.asarray(results, dtype=float), crack, state.mp
     else:
         return nodes, elems, q_n, np.asarray(results, dtype=float), crack
