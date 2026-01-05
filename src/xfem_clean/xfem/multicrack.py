@@ -1272,13 +1272,17 @@ def run_analysis_xfem_multicrack(
 
                 layer_id_meta = _marker_context(dof_marker)
 
-                if dofs_obj.steel is None:
-                    raise ValueError(
-                        "Invalid steel DOF mapping: "
-                        f"case_id={case_id}, node_id={node_id}, "
-                        f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
-                        "reason=steel DOFs not allocated"
-                    )
+                if dofs_obj.steel is None or dofs_obj.steel_nodes is None:
+                    if node_id < 0 or node_id >= nnode:
+                        raise ValueError(
+                            "Invalid steel DOF mapping: "
+                            f"case_id={case_id}, node_id={node_id}, "
+                            f"layer_id={layer_id_meta}, dof_marker={dof_marker}, "
+                            "reason=node_id out of range"
+                        )
+                    fallback_dof = int(dofs_obj.std[node_id, component])
+                    fixed_dict[fallback_dof] = prescribed_scale * float(u_target)
+                    continue
                 if node_id < 0 or node_id >= nnode:
                     raise ValueError(
                         "Invalid steel DOF mapping: "
@@ -1442,11 +1446,17 @@ def run_analysis_xfem_multicrack(
             if bc_spec is not None and bc_spec.reaction_dofs:
                 # Use reaction_dofs from bc_spec (first one)
                 load_dof = int(bc_spec.reaction_dofs[0])
+                if load_dof < 0:
+                    load_dof = None
             else:
                 # Default: top center node (3PB)
-                load_dof = int(dofs.std[load_node, 1])
-            P_est = -float(R[load_dof])
-            fscale = max(1.0, abs(P_est))
+                load_dof = int(dofs.std[load_node, 1]) if load_node is not None else None
+            if load_dof is not None:
+                P_est = -float(R[load_dof])
+                fscale = max(1.0, abs(P_est))
+            else:
+                P_est = 0.0
+                fscale = 1.0
             tol = model.newton_tol_r + model.newton_beta * fscale
             last_res = res
             last_tol = tol
@@ -1469,16 +1479,63 @@ def run_analysis_xfem_multicrack(
                 return True, q, coh_trial, bulk_trial, aux_pos, aux_sig, "res", it + 1, fint, last_res, last_tol, last_fscale
 
             lsmr_meta = None
+            reg_lambda = None
+            solver_tag = "spsolve"
+            rhs_norm = float(np.linalg.norm(rhs))
+
+            def _linear_relres(K_local, du_local) -> float:
+                return float(np.linalg.norm(K_local @ du_local - rhs) / (rhs_norm + 1.0))
+
+            def _is_bad_solution(du_local, relres_local, max_du_limit=1e3) -> bool:
+                if du_local is None or not np.all(np.isfinite(du_local)):
+                    return True
+                if du_local.size:
+                    if float(np.max(np.abs(du_local))) > max_du_limit:
+                        return True
+                return relres_local > 1e-6
+
+            du_f = None
+            relres = float("inf")
+
             try:
                 du_f = spla.spsolve(K_ff, rhs)
+                relres = _linear_relres(K_ff, du_f)
             except Exception:
+                du_f = None
+
+            if _is_bad_solution(du_f, relres):
                 lsmr_out = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)
                 du_f = lsmr_out[0]
                 lsmr_meta = lsmr_out
-            if not np.all(np.isfinite(du_f)):
-                lsmr_out = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)
-                du_f = lsmr_out[0]
-                lsmr_meta = lsmr_out
+                solver_tag = "lsmr"
+                relres = _linear_relres(K_ff, du_f)
+
+            if _is_bad_solution(du_f, relres):
+                diag = K_ff.diagonal()
+                diag_abs = np.abs(diag)
+                diag_max = float(diag_abs.max()) if diag_abs.size else 0.0
+                lam = 1e-8 * max(1.0, diag_max)
+                for _attempt in range(3):
+                    reg_lambda = lam
+                    K_reg = K_ff + lam * sp.eye(K_ff.shape[0], format="csr")
+                    try:
+                        du_candidate = spla.spsolve(K_reg, rhs)
+                        solver_tag = "reg-spsolve"
+                    except Exception:
+                        lsmr_out = spla.lsmr(K_reg, rhs, atol=1e-12, btol=1e-12, maxiter=2000)
+                        du_candidate = lsmr_out[0]
+                        lsmr_meta = lsmr_out
+                        solver_tag = "reg-lsmr"
+                    relres_candidate = _linear_relres(K_reg, du_candidate)
+                    if not _is_bad_solution(du_candidate, relres_candidate):
+                        du_f = du_candidate
+                        relres = relres_candidate
+                        break
+                    lam *= 10.0
+
+            if du_f is None:
+                du_f = np.zeros_like(rhs)
+
             norm_du = float(np.linalg.norm(du_f))
             max_du = float(np.max(np.abs(du_f))) if du_f.size else 0.0
             q_trial = q.copy()
@@ -1498,15 +1555,15 @@ def run_analysis_xfem_multicrack(
                 condA = float(lsmr_meta[6])
                 istop = int(lsmr_meta[1])
                 normr = float(lsmr_meta[3])
-            if max_du > 1e3 or (condA is not None and condA > 1e16):
-                raise RuntimeError(
-                    "Likely singular/ill-conditioned K_ff (explosive dq).\n"
-                    f"max|dq|={max_du:.6e}, ||dq||={norm_du:.6e}, max|q_trial|={max_q_trial:.6e}, "
-                    f"near-zero diag={near_zero_diag}, diag_thresh={diag_thresh:.3e}, "
-                    f"condA={condA if condA is not None else 'n/a'}, "
-                    f"istop={istop if istop is not None else 'n/a'}, "
-                    f"normr={normr if normr is not None else 'n/a'}"
+            if _is_bad_solution(du_f, relres) or (condA is not None and condA > 1e16):
+                why = (
+                    "illcond("
+                    f"max|dq|={max_du:.2e}, relres={relres:.2e}, diag_max={diag_max:.2e}, "
+                    f"lambda={reg_lambda if reg_lambda is not None else 0.0:.2e}, "
+                    f"solver={solver_tag}, condA={condA if condA is not None else 'n/a'}"
+                    ")"
                 )
+                return False, q, coh_states_committed, bulk_states_committed, aux_pos, aux_sig, why, it + 1, fint, last_res, last_tol, last_fscale
             # Stagnation check: use absolute tolerance only (no displacement scaling)
             # Previous version scaled by u_scale which made it too strict for small displacements
             if norm_du < model.newton_tol_du:
@@ -1903,9 +1960,11 @@ def run_analysis_xfem_multicrack(
                     # Extract reaction force (FASE D: bc_spec support)
                     if bc_spec is not None and bc_spec.reaction_dofs:
                         dof_load = int(bc_spec.reaction_dofs[0])
+                        if dof_load < 0:
+                            dof_load = None
                     else:
-                        dof_load = int(dofs.std[load_node, 1])
-                    P = -float(fint_loc[dof_load])
+                        dof_load = int(dofs.std[load_node, 1]) if load_node is not None else None
+                    P = -float(fint_loc[dof_load]) if dof_load is not None else 0.0
 
                     results.append({
                         "step": istep,

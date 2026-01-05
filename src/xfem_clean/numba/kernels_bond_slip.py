@@ -407,6 +407,9 @@ def bond_slip_assembly_kernel(
         if dtau_ds > dtau_max:
             dtau_ds = dtau_max
 
+        # Continuation scaling: scale bond force (tangent scaling handled separately)
+        tau = gamma * tau
+
         # Bond force (distributed over segment length)
         F_bond = tau * perimeter * L0
 
@@ -461,6 +464,7 @@ def bond_slip_assembly_kernel(
             else:
                 tau_abs_prev = tau_f
             tau_prev = sign_prev * tau_abs_prev * omega_total  # Apply same reduction factor
+            tau_prev = gamma * tau_prev
 
             # Trapezoidal rule: ΔW = 0.5*(τ_old + τ_new)*(s_new - s_old)*perimeter*L
             ds = s - s_prev
@@ -645,6 +649,7 @@ def bond_slip_assembly_kernel(
                 dsigma_dw_Pa_m = 0.0
 
             # Dowel force (distributed over segment length)
+            sigma = gamma * sigma
             F_dowel = sigma * perimeter * L0
 
             # Force components in normal direction
@@ -665,7 +670,7 @@ def bond_slip_assembly_kernel(
             f[dof_c2y] += 0.5 * Fy_dowel_c
 
             # Dowel stiffness: K_dowel = dσ/dw * perimeter * L0
-            K_dowel = dsigma_dw_Pa_m * perimeter * L0
+            K_dowel = gamma * dsigma_dw_Pa_m * perimeter * L0
 
             # Gradient vector for transverse opening: h = [∂w/∂u]
             # w = (u_s - u_c) · n, so ∂w/∂u = [-n/2, -n/2, +n/2, +n/2]
@@ -784,6 +789,7 @@ def bond_slip_assembly_kernel(
                     sigma_prev = sigma_Pa_prev if w_prev >= 0.0 else -sigma_Pa_prev
                 else:
                     sigma_prev = 0.0
+                sigma_prev = gamma * sigma_prev
 
                 # Trapezoidal rule: ΔW = 0.5*(σ_old + σ_new)*(w_new - w_old)*perimeter*L
                 dw = w - w_prev

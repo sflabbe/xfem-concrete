@@ -1719,6 +1719,9 @@ def _bond_slip_assembly_python(
         if bond_k_cap is not None and dtau_ds > bond_k_cap:
             dtau_ds = bond_k_cap
 
+        # BLOQUE 3: Continuation scaling for bond force (keep tangent scaling separate)
+        tau *= bond_gamma
+
         # TASK 5: Bond dissipation tracking (trapezoidal rule)
         if compute_dissipation and u_total_prev is not None:
             # Compute slip at previous time step
@@ -1754,6 +1757,7 @@ def _bond_slip_assembly_python(
 
             # Evaluate tau_old using same bond law (with committed s_max, no viscosity)
             tau_old, _ = bond_law.tau_and_tangent(s_old, s_max_committed, eps_s=eps_s_old, omega_crack=omega_crack)
+            tau_old *= bond_gamma
 
             # Trapezoidal dissipation:
             # ΔD = 0.5 * (tau_old + tau_new) * (s_new - s_old) * perimeter * L0
@@ -1794,6 +1798,8 @@ def _bond_slip_assembly_python(
 
             # Compute dowel stress and tangent
             sigma_dowel, dsigma_dw = dowel_model.sigma_and_tangent(w_pos)
+            sigma_dowel *= bond_gamma
+            dsigma_dw *= bond_gamma
 
             # TASK 5: Dowel dissipation tracking (trapezoidal rule)
             if compute_dissipation and u_total_prev is not None:
@@ -1805,6 +1811,7 @@ def _bond_slip_assembly_python(
 
                 # Compute sigma_old
                 sigma_dowel_old, _ = dowel_model.sigma_and_tangent(w_old_pos)
+                sigma_dowel_old *= bond_gamma
 
                 # Trapezoidal dissipation:
                 # ΔD = 0.5 * (sigma_old + sigma_new) * (w_new - w_old) * perimeter * L0
