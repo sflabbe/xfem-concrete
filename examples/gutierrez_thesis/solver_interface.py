@@ -910,23 +910,27 @@ def _should_use_multicrack(case: CaseConfig) -> bool:
     Heuristics:
     - Explicit case IDs known to need distributed cracking
     - Non-elastic bulk material (CDP/DP)
+    - Cyclic loading
     """
     multicrack_case_ids = {
         "03_tensile_stn12",
         "04_beam_3pb_t5a1",
         "05_wall_c1_cyclic",
         "06_fibre_tensile",
+        "10_wall_c2_cyclic",
     }
 
     # Check case ID
     if case.case_id in multicrack_case_ids:
         return True
 
+    # Check loading type
+    if getattr(case.loading, "loading_type", None) == "cyclic":
+        return True
+
     # Check material model (non-elastic likely needs multicrack)
     if case.concrete.model_type not in {"elastic"}:
-        # For now, be conservative and use multicrack for cdp/dp
-        # (can be refined later)
-        pass
+        return True
 
     return False
 
@@ -974,6 +978,10 @@ def run_case_solver(
         - 'bond_states': bond-slip states (if applicable)
     """
 
+    if cli_args is not None and hasattr(cli_args, "bulk") and cli_args.bulk is not None:
+        case.concrete.model_type = cli_args.bulk
+        print(f"Override: concrete.model_type = {cli_args.bulk} (via --bulk)")
+
     # Create model
     model = case_config_to_xfem_model(case)
 
@@ -985,6 +993,9 @@ def run_case_solver(
         elif hasattr(cli_args, 'no_numba') and cli_args.no_numba:
             model.use_numba = False
             print("Override: use_numba = False (via --no-numba)")
+        if hasattr(cli_args, "bond_slip") and cli_args.bond_slip is not None:
+            model.enable_bond_slip = cli_args.bond_slip == "on"
+            print(f"Override: bond_slip = {cli_args.bond_slip} (via --bond-slip)")
 
     # Apply mesh factor
     nx = int(case.geometry.n_elem_x * mesh_factor)
@@ -994,6 +1005,9 @@ def run_case_solver(
     # FASE D: Dispatcher for single-crack vs multicrack vs cyclic
     is_cyclic = hasattr(case.loading, 'loading_type') and case.loading.loading_type == "cyclic"
     use_multicrack = _should_use_multicrack(case)
+    if cli_args is not None and hasattr(cli_args, "solver") and cli_args.solver is not None:
+        use_multicrack = cli_args.solver == "multi"
+        print(f"Override: solver = {cli_args.solver} (via --solver)")
 
     # Extract loading parameters
     if is_cyclic:
@@ -1235,6 +1249,9 @@ def run_case_solver(
             # segment_mask from bond_disabled_x_range (handled inside solver)
             bond_segment_mask = None
 
+    bond_layers_solver = bond_layers if model.enable_bond_slip else None
+    bond_law_solver = bond_law if model.enable_bond_slip else None
+
     # Dispatch to appropriate solver
     print(f"Running solver: nx={nx}, ny={ny}, nsteps={nsteps}, umax={umax*1e3:.3f} mm")
 
@@ -1258,7 +1275,7 @@ def run_case_solver(
             elems=elems,
             u_targets=u_targets if is_cyclic else None,
             bc_spec=bc_spec,
-            bond_law=bond_law,
+            bond_law=bond_law_solver,
             return_bundle=True,  # BLOQUE 2: Get comprehensive bundle
         )
 
@@ -1283,8 +1300,8 @@ def run_case_solver(
             law=law,
             return_bundle=True,
             bc_spec=bc_spec,
-            bond_law=bond_law,  # Legacy fallback
-            bond_layers=bond_layers,  # TASK 2: Multi-layer support
+            bond_law=bond_law_solver,  # Legacy fallback
+            bond_layers=bond_layers_solver,  # TASK 2: Multi-layer support
             u_targets=u_targets,  # BLOQUE 3: Cyclic trajectory
         )
     else:
@@ -1299,8 +1316,8 @@ def run_case_solver(
             law=law,
             return_bundle=True,  # Get full bundle
             bc_spec=bc_spec,
-            bond_law=bond_law,  # Legacy fallback
-            bond_layers=bond_layers,  # TASK 2: Multi-layer support
+            bond_law=bond_law_solver,  # Legacy fallback
+            bond_layers=bond_layers_solver,  # TASK 2: Multi-layer support
         )
 
     # Package results with all necessary data for postprocessing
@@ -1317,7 +1334,7 @@ def run_case_solver(
         'dofs': bundle.get('dofs'),
         'coh_states': bundle.get('coh_states'),
         'model': model,
-        'bond_law': bond_law,
+        'bond_law': bond_law_solver,
         'subdomain_mgr': subdomain_mgr,
     }
 

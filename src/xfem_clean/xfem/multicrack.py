@@ -362,6 +362,7 @@ def assemble_xfem_system_multi(
 
     Phase 2: Now supports bulk material nonlinearity (CDP/DP) via Numba kernels.
     """
+    case_id = getattr(model, "case_id", "unknown")
     ndof = dofs.ndof
     rows: list[int] = []
     cols: list[int] = []
@@ -852,6 +853,20 @@ def assemble_xfem_system_multi(
         # Add bond-slip contribution to global system
         fint += f_bond
         K = K + K_bond
+        _raise_on_nonfinite(
+            "bond-slip",
+            {
+                "f_bond": f_bond,
+                "K_bond": K_bond,
+                "fint": fint,
+                "K": K,
+            },
+            bulk_kind=bulk_kind,
+            enable_bond_slip=enable_bond_slip,
+            use_numba=use_numba,
+            case_id=case_id,
+            u_bar=u_bar,
+        )
 
     elif rebar_segs is not None and not enable_bond_slip:
         # Legacy: perfect-bond rebar (no slip)
@@ -886,6 +901,69 @@ def assemble_xfem_system_multi(
     aux_gp_sig = np.array(aux_gp_sig, dtype=float)
 
     return K, fint, fext, coh_updates, bulk_updates, aux_gp_pos, aux_gp_sig, bond_updates
+
+
+def _array_for_stats(arr):
+    if arr is None:
+        return None
+    if sp.issparse(arr):
+        return arr.data
+    return np.asarray(arr)
+
+
+def _format_finite_stats(name: str, arr) -> str:
+    data = _array_for_stats(arr)
+    if data is None:
+        return f"{name}: none"
+    data = np.asarray(data, dtype=float)
+    if data.size == 0:
+        return f"{name}: nan=0, inf=0, finite_min=None, finite_max=None"
+    nan_count = int(np.isnan(data).sum())
+    inf_count = int(np.isinf(data).sum())
+    finite = data[np.isfinite(data)]
+    if finite.size == 0:
+        finite_min = None
+        finite_max = None
+    else:
+        finite_min = float(np.min(finite))
+        finite_max = float(np.max(finite))
+    return (
+        f"{name}: nan={nan_count}, inf={inf_count}, "
+        f"finite_min={finite_min}, finite_max={finite_max}"
+    )
+
+
+def _raise_on_nonfinite(
+    label: str,
+    arrays: dict,
+    *,
+    bulk_kind: int,
+    enable_bond_slip: bool,
+    use_numba: bool,
+    case_id: str,
+    u_bar: float,
+) -> None:
+    diagnostics = []
+    has_issue = False
+    for name, arr in arrays.items():
+        data = _array_for_stats(arr)
+        if data is None:
+            diagnostics.append(f"{name}: none")
+            continue
+        data = np.asarray(data, dtype=float)
+        if data.size == 0:
+            diagnostics.append(f"{name}: nan=0, inf=0, finite_min=None, finite_max=None")
+            continue
+        if not np.isfinite(data).all():
+            has_issue = True
+        diagnostics.append(_format_finite_stats(name, data))
+    if has_issue:
+        flags = (
+            f"bulk_kind={bulk_kind}, enable_bond_slip={enable_bond_slip}, "
+            f"use_numba={use_numba}, case_id={case_id}, u_bar={u_bar}"
+        )
+        message = f"Non-finite values detected ({label}). " + " | ".join(diagnostics) + f" | {flags}"
+        raise RuntimeError(message)
 
 
 def _candidate_points_zone(model: XFEMModel, zone: str, nx: int) -> list[tuple[float, float]]:
@@ -1335,6 +1413,20 @@ def run_analysis_xfem_multicrack(
                     fext[dof] += force_val
 
             R = fint - fext
+            _raise_on_nonfinite(
+                "assemble",
+                {
+                    "fint": fint,
+                    "fext": fext,
+                    "K": K,
+                    "R": R,
+                },
+                bulk_kind=bulk_kind,
+                enable_bond_slip=enable_bond_slip,
+                use_numba=use_numba,
+                case_id=getattr(model, "case_id", "unknown"),
+                u_bar=u_bar,
+            )
             free, K_ff, r_f, _ = apply_dirichlet(K, R, fixed_step, q)
             rhs = -r_f
 
@@ -1399,7 +1491,7 @@ def run_analysis_xfem_multicrack(
                     for dof, val in fixed_step.items():
                         q_try[dof] = val
 
-                    _, fint_t, fext_t, _coh_upd_t, _bulk_upd_t, aux_pos_t, aux_sig_t, _ = assemble_xfem_system_multi(
+                    K_t, fint_t, fext_t, _coh_upd_t, _bulk_upd_t, aux_pos_t, aux_sig_t, _ = assemble_xfem_system_multi(
                         nodes,
                         elems,
                         q_try,
@@ -1430,6 +1522,20 @@ def run_analysis_xfem_multicrack(
                         subdomain_mgr=subdomain_mgr,
                     )
                     r_try = (fint_t - fext_t)[free]
+                    _raise_on_nonfinite(
+                        "line-search",
+                        {
+                            "fint": fint_t,
+                            "fext": fext_t,
+                            "K": K_t,
+                            "R": fint_t - fext_t,
+                        },
+                        bulk_kind=bulk_kind,
+                        enable_bond_slip=enable_bond_slip,
+                        use_numba=use_numba,
+                        case_id=getattr(model, "case_id", "unknown"),
+                        u_bar=u_bar,
+                    )
                     r1 = float(np.linalg.norm(r_try))
                     if r1 <= r0:
                         q = q_try

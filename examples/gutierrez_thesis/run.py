@@ -130,24 +130,44 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
     print(f"Loading: {case_config.loading.loading_type}")
     print(f"Output dir: {case_config.outputs.output_dir}\n")
 
+    override_messages = []
+
     # Apply CLI overrides to case_config
     if cli_args and hasattr(cli_args, 'bulk') and cli_args.bulk is not None:
         case_config.concrete.model_type = cli_args.bulk
-        print(f"Override: concrete.model_type = {cli_args.bulk}")
+        override_messages.append(f"concrete.model_type = {cli_args.bulk}")
 
     if cli_args and hasattr(cli_args, 'nsteps') and cli_args.nsteps is not None:
         if hasattr(case_config.loading, 'n_steps'):
             case_config.loading.n_steps = cli_args.nsteps
-            print(f"Override: n_steps = {cli_args.nsteps}")
+            override_messages.append(f"n_steps = {cli_args.nsteps}")
 
     if cli_args and hasattr(cli_args, 'cycles') and cli_args.cycles is not None:
         if hasattr(case_config.loading, 'n_cycles_per_target'):
             case_config.loading.n_cycles_per_target = cli_args.cycles
-            print(f"Override: n_cycles_per_target = {cli_args.cycles}")
+            override_messages.append(f"n_cycles_per_target = {cli_args.cycles}")
 
     if cli_args and hasattr(cli_args, 'output_dir') and cli_args.output_dir is not None:
         case_config.outputs.output_dir = cli_args.output_dir
-        print(f"Override: output_dir = {cli_args.output_dir}")
+        override_messages.append(f"output_dir = {cli_args.output_dir}")
+
+    if cli_args and hasattr(cli_args, 'solver') and cli_args.solver is not None:
+        override_messages.append(f"solver = {cli_args.solver}")
+
+    if cli_args and hasattr(cli_args, 'bond_slip') and cli_args.bond_slip is not None:
+        override_messages.append(f"bond_slip = {cli_args.bond_slip}")
+
+    if cli_args and hasattr(cli_args, 'use_numba') and cli_args.use_numba:
+        override_messages.append("use_numba = True")
+    elif cli_args and hasattr(cli_args, 'no_numba') and cli_args.no_numba:
+        override_messages.append("use_numba = False")
+
+    if override_messages:
+        print("Active overrides:")
+        for message in override_messages:
+            print(f"  - {message}")
+    else:
+        print("Active overrides: none")
 
     if dry_run:
         print("DRY RUN - Solver not executed.\n")
@@ -312,6 +332,17 @@ Examples:
         "--bulk",
         choices=["elastic", "dp", "cdp_lite", "cdp_full"],
         help="Override concrete bulk material model_type (default: case config)"
+    )
+    parser.add_argument(
+        "--solver",
+        choices=["single", "multi"],
+        help="Override solver selection (single or multi)"
+    )
+    parser.add_argument(
+        "--bond-slip",
+        dest="bond_slip",
+        choices=["on", "off"],
+        help="Toggle bond-slip behavior without editing case files"
     )
     parser.add_argument(
         "--output-dir",
