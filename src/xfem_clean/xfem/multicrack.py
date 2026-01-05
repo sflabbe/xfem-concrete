@@ -1503,6 +1503,7 @@ def run_analysis_xfem_multicrack(
     last_res = None
     last_tol = None
     last_fscale = None
+    last_reason = None
 
     for istep, u1 in enumerate(u_targets, start=1):
         u0 = results[-1]["u"] if results else 0.0
@@ -1521,10 +1522,11 @@ def run_analysis_xfem_multicrack(
                 res_str = f"{last_res:.6e}" if last_res is not None else "n/a"
                 tol_str = f"{last_tol:.6e}" if last_tol is not None else "n/a"
                 fscale_str = f"{last_fscale:.6e}" if last_fscale is not None else "n/a"
+                reason_str = last_reason if last_reason is not None else "n/a"
                 raise RuntimeError(
                     "Anti-hang guardrail triggered: max_total_substeps exceeded.\n"
                     f"u0={ua:.6e}, u1={ub:.6e}, du={du:.6e}, lvl={lvl}, maxit={model.newton_maxit}, "
-                    f"last||rhs||={res_str}, tol={tol_str}, fscale={fscale_str}, "
+                    f"last||rhs||={res_str}, tol={tol_str}, fscale={fscale_str}, reason={reason_str}, "
                     f"bond_slip={'on' if enable_bond_slip else 'off'}"
                 )
 
@@ -1565,6 +1567,7 @@ def run_analysis_xfem_multicrack(
                     ok, q_sol, coh_trial, bulk_trial, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
                         ub, q_cur, coh_cur, bulk_cur, bond_gamma=gamma
                     )
+                    last_reason = why
 
                     if not ok:
                         if getattr(model, "debug_substeps", False):
@@ -1590,6 +1593,7 @@ def run_analysis_xfem_multicrack(
                 ok, q_sol, coh_trial, bulk_trial, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
                     ub, q_start, coh_comm, bulk_comm, bond_gamma=1.0
                 )
+                last_reason = why
             if ok:
                 print(f"    [newton] converged({why}) it={iters:02d} ||rhs||=OK u={ub*1e3:.3f}mm")
 
@@ -1734,6 +1738,7 @@ def run_analysis_xfem_multicrack(
                     ok2, q_loc, coh_loc, bulk_loc, aux_pos_loc, aux_sig_loc, why2, it2, fint_loc, last_res, last_tol, last_fscale = ramp_solve_step(
                         ub, q_loc, coh_loc, bulk_loc
                     )
+                    last_reason = why2
                     if not ok2:
                         print(f"    [inner] re-solve failed({why2}) it={it2:02d} at u={ub*1e3:.3f}mm -> will subdivide")
                         cracks[:] = cracks_before

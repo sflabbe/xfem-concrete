@@ -525,6 +525,42 @@ def build_bcs_from_case(
         # Positive scale (pull in +x direction)
         prescribed_scale = 1.0
 
+    elif "tensile" in case_name or case_name.startswith(("03_", "06_")):
+        # TENSILE MEMBER:
+        # - Fix left edge (x=0): ux=0 for all nodes
+        # - Fix uy=0 for a single left edge node (prevent rigid body)
+        # - Prescribe displacement on right edge (x=L): ux=u_target
+
+        x_tol = 1e-6
+        left_nodes = np.where(np.isclose(nodes[:, 0], 0.0, atol=x_tol))[0]
+        right_nodes_all = np.where(np.isclose(nodes[:, 0], model.L, atol=x_tol))[0]
+
+        # Fix ux=0 for left edge
+        for n in left_nodes:
+            fixed_dofs[2 * n] = 0.0  # ux = 0
+
+        # Fix uy=0 for bottom-left node to prevent rigid body motion
+        if len(left_nodes) > 0:
+            bottom_left = left_nodes[np.argmin(nodes[left_nodes, 1])]
+            fixed_dofs[2 * bottom_left + 1] = 0.0  # uy = 0
+
+        # Select right edge nodes for loading (optionally within load_halfwidth)
+        right_nodes = right_nodes_all
+        if hasattr(case.loading, 'load_x_center') and hasattr(case.loading, 'load_halfwidth'):
+            load_x_center = case.loading.load_x_center * 1e-3  # mm → m
+            load_halfwidth = case.loading.load_halfwidth * 1e-3
+            candidate = right_nodes_all[
+                np.where(np.abs(nodes[right_nodes_all, 0] - load_x_center) <= load_halfwidth)[0]
+            ]
+            if len(candidate) > 0:
+                right_nodes = candidate
+
+        for n in right_nodes:
+            prescribed_dofs.append(2 * n)  # ux
+            reaction_dofs.append(2 * n)
+
+        prescribed_scale = 1.0
+
     elif "wall" in case_name:
         # WALL TEST (RC wall under cyclic lateral loading):
         # - Fix base (y=0): uy=0 for all nodes, ux=0 for one corner node (prevent rigid body)
@@ -1040,6 +1076,9 @@ def run_case_solver(
     # TASK 2: Build bond layers from case configuration (multi-layer support)
     bond_layers = None
     bond_law = None  # Legacy fallback
+
+    if case.rebar_layers:
+        bond_law = map_bond_law(case.rebar_layers[0].bond_law, case_id=case.case_id)
 
     if case.rebar_layers or case.frp_sheets:
         try:
