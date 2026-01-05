@@ -124,6 +124,7 @@ class XFEMModel:
     enable_diagonal_scaling: bool = True  # Diagonal equilibration for ill-conditioned systems
     max_subdiv: int = 12
     max_total_substeps: int = 50000  # Anti-hang: abort if total substeps exceeds this limit
+    substep_du_min: float = 1e-12  # Anti-hang: stop substepping if |du| falls below this
 
     # Optional Numba acceleration (Phase 2/3)
     # None = auto-detect (use if available), True/False = explicit override

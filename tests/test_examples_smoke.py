@@ -24,6 +24,7 @@ def run_command(args):
 
 
 @pytest.mark.slow
+@pytest.mark.examples_smoke
 def test_examples_smoke():
     run_command([
         "-m",
