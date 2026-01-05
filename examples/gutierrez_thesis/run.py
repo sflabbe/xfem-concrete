@@ -136,6 +136,8 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
     if cli_args and hasattr(cli_args, 'bulk') and cli_args.bulk is not None:
         case_config.concrete.model_type = cli_args.bulk
         override_messages.append(f"concrete.model_type = {cli_args.bulk}")
+        if dry_run:
+            print(f"Override: concrete.model_type = {cli_args.bulk}")
 
     if cli_args and hasattr(cli_args, 'nsteps') and cli_args.nsteps is not None:
         if hasattr(case_config.loading, 'n_steps'):

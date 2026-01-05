@@ -81,6 +81,11 @@ python -m examples.gutierrez_thesis.run --case t5a1 --no-numba
 
 ## Thesis Case Suite
 
+## Recent Updates
+
+- Bond-slip continuation (`bond_gamma`) now scales both interface forces and stiffness (including dowel contributions), keeping gamma ramps consistent.
+- Multicrack linear solves now check linear residuals and fall back to LSMR/regularization for ill-conditioned steps, allowing substepping to recover instead of hard errors.
+
 All cases from Gutierrez (KIT, 2020) PhD thesis are implemented with validation against experimental data.
 
 ### Case Overview
