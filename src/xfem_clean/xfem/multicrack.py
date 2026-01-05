@@ -1468,13 +1468,45 @@ def run_analysis_xfem_multicrack(
                     bulk_trial = bulk_updates
                 return True, q, coh_trial, bulk_trial, aux_pos, aux_sig, "res", it + 1, fint, last_res, last_tol, last_fscale
 
+            lsmr_meta = None
             try:
                 du_f = spla.spsolve(K_ff, rhs)
             except Exception:
-                du_f = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)[0]
+                lsmr_out = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)
+                du_f = lsmr_out[0]
+                lsmr_meta = lsmr_out
             if not np.all(np.isfinite(du_f)):
-                du_f = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)[0]
+                lsmr_out = spla.lsmr(K_ff, rhs, atol=1e-12, btol=1e-12, maxiter=2000)
+                du_f = lsmr_out[0]
+                lsmr_meta = lsmr_out
             norm_du = float(np.linalg.norm(du_f))
+            max_du = float(np.max(np.abs(du_f))) if du_f.size else 0.0
+            q_trial = q.copy()
+            q_trial[free] += du_f
+            for dof, val in fixed_step.items():
+                q_trial[dof] = val
+            max_q_trial = float(np.max(np.abs(q_trial))) if q_trial.size else 0.0
+            diag = K_ff.diagonal()
+            diag_abs = np.abs(diag)
+            diag_max = float(diag_abs.max()) if diag_abs.size else 0.0
+            diag_thresh = 1e-12 * max(1.0, diag_max)
+            near_zero_diag = int(np.sum(diag_abs < diag_thresh))
+            condA = None
+            istop = None
+            normr = None
+            if lsmr_meta is not None:
+                condA = float(lsmr_meta[6])
+                istop = int(lsmr_meta[1])
+                normr = float(lsmr_meta[3])
+            if max_du > 1e3 or (condA is not None and condA > 1e16):
+                raise RuntimeError(
+                    "Likely singular/ill-conditioned K_ff (explosive dq).\n"
+                    f"max|dq|={max_du:.6e}, ||dq||={norm_du:.6e}, max|q_trial|={max_q_trial:.6e}, "
+                    f"near-zero diag={near_zero_diag}, diag_thresh={diag_thresh:.3e}, "
+                    f"condA={condA if condA is not None else 'n/a'}, "
+                    f"istop={istop if istop is not None else 'n/a'}, "
+                    f"normr={normr if normr is not None else 'n/a'}"
+                )
             # Stagnation check: use absolute tolerance only (no displacement scaling)
             # Previous version scaled by u_scale which made it too strict for small displacements
             if norm_du < model.newton_tol_du:
