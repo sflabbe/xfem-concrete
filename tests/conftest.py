@@ -57,6 +57,14 @@ def pytest_configure(config):
         "markers",
         "slow: marks tests as slow (deselect with -m 'not slow')"
     )
+    config.addinivalue_line(
+        "markers",
+        "examples_smoke: marks example smoke tests"
+    )
+    config.addinivalue_line(
+        "markers",
+        "case03: marks the case 03 CLI regression test"
+    )
 
 
 def pytest_collection_modifyitems(config, items):
