@@ -652,8 +652,21 @@ def build_bcs_from_case(
         # - Fix left bottom (ux=0, uy=0) and right bottom (uy=0)
         # - Prescribe top center (uy=-umax)
 
-        left = int(np.argmin(nodes[:, 0]))
-        right = int(np.argmax(nodes[:, 0]))
+        x_tol = 1e-6
+        y_tol = 1e-6
+        # Prefer exact geometric supports: bottom edge y=0 at x=0 and x=L
+        left_edge = np.where(np.isclose(nodes[:, 0], 0.0, atol=x_tol))[0]
+        right_edge = np.where(np.isclose(nodes[:, 0], model.L, atol=x_tol))[0]
+        bottom = np.where(np.isclose(nodes[:, 1], 0.0, atol=y_tol))[0]
+        left_candidates = np.intersect1d(left_edge, bottom)
+        right_candidates = np.intersect1d(right_edge, bottom)
+        if left_candidates.size == 0:
+            # fallback: pick min y among left edge
+            left_candidates = left_edge
+        if right_candidates.size == 0:
+            right_candidates = right_edge
+        left = int(left_candidates[np.argmin(nodes[left_candidates, 1])])
+        right = int(right_candidates[np.argmin(nodes[right_candidates, 1])])
 
         fixed_dofs[2 * left] = 0.0      # ux = 0
         fixed_dofs[2 * left + 1] = 0.0  # uy = 0
