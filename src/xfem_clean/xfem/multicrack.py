@@ -972,9 +972,26 @@ def _candidate_points_zone(model: XFEMModel, zone: str, nx: int) -> list[tuple[f
     H = model.H
     y0 = 0.0
 
+    # Optional override for non-3PB geometries (e.g., cantilevers):
+    # allow candidates near the fixed end by specifying a window as fractions of L.
+    dominant_window = getattr(model, "dominant_window", None)
+    use_dominant = (
+        getattr(model, "cand_mode", "") == "dominant"
+        and dominant_window is not None
+        and isinstance(dominant_window, (tuple, list))
+        and len(dominant_window) == 2
+    )
+
     if zone == "flexure":
-        x0 = 0.15 * L
-        x1 = 0.85 * L
+        if use_dominant:
+            a, b = float(dominant_window[0]), float(dominant_window[1])
+            a = max(0.0, min(1.0, a))
+            b = max(0.0, min(1.0, b))
+            x0 = a * L
+            x1 = b * L
+        else:
+            x0 = 0.15 * L
+            x1 = 0.85 * L
     elif zone == "shear_left":
         x0 = 0.08 * L
         x1 = 0.35 * L
@@ -1440,12 +1457,12 @@ def run_analysis_xfem_multicrack(
             # Gutierrez (Eq. 4.59): ||R|| / ||F_ext|| <= beta.
             # With displacement control, use the current reaction at the loaded dofs as force scale.
             if bc_spec is not None and bc_spec.reaction_dofs:
-                # Use reaction_dofs from bc_spec (first one)
-                load_dof = int(bc_spec.reaction_dofs[0])
+                # Use *total* reaction over all constrained load DOFs (e.g., patch loading)
+                load_dofs = [int(d) for d in bc_spec.reaction_dofs]
             else:
                 # Default: top center node (3PB)
-                load_dof = int(dofs.std[load_node, 1])
-            P_est = -float(R[load_dof])
+                load_dofs = [int(dofs.std[load_node, 1])]
+            P_est = -float(np.sum(R[load_dofs]))
             fscale = max(1.0, abs(P_est))
             tol = model.newton_tol_r + model.newton_beta * fscale
             last_res = res
@@ -1642,8 +1659,11 @@ def run_analysis_xfem_multicrack(
     last_tol = None
     last_fscale = None
     last_reason = None
+    stop_requested = False
 
     for istep, u1 in enumerate(u_targets, start=1):
+        if stop_requested:
+            break
         u0 = results[-1]["u"] if results else 0.0
         bond_comm_init = bond_states.copy() if bond_states is not None else None
         stack = [(0, u0, u1, q_n.copy(), coh_states.copy(), bulk_states.copy(), bond_comm_init)]
@@ -1902,10 +1922,10 @@ def run_analysis_xfem_multicrack(
 
                     # Extract reaction force (FASE D: bc_spec support)
                     if bc_spec is not None and bc_spec.reaction_dofs:
-                        dof_load = int(bc_spec.reaction_dofs[0])
+                        dof_loads = [int(d) for d in bc_spec.reaction_dofs]
                     else:
-                        dof_load = int(dofs.std[load_node, 1])
-                    P = -float(fint_loc[dof_load])
+                        dof_loads = [int(dofs.std[load_node, 1])]
+                    P = -float(np.sum(fint_loc[dof_loads]))
 
                     results.append({
                         "step": istep,
@@ -1913,6 +1933,12 @@ def run_analysis_xfem_multicrack(
                         "P": float(P),
                         "ncr": len([c for c in cracks if c.active]),
                     })
+
+                    # Optional early stop: useful for "until first crack" regressions.
+                    if getattr(model, "stop_at_first_crack", False) and results[-1]["ncr"] > 0:
+                        print("    [stop] first crack detected -> stopping analysis early")
+                        stop_requested = True
+                        stack.clear()
 
                     # When the first half converges, the next substep on the stack (if any)
                     # starts at this accepted `ub`. Update its initial state accordingly.

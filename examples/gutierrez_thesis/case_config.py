@@ -470,6 +470,7 @@ class CyclicLoading:
     # Optional parameters (must come after required params)
     n_cycles_per_target: int = 1
     axial_load: Optional[float] = None  # Constant axial load (N)
+    targets_are_trajectory: bool = False  # If True, `targets` is an explicit u(mm) trajectory
     loading_type: str = "cyclic"
 
     def to_dict(self) -> Dict[str, Any]:
@@ -480,6 +481,7 @@ class CyclicLoading:
             "load_x_center": self.load_x_center,
             "load_halfwidth": self.load_halfwidth,
             "axial_load": self.axial_load,
+            "targets_are_trajectory": self.targets_are_trajectory,
         }
 
     @classmethod
@@ -490,6 +492,7 @@ class CyclicLoading:
             load_halfwidth=data['load_halfwidth'],
             n_cycles_per_target=data.get('n_cycles_per_target', 1),
             axial_load=data.get('axial_load'),
+            targets_are_trajectory=data.get('targets_are_trajectory', False),
         )
 
 
