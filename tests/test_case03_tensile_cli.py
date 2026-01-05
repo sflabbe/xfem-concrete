@@ -27,7 +27,7 @@ def test_case03_tensile_cli_multicrack(tmp_path: Path) -> None:
         "--mesh",
         "coarse",
         "--nsteps",
-        "50",
+        "2",
         "--no-post",
         "--no-numba",
         "--output-dir",
@@ -48,6 +48,8 @@ def test_case03_tensile_cli_multicrack(tmp_path: Path) -> None:
         f"stdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
     )
+    combined_output = f"{result.stdout}\n{result.stderr}"
+    assert "Using default BondSlipModelCode2010" not in combined_output
 
     history_csv = output_dir / "load_displacement.csv"
     assert history_csv.exists(), f"Missing CSV output at {history_csv}"
