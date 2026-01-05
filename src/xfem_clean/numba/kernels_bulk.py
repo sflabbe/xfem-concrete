@@ -109,12 +109,12 @@ def _dp_return_mapping_3d(
     eps_e = eps6 - eps_p6_old
     sig_trial = Ce @ eps_e
 
-    # invariants
-    p = (sig_trial[0] + sig_trial[1] + sig_trial[2]) / 3.0
+    # invariants (pressure positive in compression)
+    p = -(sig_trial[0] + sig_trial[1] + sig_trial[2]) / 3.0
     sdev = np.empty(6, dtype=np.float64)
-    sdev[0] = sig_trial[0] - p
-    sdev[1] = sig_trial[1] - p
-    sdev[2] = sig_trial[2] - p
+    sdev[0] = sig_trial[0] + p
+    sdev[1] = sig_trial[1] + p
+    sdev[2] = sig_trial[2] + p
     sdev[3] = sig_trial[3]
     sdev[4] = sig_trial[4]
     sdev[5] = sig_trial[5]
@@ -127,9 +127,9 @@ def _dp_return_mapping_3d(
     # df/dsigma
     inv_q = 1.0 / q
     n = np.empty(6, dtype=np.float64)
-    n[0] = 1.5 * inv_q * sdev[0] + alpha / 3.0
-    n[1] = 1.5 * inv_q * sdev[1] + alpha / 3.0
-    n[2] = 1.5 * inv_q * sdev[2] + alpha / 3.0
+    n[0] = 1.5 * inv_q * sdev[0] - alpha / 3.0
+    n[1] = 1.5 * inv_q * sdev[1] - alpha / 3.0
+    n[2] = 1.5 * inv_q * sdev[2] - alpha / 3.0
     n[3] = 1.5 * inv_q * sdev[3]
     n[4] = 1.5 * inv_q * sdev[4]
     n[5] = 1.5 * inv_q * sdev[5]
