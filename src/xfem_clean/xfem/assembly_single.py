@@ -177,16 +177,12 @@ def assemble_xfem_system(
         if subdomain_mgr is not None:
             thickness_eff = subdomain_mgr.get_effective_thickness(e, thickness)
 
-        # Void elements: apply penalty stiffness to prevent singularity
-        # Use E_penalty ~ 1e-9 * E to be negligible but avoid singular matrix
+        bulk_scale = 1.0
         if is_void_elem:
-            # Small penalty to keep matrix non-singular
-            C_eff = C * 1e-9  # Penalty stiffness (very small)
-            # Use minimal thickness if zero
+            bulk_scale = 1e-6
             if thickness_eff < 1e-12:
-                thickness_eff = thickness * 1e-9
+                thickness_eff = thickness if thickness > 0.0 else 1.0
         else:
-            C_eff = C  # Normal stiffness
             # If thickness is effectively zero for non-void, skip this element
             if thickness_eff < 1e-12:
                 continue
@@ -427,15 +423,11 @@ def assemble_xfem_system(
                         sig, Ct = material.integrate(mp, eps)
                         # No committed state, so no dissipation accumulation
 
-                    # Apply penalty factor for void elements
-                    if is_void_elem:
-                        # Reduce stiffness by penalty factor (1e-9) for void
-                        # Do NOT reduce forces (keep sig as is for consistency)
-                        Ct_scaled = Ct * 1e-9
-                    else:
-                        Ct_scaled = Ct
+                    # Apply consistent penalty factor for void elements
+                    sig_use = sig * bulk_scale
+                    Ct_scaled = Ct * bulk_scale
 
-                    fe = B.T @ sig * weight
+                    fe = B.T @ sig_use * weight
                     Ke = (B.T @ Ct_scaled @ B) * weight
 
                     fint[edofs] += fe
@@ -841,6 +833,8 @@ def assemble_xfem_system(
         from xfem_clean.bond_slip import assemble_bond_slip
 
         bond_updates_list = []
+        if bond_states_list_comm is None and bond_states_comm is not None:
+            bond_states_list_comm = [bond_states_comm] + [None] * (len(bond_layers) - 1)
 
         for layer_idx, layer in enumerate(bond_layers):
             # Get committed states for this layer
