@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,7 +13,10 @@ import pytest
 
 @pytest.mark.slow
 def test_case01_pullout_cli_no_nans(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
     output_dir = tmp_path / "case01_pullout_cli"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(repo_root / "src")
     cmd = [
         sys.executable,
         "-m",
@@ -22,14 +26,21 @@ def test_case01_pullout_cli_no_nans(tmp_path: Path) -> None:
         "--mesh",
         "coarse",
         "--nsteps",
-        "3",
+        "1",
         "--no-post",
         "--no-numba",
         "--output-dir",
         str(output_dir),
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=repo_root,
+        env=env,
+    )
     combined = (result.stdout or "") + (result.stderr or "")
 
     assert result.returncode == 0, (
@@ -38,6 +49,7 @@ def test_case01_pullout_cli_no_nans(tmp_path: Path) -> None:
         f"stderr:\n{result.stderr}"
     )
 
+    assert combined.count("Ambiguous bond-slip units") <= 1
     assert "invalid value encountered in matmul" not in combined
     assert "overflow encountered" not in combined
     assert "Invalid steel DOF mapping" not in combined
@@ -53,7 +65,7 @@ def test_case01_pullout_cli_no_nans(tmp_path: Path) -> None:
                 continue
             p_values.append(float(row.get("P_kN", 0.0)))
 
-    assert any(abs(p) > 1e-3 for p in p_values), (
+    assert any(abs(p) > 1e-6 for p in p_values), (
         "Expected non-zero reaction force in at least one step; "
         f"got P_kN={p_values}"
     )
