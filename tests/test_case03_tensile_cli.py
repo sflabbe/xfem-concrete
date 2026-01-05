@@ -6,6 +6,7 @@ import csv
 import os
 import subprocess
 import sys
+from math import isfinite
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,7 @@ def test_case03_tensile_cli_multicrack(tmp_path: Path) -> None:
         "--mesh",
         "coarse",
         "--nsteps",
-        "2",
+        "5",
         "--no-post",
         "--no-numba",
         "--output-dir",
@@ -59,6 +60,11 @@ def test_case03_tensile_cli_multicrack(tmp_path: Path) -> None:
         rows = [row for row in reader if row]
 
     assert rows, "Expected load_displacement.csv to contain at least one row."
+    for row in rows:
+        for key, value in row.items():
+            assert value is not None, f"Missing value for column {key}"
+            parsed = float(value)
+            assert isfinite(parsed), f"Non-finite value in {key}: {value}"
     last_row = rows[-1]
     p_kn = float(last_row.get("P_kN", 0.0))
     assert abs(p_kn) > 0.1, f"Expected non-zero reaction in last row, got P_kN={p_kn}"
