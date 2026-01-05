@@ -1018,9 +1018,18 @@ def run_case_solver(
     # FASE D: Dispatcher for single-crack vs multicrack vs cyclic
     is_cyclic = hasattr(case.loading, 'loading_type') and case.loading.loading_type == "cyclic"
     use_multicrack = _should_use_multicrack(case)
+    solver_override = None
     if cli_args is not None and hasattr(cli_args, "solver") and cli_args.solver is not None:
+        solver_override = cli_args.solver
         use_multicrack = cli_args.solver == "multi"
         print(f"Override: solver = {cli_args.solver} (via --solver)")
+
+    if model.enable_bond_slip and not use_multicrack:
+        use_multicrack = True
+        if solver_override == "single":
+            print("Override: bond-slip on -> forcing multicrack solver (single-crack disabled).")
+        else:
+            print("Auto: bond-slip on -> using multicrack solver.")
 
     # Extract loading parameters
     if is_cyclic:
