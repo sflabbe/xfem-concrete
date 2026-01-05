@@ -190,6 +190,15 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
         print("\nSaving results...")
         import csv
         history_file = output_dir / "load_displacement.csv"
+        from collections.abc import Mapping
+
+        def _get_value(row, key, idx=None, default=0.0):
+            if isinstance(row, Mapping):
+                return row.get(key, default)
+            if idx is not None:
+                return row[idx]
+            return default
+
         with open(history_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['step', 'u_mm', 'P_kN', 'M_kNm', 'kappa', 'R',
@@ -198,21 +207,21 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
             for row in results['history']:
                 # Convert units: m → mm, N → kN, J → J
                 row_out = [
-                    int(row[0]),        # step
-                    row[1] * 1e3,       # u [mm]
-                    row[2] / 1e3,       # P [kN]
-                    row[3] / 1e3,       # M [kN·m]
-                    row[4],             # kappa
-                    row[5],             # R
-                    row[6],             # crack_tip_x [m]
-                    row[7],             # crack_tip_y [m]
-                    row[8],             # angle [deg]
-                    int(row[9]),        # crack_active
-                    row[10],            # W_plastic [J]
-                    row[11],            # W_damage_t [J]
-                    row[12],            # W_damage_c [J]
-                    row[13],            # W_cohesive [J]
-                    row[14],            # W_total [J]
+                    int(_get_value(row, "step", idx=0, default=0)),              # step
+                    _get_value(row, "u", idx=1, default=0.0) * 1e3,              # u [mm]
+                    _get_value(row, "P", idx=2, default=0.0) / 1e3,              # P [kN]
+                    _get_value(row, "M", idx=3, default=0.0) / 1e3,              # M [kN·m]
+                    _get_value(row, "kappa", idx=4, default=0.0),                # kappa
+                    _get_value(row, "R", idx=5, default=0.0),                    # R
+                    _get_value(row, "crack_tip_x", idx=6, default=0.0),          # crack_tip_x [m]
+                    _get_value(row, "crack_tip_y", idx=7, default=0.0),          # crack_tip_y [m]
+                    _get_value(row, "angle_deg", idx=8, default=0.0),            # angle [deg]
+                    int(_get_value(row, "crack_active", idx=9, default=0)),      # crack_active
+                    _get_value(row, "W_plastic", idx=10, default=0.0),           # W_plastic [J]
+                    _get_value(row, "W_damage_t", idx=11, default=0.0),          # W_damage_t [J]
+                    _get_value(row, "W_damage_c", idx=12, default=0.0),          # W_damage_c [J]
+                    _get_value(row, "W_cohesive", idx=13, default=0.0),          # W_cohesive [J]
+                    _get_value(row, "W_total", idx=14, default=0.0),             # W_total [J]
                 ]
                 writer.writerow(row_out)
         print(f"  → {history_file}")
