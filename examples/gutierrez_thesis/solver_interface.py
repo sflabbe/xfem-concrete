@@ -60,7 +60,7 @@ def map_bond_law(bond_law_config: Any, case_id: str = "unknown") -> Any:
     if isinstance(bond_law_config, CEBFIPBondLaw):
         def _valid_slips(slips: Tuple[float, float, float]) -> bool:
             s1, s2, s3 = slips
-            return s1 > 0.0 and s1 < s2 < s3
+            return s1 > 0.0 and s1 <= s2 and s2 < s3
 
         s_raw = (bond_law_config.s1, bond_law_config.s2, bond_law_config.s3)
         s_mm = tuple(s * 1e-3 for s in s_raw)  # mm → m
@@ -89,7 +89,7 @@ def map_bond_law(bond_law_config: Any, case_id: str = "unknown") -> Any:
             raise ValueError(
                 "Invalid bond-slip params for case="
                 f"{case_id}: raw={s_raw}, mm->m={s_mm}, m={s_m}. "
-                "Require 0 < s1 < s2 < s3."
+                "Require 0 < s1 <= s2 < s3."
             )
 
         # Convert MPa to Pa
@@ -1360,6 +1360,7 @@ def run_case_solver(
             u_targets=u_targets if is_cyclic else None,
             bc_spec=bc_spec,
             bond_law=bond_law_solver,
+            bond_layers=bond_layers_solver,
             return_bundle=True,  # BLOQUE 2: Get comprehensive bundle
         )
 

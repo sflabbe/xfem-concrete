@@ -212,7 +212,7 @@ class BondSlipModelCode2010:
         self.tau_f = float(0.15 * self.tau_max)  # Residual stress (friction)
 
         # Safety checks
-        if self.s1 <= 0 or self.s2 <= self.s1 or self.s3 <= self.s2:
+        if self.s1 <= 0 or self.s2 < self.s1 or self.s3 <= self.s2:
             raise ValueError("Bond-slip parameters must satisfy: 0 < s1 < s2 < s3")
 
         # THESIS PARITY: Set steel ultimate properties defaults
@@ -493,7 +493,7 @@ class CustomBondSlipLaw:
 
     def __post_init__(self):
         """Validate parameters."""
-        if self.s1 <= 0 or self.s2 <= self.s1 or self.s3 <= self.s2:
+        if self.s1 <= 0 or self.s2 < self.s1 or self.s3 <= self.s2:
             raise ValueError("Bond-slip parameters must satisfy: 0 < s1 < s2 < s3")
         if self.tau_max <= 0 or self.tau_f < 0:
             raise ValueError("Bond stresses must be non-negative (tau_max > 0)")

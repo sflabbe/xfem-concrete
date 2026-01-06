@@ -345,6 +345,7 @@ def assemble_xfem_system_multi(
     material: Optional["ConstitutiveModel"] = None,
     # Bond-slip parameters (FASE D)
     bond_law: Optional[object] = None,
+    bond_layers: Optional[list] = None,
     bond_states_comm: Optional[object] = None,
     enable_bond_slip: bool = False,
     steel_EA: float = 0.0,
@@ -817,6 +818,8 @@ def assemble_xfem_system_multi(
 
             dtau_max = float(getattr(model, "bond_tangent_cap_factor", 1.0)) * k_ref / max(1e-30, perimeter * L_char)
             bond_law.dtau_max = float(dtau_max)
+            if getattr(model, "bond_k_cap", None) is None:
+                model.bond_k_cap = float(dtau_max)
 
         # Generate segment_mask for bond-disabled regions (FASE D)
         segment_mask = None
@@ -1061,6 +1064,7 @@ def run_analysis_xfem_multicrack(
     u_targets: Optional[np.ndarray] = None,
     bc_spec: Optional["BCSpec"] = None,
     bond_law: Optional[object] = None,
+    bond_layers: Optional[list] = None,
     return_bundle: bool = False,
 ):
     """Run displacement-controlled analysis with multiple cracks.
@@ -1128,10 +1132,25 @@ def run_analysis_xfem_multicrack(
     )
 
     C = plane_stress_C(model.E, model.nu)
+    # Rebar segments
+    rebar_segs = None
+    if bond_layers is not None and len(bond_layers) > 0:
+        try:
+            seg_list = []
+            for layer in bond_layers:
+                seg = getattr(layer, "segments", None)
+                if seg is None:
+                    continue
+                seg = np.asarray(seg, dtype=float)
+                if seg.ndim == 2 and seg.shape[1] >= 2 and seg.shape[0] > 0:
+                    seg_list.append(seg)
+            if len(seg_list) > 0:
+                rebar_segs = np.vstack(seg_list)
+        except Exception:
+            rebar_segs = None
 
-    # Rebar
-    rebar_segs = prepare_rebar_segments(nodes, cover=model.cover)
-
+    if rebar_segs is None:
+        rebar_segs = prepare_rebar_segments(nodes, cover=model.cover)
     # Boundary conditions (FASE D: bc_spec support)
     if bc_spec is not None:
         # Use bc_spec from solver_interface (allows pullout, custom BCs, etc.)
@@ -1456,34 +1475,36 @@ def run_analysis_xfem_multicrack(
             # Note: we deliberately do NOT commit cohesive/bulk history during
             # Newton iterations. History is only committed on convergence.
 
-            res = float(np.linalg.norm(rhs))
-
-            # Gutierrez (Eq. 4.59): ||R|| / ||F_ext|| <= beta.
+            res = float(np.linalg.norm(rhs))            # Gutierrez (Eq. 4.59): ||R|| / ||F_ext|| <= beta.
             # With displacement control, use the current reaction at the loaded dofs as force scale.
             if bc_spec is not None and bc_spec.reaction_dofs:
-<<<<<<< HEAD
-                # Use reaction_dofs from bc_spec (first one)
-                load_dof = int(bc_spec.reaction_dofs[0])
-                if load_dof < 0:
-                    load_dof = None
+                load_dofs = []
+                nnode = int(nodes.shape[0])
+                for dm in bc_spec.reaction_dofs:
+                    dm = int(dm)
+                    if dm < 0:
+                        node_id = -(dm + 2 * nnode) // 2
+                        comp = 0
+                        if (
+                            dofs.steel is not None
+                            and dofs.steel_nodes is not None
+                            and 0 <= node_id < nnode
+                            and dofs.steel_nodes[node_id]
+                        ):
+                            load_dofs.append(int(dofs.steel[node_id, comp]))
+                        else:
+                            load_dofs.append(int(dofs.std[node_id, comp]))
+                    else:
+                        load_dofs.append(dm)
             else:
-                # Default: top center node (3PB)
-                load_dof = int(dofs.std[load_node, 1]) if load_node is not None else None
-            if load_dof is not None:
-                P_est = -float(R[load_dof])
+                load_dofs = [int(dofs.std[load_node, 1])] if load_node is not None else []
+
+            if len(load_dofs) > 0:
+                P_est = -float(np.sum(R[load_dofs]))
                 fscale = max(1.0, abs(P_est))
             else:
                 P_est = 0.0
                 fscale = 1.0
-=======
-                # Use *total* reaction over all constrained load DOFs (e.g., patch loading)
-                load_dofs = [int(d) for d in bc_spec.reaction_dofs]
-            else:
-                # Default: top center node (3PB)
-                load_dofs = [int(dofs.std[load_node, 1])]
-            P_est = -float(np.sum(R[load_dofs]))
-            fscale = max(1.0, abs(P_est))
->>>>>>> feat/case11-balcony-sls
             tol = model.newton_tol_r + model.newton_beta * fscale
             last_res = res
             last_tol = tol
@@ -1985,23 +2006,30 @@ def run_analysis_xfem_multicrack(
                     coh_states = coh_loc
                     bulk_states = bulk_loc
                     # Bond-slip commit (FASE D): bond_states are already committed via bond_comm in stack
-                    # (bond_updates is set during assembly but not available in this scope)
-
-                    # Extract reaction force (FASE D: bc_spec support)
+                    # (bond_updates is set during assembly but not available in this scope)                    # Extract reaction force (FASE D: bc_spec support)
                     if bc_spec is not None and bc_spec.reaction_dofs:
-<<<<<<< HEAD
-                        dof_load = int(bc_spec.reaction_dofs[0])
-                        if dof_load < 0:
-                            dof_load = None
+                        dof_loads = []
+                        nnode = int(nodes.shape[0])
+                        for dm in bc_spec.reaction_dofs:
+                            dm = int(dm)
+                            if dm < 0:
+                                node_id = -(dm + 2 * nnode) // 2
+                                comp = 0
+                                if (
+                                    dofs.steel is not None
+                                    and dofs.steel_nodes is not None
+                                    and 0 <= node_id < nnode
+                                    and dofs.steel_nodes[node_id]
+                                ):
+                                    dof_loads.append(int(dofs.steel[node_id, comp]))
+                                else:
+                                    dof_loads.append(int(dofs.std[node_id, comp]))
+                            else:
+                                dof_loads.append(dm)
                     else:
-                        dof_load = int(dofs.std[load_node, 1]) if load_node is not None else None
-                    P = -float(fint_loc[dof_load]) if dof_load is not None else 0.0
-=======
-                        dof_loads = [int(d) for d in bc_spec.reaction_dofs]
-                    else:
-                        dof_loads = [int(dofs.std[load_node, 1])]
-                    P = -float(np.sum(fint_loc[dof_loads]))
->>>>>>> feat/case11-balcony-sls
+                        dof_loads = [int(dofs.std[load_node, 1])] if load_node is not None else []
+
+                    P = -float(np.sum(fint_loc[dof_loads])) if len(dof_loads) > 0 else 0.0
 
                     results.append({
                         "step": istep,
