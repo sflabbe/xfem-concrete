@@ -647,6 +647,55 @@ def build_bcs_from_case(
 
                 print(f"Axial load: P={P_axial:.2e} N distributed on {len(top_nodes)} top nodes")
 
+    elif "balcony" in case_name or "cantilever" in case_name:
+        # CANTILEVER (balcony slab strip):
+        # - Clamp left edge (x=0): ux=0, uy=0 for all nodes
+        # - Prescribe vertical displacement at a small patch near the free end.
+        #
+        # Note (Abaqus analogy): prescribing the same kinematic DOF on an entire edge is
+        # similar in spirit to a *kinematic coupling* and can introduce artificial stiffness.
+        # Here we keep displacement control (stable) but apply it to a *small* patch centered
+        # around the neutral axis to reduce spurious local constraints.
+
+        x_tol = 1e-6
+        y_tol = 1e-6
+        left_nodes = np.where(np.isclose(nodes[:, 0], 0.0, atol=x_tol))[0]
+        for n in left_nodes:
+            fixed_dofs[2 * n] = 0.0      # ux
+            fixed_dofs[2 * n + 1] = 0.0  # uy
+
+        # Load patch near free end, centered around neutral axis (y=H/2)
+        y_center = 0.5 * model.H
+        dy = model.H / max(1, case.geometry.n_elem_y)
+        y_half = 2.0 * dy
+
+        if hasattr(case.loading, 'load_x_center'):
+            load_x_center = case.loading.load_x_center * 1e-3  # mm -> m
+        else:
+            load_x_center = model.L  # free end
+
+        if hasattr(case.loading, 'load_halfwidth'):
+            load_halfwidth = case.loading.load_halfwidth * 1e-3
+        else:
+            dx = model.L / max(1, case.geometry.n_elem_x)
+            load_halfwidth = 2.0 * dx
+
+        load_nodes = np.where(
+            (np.abs(nodes[:, 0] - load_x_center) <= load_halfwidth)
+            & (np.abs(nodes[:, 1] - y_center) <= y_half)
+        )[0]
+        if len(load_nodes) == 0:
+            # fallback: single closest node to (x_center, y_center)
+            d2 = (nodes[:, 0] - load_x_center) ** 2 + (nodes[:, 1] - y_center) ** 2
+            load_nodes = [int(np.argmin(d2))]
+
+        for n in load_nodes:
+            prescribed_dofs.append(2 * n + 1)  # uy
+            reaction_dofs.append(2 * n + 1)
+
+        # Downward is negative
+        prescribed_scale = -1.0
+
     else:
         # DEFAULT: 3-point bending beam
         # - Fix left bottom (ux=0, uy=0) and right bottom (uy=0)
@@ -998,6 +1047,14 @@ def run_case_solver(
     # Create model
     model = case_config_to_xfem_model(case)
 
+    # Case-specific numerical knobs (kept local to avoid changing global defaults)
+    if 'balcony' in case.case_id.lower() or 'cantilever' in case.case_id.lower():
+        # Cantilever cracks start near the fixed end -> include x~0 in candidate window
+        model.cand_mode = 'dominant'
+        model.dominant_window = (0.00, 0.35)
+        model.arrest_at_half_height = False
+        model.stop_at_first_crack = True
+
     # Apply CLI overrides for Numba
     if cli_args is not None:
         if hasattr(cli_args, 'use_numba') and cli_args.use_numba:
@@ -1036,7 +1093,12 @@ def run_case_solver(
         # Cyclic loading: generate u_targets trajectory
         targets_mm = case.loading.targets
         n_cycles_per_target = getattr(case.loading, 'n_cycles_per_target', 1)
-        u_targets_mm = generate_cyclic_u_targets(targets_mm, n_cycles_per_target)
+        # Some cases provide an explicit positive-only trajectory (e.g., service-level cycles)
+        # and do NOT expect the default full reversal (+/-) generation.
+        if getattr(case.loading, 'targets_are_trajectory', False):
+            u_targets_mm = np.asarray(targets_mm, dtype=float)
+        else:
+            u_targets_mm = generate_cyclic_u_targets(targets_mm, n_cycles_per_target)
         u_targets = u_targets_mm * 1e-3  # mm → m
         nsteps = len(u_targets)
         umax = float(np.max(np.abs(u_targets)))

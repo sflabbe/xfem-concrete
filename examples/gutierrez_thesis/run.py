@@ -28,6 +28,7 @@ from examples.gutierrez_thesis.cases.case_07_beam_4pb_jason_4pbt import create_c
 from examples.gutierrez_thesis.cases.case_08_beam_3pb_vvbs3_cfrp import create_case_08
 from examples.gutierrez_thesis.cases.case_09_beam_4pb_fibres_sorelli import create_case_09
 from examples.gutierrez_thesis.cases.case_10_wall_c2_cyclic import create_case_10
+from examples.gutierrez_thesis.cases.case_11_balcony_cantilever_sls import create_case_11
 
 
 # ============================================================================
@@ -47,6 +48,7 @@ CASE_REGISTRY: Dict[str, Callable] = {
     "08_beam_3pb_vvbs3_cfrp": create_case_08,
     "09_beam_4pb_fibres_sorelli": create_case_09,
     "10_wall_c2_cyclic": create_case_10,
+    "11_balcony_cantilever_sls": create_case_11,
 }
 
 CASE_ALIASES = {
@@ -83,6 +85,10 @@ CASE_ALIASES = {
     # Fibres (tensile)
     "fibre": "06_fibre_tensile",
     "fiber": "06_fibre_tensile",
+    # Balcony cantilever
+    "balcony": "11_balcony_cantilever_sls",
+    "cantilever": "11_balcony_cantilever_sls",
+    "sls": "11_balcony_cantilever_sls",
 }
 
 MESH_PRESETS = {
