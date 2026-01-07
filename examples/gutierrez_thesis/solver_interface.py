@@ -886,10 +886,17 @@ def case_config_to_xfem_model(case: CaseConfig) -> XFEMModel:
         # Solver parameters (relaxed for robustness)
         newton_maxit=50,  # Increased from 25
         newton_tol_r=max(case.tolerance, 1e-4),  # Relaxed minimum tolerance
-        newton_tol_du=1e-7,  # Relaxed from 1e-8
+        # newton_tol_du is only used to detect Newton stagnation (|dq| too small).
+        # If it is set too large, the solver can falsely exit with "stagnated"
+        # while the residual is still far from tolerance, causing substepping to
+        # hit max_subdiv. We therefore keep it very small.
+        newton_tol_du=1e-14,
         line_search=case.use_line_search,
         enable_diagonal_scaling=True,
-        max_subdiv=15 if case.use_substepping else 0,  # Increased from 12
+        # Allow deeper substepping for the thesis benchmark set.
+        # This does not change the final target displacement, only the adaptive
+        # splitting budget when Newton struggles locally.
+        max_subdiv=20 if case.use_substepping else 0,
         max_total_substeps=100000,  # Increased from 50000
 
         # Crack parameters (for cases with cohesive cracks)

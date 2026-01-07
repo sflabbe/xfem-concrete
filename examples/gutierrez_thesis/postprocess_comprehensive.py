@@ -18,19 +18,7 @@ import csv
 # =============================================================================
 
 def _lazy_import_plt():
-    """
-    Lazy import matplotlib.pyplot with helpful error message.
-
-    Returns
-    -------
-    plt : module
-        matplotlib.pyplot module
-
-    Raises
-    ------
-    ImportError
-        If matplotlib is not installed
-    """
+    """Import matplotlib lazily so core runs without plotting deps."""
     try:
         import matplotlib.pyplot as plt
         return plt
@@ -38,6 +26,108 @@ def _lazy_import_plt():
         raise ImportError(
             "Plotting requires matplotlib. Install with: pip install matplotlib"
         ) from e
+
+
+def _history_to_2d_array(history):
+    """Coerce history into a numeric 2D array.
+
+    Supports:
+      * list of dicts (expects keys like step, u, P)
+      * list of sequences (step, u, P)
+      * numpy arrays
+
+    Returns an array with shape (n, m). When possible, columns are:
+      col 0: step
+      col 1: displacement u
+      col 2: load P
+    """
+
+    if history is None:
+        return np.empty((0, 0), dtype=float)
+
+    try:
+        arr = np.array(history, dtype=object)
+    except Exception:
+        return np.empty((0, 0), dtype=float)
+
+    if arr.size == 0:
+        return np.empty((0, 0), dtype=float)
+
+    # list of dicts
+    if arr.ndim == 1 and all(isinstance(x, dict) for x in arr.tolist()):
+        rows = []
+        for i, d in enumerate(arr.tolist()):
+            step = d.get('step', d.get('i', i))
+            u = d.get('u', d.get('disp', d.get('displacement', np.nan)))
+            P = d.get('P', d.get('load', d.get('force', np.nan)))
+            rows.append([step, u, P])
+        try:
+            return np.asarray(rows, dtype=float)
+        except Exception:
+            return np.empty((0, 0), dtype=float)
+
+    # list of tuples / lists or a numeric array
+    try:
+        arr2 = np.asarray(history, dtype=float)
+    except Exception:
+        try:
+            arr2 = np.asarray(arr.tolist(), dtype=float)
+        except Exception:
+            return np.empty((0, 0), dtype=float)
+
+    if arr2.ndim == 1:
+        arr2 = arr2.reshape(-1, 1)
+
+    return arr2
+
+
+def _final_step_from_history(history):
+    """Return final step index from history for file naming.
+
+    Returns None when the step cannot be inferred.
+    """
+
+    try:
+        history_arr = _history_to_2d_array(history)
+        if history_arr.shape[0] == 0:
+            return None
+
+        step = history_arr[-1, 0]
+        if step is None:
+            return int(history_arr.shape[0] - 1)
+
+        # NaN check for float
+        try:
+            if float(step) != float(step):
+                return int(history_arr.shape[0] - 1)
+        except Exception:
+            return int(history_arr.shape[0] - 1)
+
+        return int(step)
+    except Exception:
+        return None
+
+    # Newer formats may store history as dict: step -> (u, P, ...)
+    if isinstance(history, dict):
+        if not history:
+            return None
+        last_key = max(history.keys())
+        try:
+            return int(last_key)
+        except Exception:
+            return last_key
+
+    # List or array-like: rows with step as first entry
+    try:
+        return int(history[-1][0])
+    except Exception:
+        pass
+
+    # Fallback: list of scalars
+    try:
+        return int(history[-1])
+    except Exception:
+        return None
 
 
 # =============================================================================
@@ -362,17 +452,40 @@ def plot_load_displacement(
     plt = _lazy_import_plt()
 
     # Handle different history formats
-    if isinstance(history, list) and len(history) > 0 and isinstance(history[0], dict):
-        # Multicrack format: list of dicts with keys 'u', 'P'
-        u_mm = np.array([h['u'] for h in history]) * 1e3  # m → mm
-        P_kN = np.array([h['P'] for h in history]) / 1e3  # N → kN
-    else:
-        # Single-crack format: np.ndarray with columns [step, u, P, ...]
-        history_arr = np.array(history)
-        u_mm = history_arr[:, 1] * 1e3  # Assume m → mm
-        P_kN = history_arr[:, 2] / 1e3  # Assume N → kN
+    def _is_dict_history(h) -> bool:
+        # Multicrack solver may return list[dict] or np.ndarray(dtype=object) of dicts
+        if isinstance(h, list):
+            return len(h) > 0 and isinstance(h[0], dict)
+        if isinstance(h, np.ndarray):
+            return h.dtype == object and h.size > 0 and isinstance(h.flat[0], dict)
+        return False
 
-    # Save CSV
+    if _is_dict_history(history):
+        seq = history if isinstance(history, list) else list(history)
+        u_mm = np.array([h.get('u', np.nan) for h in seq], dtype=float) * 1e3  # m → mm
+        P_kN = np.array([h.get('P', np.nan) for h in seq], dtype=float) / 1e3  # N → kN
+    else:
+        # Single-crack format: 2D array with columns [step, u, P, ...]
+        history_arr = np.asarray(history)
+
+        if history_arr.size == 0:
+            print("  Warning: empty history, skipping load-displacement plot.")
+            return
+
+        # Some callers may pass a 1D object array of tuples/lists; promote to 2D
+        if history_arr.ndim == 1 and isinstance(history_arr.flat[0], (list, tuple, np.ndarray)):
+            history_arr = np.asarray(list(history_arr), dtype=float)
+
+        if history_arr.ndim != 2 or history_arr.shape[1] < 3:
+            raise ValueError(
+                f"Unexpected history array shape: {history_arr.shape}. "
+                "Expected (n, >=3) with [step, u, P, ...] or a dict sequence with keys 'u' and 'P'."
+            )
+
+        u_mm = history_arr[:, 1].astype(float) * 1e3  # m → mm
+        P_kN = history_arr[:, 2].astype(float) / 1e3  # N → kN
+
+# Save CSV
     csv_file = output_dir / "load_displacement.csv"
     with open(csv_file, 'w', newline='') as f:
         writer = csv.writer(f)
@@ -401,75 +514,55 @@ def plot_slip_profile(
     x_mm: np.ndarray,
     slip_mm: np.ndarray,
     output_dir: Path,
-    step: int,
+    step: Optional[int] = None,
 ):
-    """
-    Generate slip(x) profile plot.
-
-    Parameters
-    ----------
-    x_mm : np.ndarray
-        x-coordinates (mm)
-    slip_mm : np.ndarray
-        Slip values (mm)
-    output_dir : Path
-        Output directory
-    step : int
-        Step number
-    """
+    """Generate slip(x) profile plot."""
     plt = _lazy_import_plt()
 
-    plt.figure(figsize=(10, 4))
-    plt.plot(x_mm, slip_mm, 'ro-', markersize=4, linewidth=1.5)
-    plt.xlabel("Position along bar [mm]", fontsize=12)
-    plt.ylabel("Slip [mm]", fontsize=12)
-    plt.title(f"Bond Slip Profile (Step {step})", fontsize=14)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
+    if step is None:
+        plot_file = output_dir / "slip_profile_final.png"
+        title_step = "final"
+    else:
+        plot_file = output_dir / f"slip_profile_step_{step:04d}.png"
+        title_step = f"step {step}"
 
-    plot_file = output_dir / f"slip_profile_step_{step:04d}.png"
+    plt.figure()
+    plt.plot(x_mm, slip_mm)
+    plt.xlabel("Position along rebar (mm)")
+    plt.ylabel("Slip (mm)")
+    plt.title(f"Bond slip profile ({title_step})")
+    plt.grid(True)
+    plt.tight_layout()
     plt.savefig(plot_file, dpi=150)
     plt.close()
-
+    print(f"  Slip plot saved: {plot_file.name}")
 
 def plot_bond_stress_profile(
     x_mm: np.ndarray,
-    tau_MPa: np.ndarray,
+    tau_mpa: np.ndarray,
     output_dir: Path,
-    step: int,
+    step: Optional[int] = None,
 ):
-    """
-    Generate τ(x) profile plot.
-
-    Parameters
-    ----------
-    x_mm : np.ndarray
-        x-coordinates (mm)
-    tau_MPa : np.ndarray
-        Bond stress (MPa)
-    output_dir : Path
-        Output directory
-    step : int
-        Step number
-    """
+    """Generate bond stress profile plot."""
     plt = _lazy_import_plt()
 
-    plt.figure(figsize=(10, 4))
-    plt.plot(x_mm, tau_MPa, 'bs-', markersize=4, linewidth=1.5)
-    plt.xlabel("Position along bar [mm]", fontsize=12)
-    plt.ylabel("Bond stress τ [MPa]", fontsize=12)
-    plt.title(f"Bond Stress Profile (Step {step})", fontsize=14)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
+    if step is None:
+        plot_file = output_dir / "bond_stress_profile_final.png"
+        title_step = "final"
+    else:
+        plot_file = output_dir / f"bond_stress_profile_step_{step:04d}.png"
+        title_step = f"step {step}"
 
-    plot_file = output_dir / f"bond_stress_profile_step_{step:04d}.png"
+    plt.figure()
+    plt.plot(x_mm, tau_mpa)
+    plt.xlabel("Position along rebar (mm)")
+    plt.ylabel("Bond stress (MPa)")
+    plt.title(f"Bond stress profile ({title_step})")
+    plt.grid(True)
+    plt.tight_layout()
     plt.savefig(plot_file, dpi=150)
     plt.close()
-
-
-# =============================================================================
-# MAIN POSTPROCESS FUNCTION
-# =============================================================================
+    print(f"  Bond stress plot saved: {plot_file.name}")
 
 def postprocess_case(case, results: Dict[str, Any]):
     """
@@ -550,7 +643,7 @@ def postprocess_results(
                 print(f"  Slip profile saved: {csv_file.name}")
 
                 # Plot
-                final_step = int(history[-1][0])
+                final_step = _final_step_from_history(history)
                 plot_slip_profile(x_mm, slip_mm, output_dir, final_step)
 
             # Bond stress profile
@@ -565,7 +658,7 @@ def postprocess_results(
                 print(f"  Bond stress profile saved: {csv_file.name}")
 
                 # Plot
-                final_step = int(history[-1][0])
+                final_step = _final_step_from_history(history)
                 plot_bond_stress_profile(x_mm, tau_MPa, output_dir, final_step)
 
     # Crack width profiles (if cohesive states available)
@@ -719,7 +812,7 @@ def postprocess_results(
             if isinstance(history[0], dict):
                 final_step = history[-1].get('step', len(history)-1)
             else:
-                final_step = int(history[-1][0])
+                final_step = _final_step_from_history(history)
             export_vtk_step(output_dir / "vtk", final_step, nodes, elems, u)
 
     print("\n✓ Postprocessing completed")

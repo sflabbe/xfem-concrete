@@ -1358,7 +1358,7 @@ def run_analysis_xfem_multicrack(
 
         return fixed_dict
 
-    def solve_step(u_bar, q_init, coh_states_committed, bulk_states_committed, *, enr_scale: float = 1.0, bond_gamma: float = 1.0):
+    def solve_step(u_bar, q_init, coh_states_committed, bulk_states_committed, bond_states_committed, *, enr_scale: float = 1.0, bond_gamma: float = 1.0):
         """Newton solve for one load/displacement level.
 
         Important: cohesive states are *not* mutated inside Newton; we always
@@ -1438,7 +1438,7 @@ def run_analysis_xfem_multicrack(
                 material=material,
                 # Bond-slip (FASE D)
                 bond_law=bond_law,
-                bond_states_comm=bond_states,
+                bond_states_comm=bond_states_committed,
                 enable_bond_slip=enable_bond_slip,
                 steel_EA=steel_EA,
                 perimeter_total=perimeter_total,  # FASE D
@@ -1524,8 +1524,11 @@ def run_analysis_xfem_multicrack(
                     bulk_updates.apply_to(bulk_trial)
                 else:
                     bulk_trial = bulk_updates
-                return True, q, coh_trial, bulk_trial, aux_pos, aux_sig, "res", it + 1, fint, last_res, last_tol, last_fscale
+                bond_trial = None
+                if enable_bond_slip and (bond_states_committed is not None):
+                    bond_trial = (bond_updates.copy() if bond_updates is not None else bond_states_committed.copy())
 
+                return True, q, coh_trial, bulk_trial, bond_trial, aux_pos, aux_sig, "res", it + 1, fint, last_res, last_tol, last_fscale
             lsmr_meta = None
             reg_lambda = None
             solver_tag = "spsolve"
@@ -1611,12 +1614,11 @@ def run_analysis_xfem_multicrack(
                     f"solver={solver_tag}, condA={condA if condA is not None else 'n/a'}"
                     ")"
                 )
-                return False, q, coh_states_committed, bulk_states_committed, aux_pos, aux_sig, why, it + 1, fint, last_res, last_tol, last_fscale
+                return False, q, coh_states_committed, bulk_states_committed, bond_states_committed, aux_pos, aux_sig, why, it + 1, fint, last_res, last_tol, last_fscale
             # Stagnation check: use absolute tolerance only (no displacement scaling)
             # Previous version scaled by u_scale which made it too strict for small displacements
             if norm_du < model.newton_tol_du:
-                return False, q, coh_states_committed, bulk_states_committed, aux_pos, aux_sig, "stagnated", it + 1, fint, last_res, last_tol, last_fscale
-
+                return False, q, coh_states_committed, bulk_states_committed, bond_states_committed, aux_pos, aux_sig, "stagnated", it + 1, fint, last_res, last_tol, last_fscale
             # Line search (optional): backtracking on residual norm
             alpha = 1.0
             if model.line_search:
@@ -1650,7 +1652,7 @@ def run_analysis_xfem_multicrack(
                         material=material,
                         # Bond-slip (FASE D)
                         bond_law=bond_law,
-                        bond_states_comm=bond_states,
+                        bond_states_comm=bond_states_committed,
                         enable_bond_slip=enable_bond_slip,
                         steel_EA=steel_EA,
                         perimeter_total=perimeter_total,  # FASE D
@@ -1690,9 +1692,8 @@ def run_analysis_xfem_multicrack(
             for dof, val in fixed_step.items():
                 q[dof] = val
 
-        return False, q, coh_states_committed, bulk_states_committed, last_aux_pos, last_aux_sig, "maxit", model.newton_maxit, last_fint, last_res, last_tol, last_fscale
-
-    def ramp_solve_step(u_bar, q_init, coh_committed, bulk_committed, bond_gamma: float = 1.0):
+        return False, q, coh_states_committed, bulk_states_committed, bond_states_committed, last_aux_pos, last_aux_sig, "maxit", model.newton_maxit, last_fint, last_res, last_tol, last_fscale
+    def ramp_solve_step(u_bar, q_init, coh_committed, bulk_committed, bond_committed, bond_gamma: float = 1.0):
         """Gutierrez-style adaptive ramping/continuation after init/grow.
 
         We solve the same displacement level multiple times while gradually
@@ -1713,33 +1714,38 @@ def run_analysis_xfem_multicrack(
         coh_cur = coh_committed
         bulk_cur = bulk_committed
 
+
+        bond_cur = bond_committed
         # Always do an initial solve at alpha=a (including a=0)
-        ok, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
-            u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a, bond_gamma=bond_gamma
+        ok, q_cur, coh_cur, bulk_cur, bond_cur, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
+
+            u_bar, q_cur, coh_cur, bulk_cur, bond_cur, enr_scale=a, bond_gamma=bond_gamma
+
         )
         if not ok:
-            return False, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale
+            return False, q_cur, coh_cur, bulk_cur, bond_cur, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale
 
         # Continuation to full enrichment
         while a < 1.0:
             a_try = min(1.0, a + da)
-            ok, q_try, coh_try, bulk_try, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
-                u_bar, q_cur, coh_cur, bulk_cur, enr_scale=a_try, bond_gamma=bond_gamma
+            ok, q_try, coh_try, bulk_try, bond_try, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
+                u_bar, q_cur, coh_cur, bulk_cur, bond_cur, enr_scale=a_try, bond_gamma=bond_gamma
             )
             if ok:
                 a = a_try
                 q_cur = q_try
                 coh_cur = coh_try
                 bulk_cur = bulk_try
+                bond_cur = bond_try
                 da = min(0.5, da * 1.5)
                 continue
 
             # failed: reduce ramp increment
             da *= 0.5
             if da < da_min:
-                return False, q_try, coh_try, bulk_try, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale
+                return False, q_try, coh_try, bulk_try, bond_try, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale
 
-        return True, q_cur, coh_cur, bulk_cur, aux_pos, aux_sig, "ramp", 0, fint_last, last_res, last_tol, last_fscale
+        return True, q_cur, coh_cur, bulk_cur, bond_cur, aux_pos, aux_sig, "ramp", 0, fint_last, last_res, last_tol, last_fscale
 
     # adaptive substepping stack (same logic as single)
     total_substeps = 0
@@ -1804,14 +1810,15 @@ def run_analysis_xfem_multicrack(
                 q_cur = q_start
                 coh_cur = coh_comm
                 bulk_cur = bulk_comm
+                bond_cur = bond_comm
                 ok_final = False
 
                 for i_gamma, gamma in enumerate(gamma_vals):
                     if getattr(model, "debug_substeps", False) or getattr(model, "debug_bond_gamma", False):
                         print(f"    [bond-gamma] step={i_gamma+1}/{len(gamma_vals)}, gamma={gamma:.3f}, u={ub*1e3:.3f}mm")
 
-                    ok, q_sol, coh_trial, bulk_trial, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
-                        ub, q_cur, coh_cur, bulk_cur, bond_gamma=gamma
+                    ok, q_sol, coh_trial, bulk_trial, bond_trial, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
+                        ub, q_cur, coh_cur, bulk_cur, bond_cur, bond_gamma=gamma
                     )
                     last_reason = why
 
@@ -1826,6 +1833,7 @@ def run_analysis_xfem_multicrack(
                     q_cur = q_sol
                     coh_cur = coh_trial
                     bulk_cur = bulk_trial
+                    bond_cur = bond_trial
                     ok_final = True
 
                 # Use final result
@@ -1834,10 +1842,11 @@ def run_analysis_xfem_multicrack(
                     q_sol = q_cur
                     coh_trial = coh_cur
                     bulk_trial = bulk_cur
+                    bond_trial = bond_cur
             else:
                 # No gamma ramp: single solve_step with gamma=1.0 (default)
-                ok, q_sol, coh_trial, bulk_trial, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
-                    ub, q_start, coh_comm, bulk_comm, bond_gamma=1.0
+                ok, q_sol, coh_trial, bulk_trial, bond_trial, aux_pos, aux_sig, why, iters, fint_last, last_res, last_tol, last_fscale = solve_step(
+                    ub, q_start, coh_comm, bulk_comm, bond_comm, bond_gamma=1.0
                 )
                 last_reason = why
             if ok:
@@ -1855,6 +1864,7 @@ def run_analysis_xfem_multicrack(
                 q_loc = q_sol
                 coh_loc = coh_trial
                 bulk_loc = bulk_trial
+                bond_loc = bond_trial
                 aux_pos_loc = aux_pos
                 aux_sig_loc = aux_sig
                 fint_loc = fint_last
@@ -1981,8 +1991,8 @@ def run_analysis_xfem_multicrack(
 
                     # Always re-equilibrate at the same u_bar after *initiation* or *growth*.
                     # Use adaptive continuation (enrichment/cohesive ramping) to stabilize the Newton solve.
-                    ok2, q_loc, coh_loc, bulk_loc, aux_pos_loc, aux_sig_loc, why2, it2, fint_loc, last_res, last_tol, last_fscale = ramp_solve_step(
-                        ub, q_loc, coh_loc, bulk_loc
+                    ok2, q_loc, coh_loc, bulk_loc, bond_loc, aux_pos_loc, aux_sig_loc, why2, it2, fint_loc, last_res, last_tol, last_fscale = ramp_solve_step(
+                        ub, q_loc, coh_loc, bulk_loc, bond_loc
                     )
                     last_reason = why2
                     if not ok2:
@@ -2005,8 +2015,9 @@ def run_analysis_xfem_multicrack(
                     q_n = q_loc
                     coh_states = coh_loc
                     bulk_states = bulk_loc
-                    # Bond-slip commit (FASE D): bond_states are already committed via bond_comm in stack
-                    # (bond_updates is set during assembly but not available in this scope)                    # Extract reaction force (FASE D: bc_spec support)
+                    if enable_bond_slip and bond_loc is not None:
+                        bond_states = bond_loc.copy()
+                    # Extract reaction force (FASE D: bc_spec support)
                     if bc_spec is not None and bc_spec.reaction_dofs:
                         dof_loads = []
                         nnode = int(nodes.shape[0])

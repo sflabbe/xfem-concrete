@@ -10,7 +10,16 @@ Usage:
 """
 
 import argparse
+import os
 import sys
+
+# Force local imports from this repository first.
+# This avoids accidentally importing an older xfem_clean from site packages.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.abspath(os.path.join(_HERE, os.pardir, os.pardir))
+_SRC = os.path.join(_ROOT, "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 import time
 from pathlib import Path
 from typing import Optional, Dict, Callable
