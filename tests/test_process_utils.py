@@ -22,6 +22,7 @@ from tests.process_utils import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_TIMEOUT_SECONDS = 1.0
 _TIMEOUT_PAYLOAD = r"""
 import json, os, pathlib, subprocess, sys, time
 readiness = pathlib.Path(sys.argv[1])
@@ -31,8 +32,14 @@ with_grandchild = sys.argv[6] == "1"
 grandchild = None
 if with_grandchild:
     grandchild = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(120)", marker]
+        [sys.executable, "-S", "-u", "-c", "import time; time.sleep(120)", marker]
     )
+temporary = readiness.with_suffix(".tmp")
+temporary.write_text(json.dumps({
+    "child_pid": os.getpid(),
+    "grandchild_pid": grandchild.pid if grandchild else None,
+}), encoding="utf-8")
+temporary.replace(readiness)
 if stdout_marker:
     sys.stdout.write(stdout_marker + "\n")
 if volume:
@@ -43,12 +50,6 @@ if stderr_marker:
 if volume:
     sys.stderr.write("E" * volume)
 sys.stderr.flush()
-temporary = readiness.with_suffix(".tmp")
-temporary.write_text(json.dumps({
-    "child_pid": os.getpid(),
-    "grandchild_pid": grandchild.pid if grandchild else None,
-}), encoding="utf-8")
-temporary.replace(readiness)
 time.sleep(120)
 """
 
@@ -96,6 +97,7 @@ def _timeout_capture(
     readiness = tmp_path / f"{marker}.json"
     command = [
         sys.executable,
+        "-S",
         "-u",
         "-c",
         _TIMEOUT_PAYLOAD,
@@ -110,7 +112,7 @@ def _timeout_capture(
         run_process(
             command,
             cwd=REPO_ROOT,
-            timeout=0.4,
+            timeout=_TIMEOUT_SECONDS,
             terminate_grace=0.2,
         )
     assert readiness.exists(), "child never reached the independent readiness channel"

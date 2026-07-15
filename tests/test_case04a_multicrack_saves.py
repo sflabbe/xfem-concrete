@@ -1,4 +1,4 @@
-"""CLI regression for Bosco t5a1 multicrack saves without crashing."""
+"""CLI regression for fail-closed Bosco T5A1 multicrack dispatch."""
 
 from __future__ import annotations
 
@@ -42,14 +42,12 @@ def test_case04a_multicrack_saves(tmp_path: Path) -> None:
         cmd,
         cwd=repo_root,
         env=env,
-        timeout=180,
+        timeout=15,
     )
 
-    assert result.returncode == 0, (
-        "CLI run failed.\n"
-        f"stdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}"
-    )
-
-    history_csv = output_dir / "load_displacement.csv"
-    assert history_csv.exists(), f"Missing CSV output at {history_csv}"
+    assert result.returncode == 2
+    combined = result.stdout + result.stderr
+    assert "multicrack maps cdp_full to the CDP-lite Numba kernel" in combined
+    assert "Built 2 bond layer" not in combined
+    assert "[substep]" not in combined
+    assert not (output_dir / "load_displacement.csv").exists()

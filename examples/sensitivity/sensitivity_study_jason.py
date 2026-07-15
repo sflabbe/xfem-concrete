@@ -117,16 +117,16 @@ def run_sensitivity_config(
         elapsed = time.time() - t0
 
         # Extract metrics
-        history = results.get('history', [])
+        history = results.steps
         metrics = extract_metrics(history)
 
         # Add crack width max if available
-        coh_states = results.get('coh_states', None)
+        coh_states = results.fields["cohesive_states"]
         if coh_states is not None:
             from examples.gutierrez_thesis.postprocess import compute_crack_widths_from_cohesive
-            cracks = results.get('cracks', [results.get('crack')])
-            nodes = results['nodes']
-            elems = results['elems']
+            cracks = results.cracks
+            nodes = results.fields["nodes_m"]
+            elems = results.fields["elements"]
 
             crack_widths = compute_crack_widths_from_cohesive(coh_states, cracks, nodes, elems)
             if crack_widths:

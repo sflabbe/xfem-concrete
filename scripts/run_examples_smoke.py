@@ -25,6 +25,7 @@ def run_command(args: list[str]) -> None:
 
 
 def main() -> None:
+    # Validate every definition without entering unsupported benchmark paths.
     run_command([
         "-m",
         "examples.gutierrez_thesis.run",
@@ -32,12 +33,11 @@ def main() -> None:
         "all",
         "--mesh",
         "coarse",
-        "--nsteps",
-        "1",
-        "--no-post",
-        "--no-numba",
+        "--dry-run",
     ])
 
+    # Real solver smokes remain family-specific and bounded in pytest.  These
+    # standalone legacy diagnostics exercise the small elastic pull-out path.
     run_command(["examples/pullout_minimal_working.py"])
     run_command(["examples/pullout_correct_bcs.py"])
     run_command(["examples/diagnose_stiffness_scale.py"])

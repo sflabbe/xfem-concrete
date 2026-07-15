@@ -93,6 +93,8 @@ def test_single_and_multi_adapters_share_result_schema():
     assert single.solver_meta["crack_path"] == "single"
     assert multi.solver_meta["crack_path"] == "multi"
     assert multi.solver_meta["compat_mode"] is True
+    assert single.solver_meta["provenance"] == {}
+    assert multi.solver_meta["provenance"] == {}
     with pytest.warns(DeprecationWarning):
         assert single.legacy_view["history"] is not None
 

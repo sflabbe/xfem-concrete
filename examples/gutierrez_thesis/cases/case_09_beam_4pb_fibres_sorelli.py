@@ -134,6 +134,7 @@ def create_case_09() -> CaseConfig:
         outputs=outputs,
         rebar_layers=[],  # No conventional reinforcement
         fibres=fibres,
+        solver_engine="multi",
         tolerance=1e-6,
         use_line_search=True,
         use_substepping=True,

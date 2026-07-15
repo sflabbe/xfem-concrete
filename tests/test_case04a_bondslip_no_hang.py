@@ -40,11 +40,12 @@ def test_case04a_bondslip_no_hang(tmp_path: Path) -> None:
         cmd,
         cwd=repo_root,
         env=env,
-        timeout=120,
+        timeout=15,
     )
 
-    assert result.returncode == 0, (
-        "CLI run failed.\n"
-        f"stdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}"
-    )
+    assert result.returncode == 2
+    combined = result.stdout + result.stderr
+    assert "engine_compatibility" in combined
+    assert "falls back to linear elastic assembly" in combined
+    assert "Built 2 bond layer" not in combined
+    assert "[substep]" not in combined

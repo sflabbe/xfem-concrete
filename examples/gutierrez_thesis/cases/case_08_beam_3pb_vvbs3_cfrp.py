@@ -197,6 +197,7 @@ def create_case_08() -> CaseConfig:
         outputs=outputs,
         rebar_layers=[rebar_bottom, rebar_top],
         frp_sheets=[frp_sheet],
+        solver_engine="multi",
         tolerance=1e-6,
         use_line_search=True,
         use_substepping=True,

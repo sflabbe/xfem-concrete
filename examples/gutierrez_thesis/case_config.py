@@ -10,6 +10,7 @@ from copy import deepcopy
 from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
 import json
+import math
 
 
 CASE_SCHEMA_VERSION = 1
@@ -803,6 +804,7 @@ def normalize_case_config(case: CaseConfig, *, source: Optional[str] = None) -> 
     diagnostics name the YAML/JSON file that supplied an invalid value.
     """
     normalized = deepcopy(case)
+    source = source if source is not None else getattr(case, "_source", None)
     case_id = normalized.case_id or "unknown"
 
     if normalized.schema_version != CASE_SCHEMA_VERSION:
@@ -843,6 +845,67 @@ def normalize_case_config(case: CaseConfig, *, source: Optional[str] = None) -> 
             ["positive integers"], case_id=case_id, source=source,
         )
 
+    dimensions = (
+        normalized.geometry.length,
+        normalized.geometry.height,
+        normalized.geometry.thickness,
+    )
+    if not all(math.isfinite(value) and value > 0.0 for value in dimensions):
+        raise CaseConfigurationError(
+            "geometry.dimensions_mm", dimensions, ["finite positive values"],
+            case_id=case_id, source=source,
+        )
+    if normalized.geometry.element_type != "Q4":
+        raise CaseConfigurationError(
+            "geometry.element_type", normalized.geometry.element_type, ["Q4"],
+            case_id=case_id, source=source,
+        )
+
+    if loading_type == "monotonic":
+        if normalized.loading.n_steps <= 0:
+            raise CaseConfigurationError(
+                "loading.n_steps", normalized.loading.n_steps, ["a positive integer"],
+                case_id=case_id, source=source,
+            )
+        target = normalized.loading.max_displacement
+        if not math.isfinite(target) or target <= 0.0:
+            raise CaseConfigurationError(
+                "loading.max_displacement_mm", target, ["a finite positive value"],
+                case_id=case_id, source=source,
+            )
+    else:
+        targets = tuple(normalized.loading.targets)
+        if not targets or not all(math.isfinite(value) for value in targets):
+            raise CaseConfigurationError(
+                "loading.targets_mm", targets, ["one or more finite values"],
+                case_id=case_id, source=source,
+            )
+        if normalized.loading.n_cycles_per_target <= 0:
+            raise CaseConfigurationError(
+                "loading.n_cycles_per_target", normalized.loading.n_cycles_per_target,
+                ["a positive integer"], case_id=case_id, source=source,
+            )
+
+    load_x = getattr(normalized.loading, "load_x_center", None)
+    load_halfwidth = getattr(normalized.loading, "load_halfwidth", None)
+    if load_x is None or not math.isfinite(load_x) or not 0.0 <= load_x <= normalized.geometry.length:
+        raise CaseConfigurationError(
+            "loading.load_x_center_mm", load_x,
+            [f"a finite value in [0, {normalized.geometry.length}]"],
+            case_id=case_id, source=source,
+        )
+    if load_halfwidth is None or not math.isfinite(load_halfwidth) or load_halfwidth < 0.0:
+        raise CaseConfigurationError(
+            "loading.load_halfwidth_mm", load_halfwidth, ["a finite non-negative value"],
+            case_id=case_id, source=source,
+        )
+
+    if not str(normalized.outputs.output_dir).strip():
+        raise CaseConfigurationError(
+            "outputs.output_dir", normalized.outputs.output_dir, ["a non-empty path"],
+            case_id=case_id, source=source,
+        )
+
     law_types = {"ceb_fip", "bilinear", "banholzer"}
     configured_laws = [layer.bond_law for layer in normalized.rebar_layers]
     configured_laws += [sheet.bond_law for sheet in normalized.frp_sheets]
@@ -866,6 +929,41 @@ def normalize_case_config(case: CaseConfig, *, source: Optional[str] = None) -> 
                 "bond_law.law_type", getattr(law, "law_type", None), sorted(law_types),
                 case_id=case_id, source=source,
             )
+
+    for index, layer in enumerate(normalized.rebar_layers):
+        if not isinstance(layer.bond_law, CEBFIPBondLaw):
+            raise CaseConfigurationError(
+                f"rebar_layers[{index}].bond_law", type(layer.bond_law).__name__,
+                ["CEBFIPBondLaw"], case_id=case_id, source=source,
+            )
+        orientation = float(layer.orientation_deg)
+        if not (abs(orientation) < 45.0 or abs(orientation - 90.0) < 45.0):
+            raise CaseConfigurationError(
+                f"rebar_layers[{index}].orientation_deg", orientation, [0.0, 90.0],
+                case_id=case_id, source=source,
+            )
+        placement_limit = (
+            normalized.geometry.height if abs(orientation) < 45.0
+            else normalized.geometry.length
+        )
+        if not 0.0 <= layer.y_position <= placement_limit:
+            raise CaseConfigurationError(
+                f"rebar_layers[{index}].y_position_mm", layer.y_position,
+                [f"a value in [0, {placement_limit}]"], case_id=case_id, source=source,
+            )
+    for index, sheet in enumerate(normalized.frp_sheets):
+        if not isinstance(sheet.bond_law, BilinearBondLaw):
+            raise CaseConfigurationError(
+                f"frp_sheets[{index}].bond_law", type(sheet.bond_law).__name__,
+                ["BilinearBondLaw"], case_id=case_id, source=source,
+            )
+    if normalized.fibres is not None and not isinstance(
+        normalized.fibres.bond_law, BanholzerBondLaw
+    ):
+        raise CaseConfigurationError(
+            "fibres.bond_law", type(normalized.fibres.bond_law).__name__,
+            ["BanholzerBondLaw"], case_id=case_id, source=source,
+        )
 
     setattr(normalized, "_normalized", True)
     setattr(normalized, "_source", source)

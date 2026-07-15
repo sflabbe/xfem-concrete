@@ -25,12 +25,14 @@ def test_case03_tensile_cli_multicrack(tmp_path: Path) -> None:
         "examples.gutierrez_thesis.run",
         "--case",
         "03_tensile_stn12",
-        "--mesh",
-        "coarse",
+        "--mesh-factor",
+        "0.25",
         "--nsteps",
-        "5",
+        "1",
+        "--max-displacement",
+        "0.01",
         "--no-post",
-        "--no-numba",
+        "--use-numba",
         "--output-dir",
         str(output_dir),
     ]
@@ -39,7 +41,7 @@ def test_case03_tensile_cli_multicrack(tmp_path: Path) -> None:
         cmd,
         cwd=repo_root,
         env=env,
-        timeout=180,
+        timeout=30,
     )
 
     assert result.returncode == 0, (

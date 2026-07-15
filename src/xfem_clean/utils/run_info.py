@@ -41,7 +41,7 @@ def print_material_summary(model: XFEMModel) -> None:
         req = bool(getattr(model, "use_numba", False))
         av = bool(numba_available())
         bm_local = (model.bulk_material or "elastic").lower()
-        bulk_supported = bm_local in ("elastic", "dp")
+        bulk_supported = bm_local in ("elastic", "dp", "cdp", "cdp-lite")
         bulk_on = bool(req and av and bulk_supported)
         coh_on = bool(req and av)
         if req and not av:
@@ -52,6 +52,11 @@ def print_material_summary(model: XFEMModel) -> None:
                 f"  cohesive_kernels={'yes' if coh_on else 'no'}"
                 f"  bulk_kernels={'yes' if bulk_on else 'no'}"
             )
+            if req and av:
+                print(
+                    "[numba] scope=partial (element/Jacobian loops, sparse assembly, "
+                    "and linear solves remain Python/SciPy)"
+                )
 
     bm = (model.bulk_material or "elastic").lower()
     if bm == "elastic":

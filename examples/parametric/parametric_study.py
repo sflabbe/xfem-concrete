@@ -153,14 +153,14 @@ def modify_case_parameter(case_config, param_name: str, param_value: float):
 # Metric extraction
 # ============================================================================
 
-def extract_case_metrics(results: Dict[str, Any]) -> Dict[str, float]:
+def extract_case_metrics(results) -> Dict[str, float]:
     """
     Extract key metrics from solver results.
 
     Parameters
     ----------
-    results : dict
-        Solver results dictionary with 'history' key
+    results : AnalysisResult
+        Canonical solver result.
 
     Returns
     -------
@@ -172,7 +172,7 @@ def extract_case_metrics(results: Dict[str, Any]) -> Dict[str, float]:
         - num_cracks: Number of cracks at final step
         - ductility: u_final / u_at_Pmax (post-peak ductility)
     """
-    history = results.get('history', [])
+    history = results.steps
 
     # Use unified history extraction (handles both numeric and dict formats)
     metrics = extract_metrics_from_history(history)
@@ -276,7 +276,7 @@ def run_parametric_study(
             result_entry = {
                 'param_value': value,
                 'metrics': metrics,
-                'history': solver_results.get('history', []),
+                'history': solver_results.steps,
                 'elapsed_time_s': elapsed,
             }
             results.append(result_entry)

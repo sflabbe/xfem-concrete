@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -22,84 +23,25 @@ if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 import time
 from pathlib import Path
-from typing import Optional, Dict, Callable
-from examples.gutierrez_thesis.case_config import normalize_case_config
+from typing import Optional
 
-# Import case factories
-from examples.gutierrez_thesis.cases.case_01_pullout_lettow import create_case_01
-from examples.gutierrez_thesis.cases.case_02_sspot_frp import create_case_02
-from examples.gutierrez_thesis.cases.case_03_tensile_stn12 import create_case_03
-from examples.gutierrez_thesis.cases.case_04_beam_3pb_t5a1 import create_case_04  # Legacy
-from examples.gutierrez_thesis.cases.case_04a_beam_3pb_t5a1_bosco import create_case_04a
-from examples.gutierrez_thesis.cases.case_04b_beam_3pb_t6a1_bosco import create_case_04b
-from examples.gutierrez_thesis.cases.case_05_wall_c1_cyclic import create_case_05
-from examples.gutierrez_thesis.cases.case_06_fibre_tensile import create_case_06
-from examples.gutierrez_thesis.cases.case_07_beam_4pb_jason_4pbt import create_case_07
-from examples.gutierrez_thesis.cases.case_08_beam_3pb_vvbs3_cfrp import create_case_08
-from examples.gutierrez_thesis.cases.case_09_beam_4pb_fibres_sorelli import create_case_09
-from examples.gutierrez_thesis.cases.case_10_wall_c2_cyclic import create_case_10
-from examples.gutierrez_thesis.cases.case_11_balcony_cantilever_sls import create_case_11
+from examples.gutierrez_thesis.case_config import (
+    CaseConfigurationError,
+    normalize_case_config,
+)
+from examples.gutierrez_thesis.catalog import (
+    CASE_ALIASES,
+    CASE_DEFINITIONS,
+    CASE_METADATA,
+    CASE_REGISTRY,
+    evaluate_compatibility,
+    resolve_case_id as resolve_catalog_case_id,
+)
 
 
 # ============================================================================
 # CASE REGISTRY
 # ============================================================================
-
-CASE_REGISTRY: Dict[str, Callable] = {
-    "01_pullout_lettow": create_case_01,
-    "02_sspot_frp": create_case_02,
-    "03_tensile_stn12": create_case_03,
-    "04_beam_3pb_t5a1": create_case_04,  # Legacy (keep for compatibility)
-    "04a_beam_3pb_t5a1_bosco": create_case_04a,
-    "04b_beam_3pb_t6a1_bosco": create_case_04b,
-    "05_wall_c1_cyclic": create_case_05,
-    "06_fibre_tensile": create_case_06,
-    "07_beam_4pb_jason_4pbt": create_case_07,
-    "08_beam_3pb_vvbs3_cfrp": create_case_08,
-    "09_beam_4pb_fibres_sorelli": create_case_09,
-    "10_wall_c2_cyclic": create_case_10,
-    "11_balcony_cantilever_sls": create_case_11,
-}
-
-CASE_ALIASES = {
-    # Pullout
-    "pullout": "01_pullout_lettow",
-    "lettow": "01_pullout_lettow",
-    # FRP
-    "sspot": "02_sspot_frp",
-    "frp": "02_sspot_frp",
-    # Tensile
-    "stn12": "03_tensile_stn12",
-    "tensile": "03_tensile_stn12",
-    # Beams (legacy)
-    "beam": "04_beam_3pb_t5a1",
-    "3pb": "04_beam_3pb_t5a1",
-    # BOSCO beams
-    "t5a1": "04a_beam_3pb_t5a1_bosco",
-    "bosco_t5a1": "04a_beam_3pb_t5a1_bosco",
-    "t6a1": "04b_beam_3pb_t6a1_bosco",
-    "bosco_t6a1": "04b_beam_3pb_t6a1_bosco",
-    # Jason 4PB
-    "jason": "07_beam_4pb_jason_4pbt",
-    "4pb": "07_beam_4pb_jason_4pbt",
-    # CFRP
-    "vvbs3": "08_beam_3pb_vvbs3_cfrp",
-    "cfrp": "08_beam_3pb_vvbs3_cfrp",
-    # Sorelli fibres
-    "sorelli": "09_beam_4pb_fibres_sorelli",
-    # Walls
-    "wall": "05_wall_c1_cyclic",
-    "c1": "05_wall_c1_cyclic",
-    "c2": "10_wall_c2_cyclic",
-    "cyclic": "05_wall_c1_cyclic",
-    # Fibres (tensile)
-    "fibre": "06_fibre_tensile",
-    "fiber": "06_fibre_tensile",
-    # Balcony cantilever
-    "balcony": "11_balcony_cantilever_sls",
-    "cantilever": "11_balcony_cantilever_sls",
-    "sls": "11_balcony_cantilever_sls",
-}
 
 MESH_PRESETS = {
     "coarse": 0.5,   # Coarsening factor
@@ -113,26 +55,170 @@ MESH_PRESETS = {
 # SOLVER INTERFACE
 # ============================================================================
 
-def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enable_postprocess: bool = True, cli_args=None):
-    """
-    Run a single case with the XFEM solver.
+def _effective_numba(cli_args) -> bool:
+    from xfem_clean.numba.utils import NUMBA_AVAILABLE
 
-    Args:
-        case_config: CaseConfig instance
-        mesh_factor: Mesh refinement factor (1.0 = default)
-        dry_run: If True, only print configuration without running
-        cli_args: Optional CLI arguments for overrides
-    """
+    if cli_args is not None and getattr(cli_args, "use_numba", False):
+        return True
+    if cli_args is not None and getattr(cli_args, "no_numba", False):
+        return False
+    return bool(NUMBA_AVAILABLE)
+
+
+def _apply_cli_overrides(case_config, cli_args):
+    """Apply the documented overrides to a normalized copy and record provenance."""
+    case = normalize_case_config(case_config)
+    overrides = []
+
+    def apply(field: str, owner, attribute: str, value, option: str) -> None:
+        previous = getattr(owner, attribute)
+        setattr(owner, attribute, value)
+        overrides.append((field, previous, value, option))
+
+    if cli_args is not None:
+        if getattr(cli_args, "bulk", None) is not None:
+            apply("concrete.model_type", case.concrete, "model_type", cli_args.bulk, "--bulk")
+        if getattr(cli_args, "nsteps", None) is not None:
+            if not hasattr(case.loading, "n_steps"):
+                raise CaseConfigurationError(
+                    "loading.n_steps", cli_args.nsteps, ["monotonic loading only"],
+                    case_id=case.case_id, source="CLI --nsteps",
+                )
+            apply("loading.n_steps", case.loading, "n_steps", cli_args.nsteps, "--nsteps")
+        if getattr(cli_args, "max_displacement", None) is not None:
+            if not hasattr(case.loading, "max_displacement"):
+                raise CaseConfigurationError(
+                    "loading.max_displacement", cli_args.max_displacement,
+                    ["monotonic loading only"], case_id=case.case_id,
+                    source="CLI --max-displacement",
+                )
+            apply(
+                "loading.max_displacement_mm", case.loading, "max_displacement",
+                cli_args.max_displacement, "--max-displacement",
+            )
+        if getattr(cli_args, "cycles", None) is not None:
+            if not hasattr(case.loading, "n_cycles_per_target"):
+                raise CaseConfigurationError(
+                    "loading.n_cycles_per_target", cli_args.cycles,
+                    ["cyclic loading only"], case_id=case.case_id, source="CLI --cycles",
+                )
+            apply(
+                "loading.n_cycles_per_target", case.loading, "n_cycles_per_target",
+                cli_args.cycles, "--cycles",
+            )
+        if getattr(cli_args, "output_dir", None) is not None:
+            apply(
+                "outputs.output_dir", case.outputs, "output_dir", cli_args.output_dir,
+                "--output-dir",
+            )
+        if getattr(cli_args, "solver", None) is not None:
+            apply("solver_engine", case, "solver_engine", cli_args.solver, "--solver")
+
+    case = normalize_case_config(case)
+    setattr(
+        case,
+        "_overrides",
+        tuple(
+            {
+                "field": field,
+                "previous": previous,
+                "effective": effective,
+                "source": f"CLI {option}",
+            }
+            for field, previous, effective, option in overrides
+        ),
+    )
+    return case, tuple(overrides)
+
+
+def _canonical_view(
+    case, *, mesh_factor: float, compatibility, use_numba: bool,
+    bond_slip_effective: bool,
+) -> dict:
+    metadata = CASE_METADATA.get(case.case_id)
+    nx = int(case.geometry.n_elem_x * mesh_factor)
+    ny = int(case.geometry.n_elem_y * mesh_factor)
+    loading = {
+        "type": case.loading.loading_type,
+        "steps": getattr(case.loading, "n_steps", len(getattr(case.loading, "targets", ()))),
+        "target_mm": getattr(
+            case.loading,
+            "max_displacement",
+            max((abs(value) for value in getattr(case.loading, "targets", (0.0,))), default=0.0),
+        ),
+    }
+    return {
+        "case_id": case.case_id,
+        "schema_version": case.schema_version,
+        "source": getattr(case, "_source", None),
+        "definition_status": metadata.status if metadata else "external-config",
+        "validation_source": metadata.validation_source if metadata else None,
+        "engine": case.solver_engine,
+        "compatibility": compatibility.state,
+        "compatibility_reason": compatibility.reason,
+        "material": case.concrete.model_type,
+        "geometry_mm": {
+            "length": case.geometry.length,
+            "height": case.geometry.height,
+            "thickness": case.geometry.thickness,
+        },
+        "mesh": {"nx": nx, "ny": ny, "factor": mesh_factor},
+        "loading": loading,
+        "features": {
+            "rebar_layers": len(case.rebar_layers),
+            "frp_sheets": len(case.frp_sheets),
+            "fibres": case.fibres is not None,
+            "subdomains": len(case.subdomains),
+            "bond_slip_effective": bond_slip_effective,
+        },
+        "solver_options": {
+            "tolerance": case.tolerance,
+            "line_search": case.use_line_search,
+            "substepping": case.use_substepping,
+        },
+        "numba": {
+            "requested_or_auto_effective": use_numba,
+            "support": compatibility.numba_state,
+        },
+        "output_dir": case.outputs.output_dir,
+        "result_contract": "AnalysisResult/schema-1",
+    }
+
+
+def run_case(
+    case_config,
+    mesh_factor: float = 1.0,
+    dry_run: bool = False,
+    enable_postprocess: bool = True,
+    cli_args=None,
+):
+    """Validate and run one canonical case, returning its ``AnalysisResult``."""
+    case_config, overrides = _apply_cli_overrides(case_config, cli_args)
+    if not mesh_factor > 0.0:
+        raise CaseConfigurationError(
+            "mesh_factor", mesh_factor, ["a positive value"],
+            case_id=case_config.case_id, source="CLI mesh preset/--mesh-factor",
+        )
+    nx = int(case_config.geometry.n_elem_x * mesh_factor)
+    ny = int(case_config.geometry.n_elem_y * mesh_factor)
+    if nx < 1 or ny < 1:
+        raise CaseConfigurationError(
+            "effective_mesh", (nx, ny), ["at least 1 x 1 elements"],
+            case_id=case_config.case_id, source="CLI mesh preset/--mesh-factor",
+        )
+
+    use_numba = _effective_numba(cli_args)
+    bond_slip_effective = bool(case_config.rebar_layers or case_config.frp_sheets)
+    if cli_args is not None and getattr(cli_args, "bond_slip", None) is not None:
+        bond_slip_effective = cli_args.bond_slip == "on"
+    compatibility = evaluate_compatibility(case_config, use_numba=use_numba)
+
     print(f"\n{'='*70}")
     print(f"Running Case: {case_config.case_id}")
     print(f"Description: {case_config.description}")
     print(f"{'='*70}\n")
 
-    # mesh_factor is now applied only in solver_interface.run_case_solver()
-    # to avoid double scaling (was being applied here AND in solver)
     if mesh_factor != 1.0:
-        nx = int(case_config.geometry.n_elem_x * mesh_factor)
-        ny = int(case_config.geometry.n_elem_y * mesh_factor)
         print(f"Mesh adjusted: {nx} x {ny} elements (factor={mesh_factor})")
 
     # Print configuration summary
@@ -146,61 +232,45 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
     print(f"Loading: {case_config.loading.loading_type}")
     print(f"Output dir: {case_config.outputs.output_dir}\n")
 
-    override_messages = []
+    runtime_overrides = list(overrides)
+    if cli_args is not None and getattr(cli_args, "bond_slip", None) is not None:
+        runtime_overrides.append(("bond_slip", "case default", cli_args.bond_slip, "--bond-slip"))
+    if cli_args is not None and getattr(cli_args, "use_numba", False):
+        runtime_overrides.append(("use_numba", "auto", True, "--use-numba"))
+    elif cli_args is not None and getattr(cli_args, "no_numba", False):
+        runtime_overrides.append(("use_numba", "auto", False, "--no-numba"))
 
-    # Apply CLI overrides to case_config
-    if cli_args and hasattr(cli_args, 'bulk') and cli_args.bulk is not None:
-        case_config.concrete.model_type = cli_args.bulk
-        override_messages.append(f"concrete.model_type = {cli_args.bulk}")
-        if dry_run:
-            print(f"Override: concrete.model_type = {cli_args.bulk}")
-
-    if cli_args and hasattr(cli_args, 'nsteps') and cli_args.nsteps is not None:
-        if hasattr(case_config.loading, 'n_steps'):
-            case_config.loading.n_steps = cli_args.nsteps
-            override_messages.append(f"n_steps = {cli_args.nsteps}")
-
-    if cli_args and getattr(cli_args, 'max_displacement', None) is not None:
-        if not hasattr(case_config.loading, 'max_displacement'):
-            raise ValueError("--max-displacement requires monotonic loading")
-        case_config.loading.max_displacement = cli_args.max_displacement
-        override_messages.append(
-            f"max_displacement = {cli_args.max_displacement} mm"
-        )
-
-    if cli_args and hasattr(cli_args, 'cycles') and cli_args.cycles is not None:
-        if hasattr(case_config.loading, 'n_cycles_per_target'):
-            case_config.loading.n_cycles_per_target = cli_args.cycles
-            override_messages.append(f"n_cycles_per_target = {cli_args.cycles}")
-
-    if cli_args and hasattr(cli_args, 'output_dir') and cli_args.output_dir is not None:
-        case_config.outputs.output_dir = cli_args.output_dir
-        override_messages.append(f"output_dir = {cli_args.output_dir}")
-
-    if cli_args and hasattr(cli_args, 'solver') and cli_args.solver is not None:
-        case_config.solver_engine = cli_args.solver
-        override_messages.append(f"solver = {cli_args.solver}")
-
-    if cli_args and hasattr(cli_args, 'bond_slip') and cli_args.bond_slip is not None:
-        override_messages.append(f"bond_slip = {cli_args.bond_slip}")
-
-    if cli_args and hasattr(cli_args, 'use_numba') and cli_args.use_numba:
-        override_messages.append("use_numba = True")
-    elif cli_args and hasattr(cli_args, 'no_numba') and cli_args.no_numba:
-        override_messages.append("use_numba = False")
-
-    case_config = normalize_case_config(case_config)
-
-    if override_messages:
+    if runtime_overrides:
         print("Active overrides:")
-        for message in override_messages:
-            print(f"  - {message}")
+        for field, previous, effective, option in runtime_overrides:
+            print(
+                f"  - Override: {field} = {effective} "
+                f"(previous={previous!r}, source=CLI {option})"
+            )
     else:
         print("Active overrides: none")
 
+    view = _canonical_view(
+        case_config,
+        mesh_factor=mesh_factor,
+        compatibility=compatibility,
+        use_numba=use_numba,
+        bond_slip_effective=bond_slip_effective,
+    )
+    print("Canonical configuration:")
+    print(json.dumps(view, indent=2, sort_keys=True, ensure_ascii=False))
+
     if dry_run:
-        print("DRY RUN - Solver not executed.\n")
-        return
+        print("DRY RUN - canonical validation complete; solver not executed.\n")
+        return case_config
+
+    if not compatibility.supported:
+        raise CaseConfigurationError(
+            "engine_compatibility",
+            f"{case_config.solver_engine}/{case_config.concrete.model_type}/numba={use_numba}",
+            [compatibility.reason], case_id=case_config.case_id,
+            source=getattr(case_config, "_source", None),
+        )
 
     # Create output directory
     output_dir = Path(case_config.outputs.output_dir)
@@ -210,52 +280,46 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
     print("Starting solver...\n")
     t0 = time.time()
 
-    try:
-        from examples.gutierrez_thesis.solver_interface import run_case_solver
+    from examples.gutierrez_thesis.solver_interface import run_case_solver
+    from xfem_clean.results import AnalysisResult
 
-        results = run_case_solver(case_config, mesh_factor=mesh_factor, enable_postprocess=enable_postprocess, cli_args=cli_args)
+    results = run_case_solver(
+        case_config,
+        mesh_factor=mesh_factor,
+        enable_postprocess=enable_postprocess,
+        cli_args=cli_args,
+    )
+    if not isinstance(results, AnalysisResult):
+        raise TypeError(
+            f"Case {case_config.case_id} returned {type(results).__name__}; "
+            "expected AnalysisResult"
+        )
 
-        # Save results
-        print("\nSaving results...")
-        import csv
-        history_file = output_dir / "load_displacement.csv"
-        with open(history_file, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['step', 'u_mm', 'P_kN', 'M_kNm', 'kappa', 'R',
-                             'crack_tip_x', 'crack_tip_y', 'angle_deg', 'crack_active',
-                             'W_plastic', 'W_damage_t', 'W_damage_c', 'W_cohesive', 'W_total'])
-            for row in results.steps:
-                # Convert units: m → mm, N → kN, J → J
-                row_out = [
-                    int(row.get("step", 0)),
-                    row.get("u", 0.0) * 1e3,
-                    row.get("P", 0.0) / 1e3,
-                    row.get("M", 0.0) / 1e3,
-                    row.get("kappa", 0.0),
-                    row.get("R", 0.0),
-                    row.get("crack_tip_x", 0.0),
-                    row.get("crack_tip_y", 0.0),
-                    row.get("angle_deg", 0.0),
-                    int(row.get("crack_active", 0)),
-                    row.get("W_plastic", 0.0),
-                    row.get("W_damage_t", 0.0),
-                    row.get("W_damage_c", 0.0),
-                    row.get("W_cohesive", 0.0),
-                    row.get("W_total", 0.0),
-                ]
-                writer.writerow(row_out)
-        print(f"  → {history_file}")
-
-    except Exception as e:
-        import traceback
-        print(f"\n❌ ERROR: {e}\n")
-        print("Traceback:")
-        traceback.print_exc()
-        sys.exit(1)
+    print("\nSaving results...")
+    import csv
+    history_file = output_dir / "load_displacement.csv"
+    with open(history_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['step', 'u_mm', 'P_kN', 'M_kNm', 'kappa', 'R',
+                         'crack_tip_x', 'crack_tip_y', 'angle_deg', 'crack_active',
+                         'W_plastic', 'W_damage_t', 'W_damage_c', 'W_cohesive', 'W_total'])
+        for row in results.steps:
+            writer.writerow([
+                int(row.get("step", 0)), row.get("u", 0.0) * 1e3,
+                row.get("P", 0.0) / 1e3, row.get("M", 0.0) / 1e3,
+                row.get("kappa", 0.0), row.get("R", 0.0),
+                row.get("crack_tip_x", 0.0), row.get("crack_tip_y", 0.0),
+                row.get("angle_deg", 0.0), int(row.get("crack_active", 0)),
+                row.get("W_plastic", 0.0), row.get("W_damage_t", 0.0),
+                row.get("W_damage_c", 0.0), row.get("W_cohesive", 0.0),
+                row.get("W_total", 0.0),
+            ])
+    print(f"  → {history_file}")
 
     t_elapsed = time.time() - t0
     print(f"\n✓ Case completed in {t_elapsed:.1f} seconds")
     print(f"✓ Outputs saved to: {output_dir}\n")
+    return results
 
 
 # ============================================================================
@@ -266,42 +330,29 @@ def list_cases():
     """Print available cases"""
     print("\nAvailable Cases:")
     print("=" * 70)
-    for case_id, factory in CASE_REGISTRY.items():
-        case = normalize_case_config(factory())
-        print(f"  {case_id:30s} - {case.description}")
+    for definition in CASE_DEFINITIONS:
+        case = normalize_case_config(
+            definition.factory(), source=definition.factory_source
+        )
+        aliases = ",".join(definition.aliases)
+        print(
+            f"  {definition.case_id:30s} engine={case.solver_engine:5s} "
+            f"status={definition.status:31s} aliases={aliases}"
+        )
     print("=" * 70)
     print(f"\nTotal: {len(CASE_REGISTRY)} cases")
     print("\nMesh presets: coarse, medium (default), fine, very_fine\n")
 
 
 def resolve_case_id(name: str) -> Optional[str]:
-    """Resolve case name to canonical ID"""
-    # Direct match
-    if name in CASE_REGISTRY:
-        return name
-
-    # Alias match
-    if name in CASE_ALIASES:
-        return CASE_ALIASES[name]
-
-    # Case-insensitive partial match
-    name_lower = name.lower()
-    matches = [
-        cid for cid in CASE_REGISTRY.keys()
-        if name_lower in cid.lower()
-    ]
-
-    if len(matches) == 1:
-        return matches[0]
-    elif len(matches) > 1:
-        print(f"Ambiguous case name '{name}'. Matches: {matches}")
-        return None
-    else:
+    """Resolve exact case ID or alias without order-dependent partial matching."""
+    resolved = resolve_catalog_case_id(name)
+    if resolved is None:
         print(f"Unknown case: '{name}'")
-        return None
+    return resolved
 
 
-def main():
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Gutiérrez Thesis Case Suite Runner",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -407,13 +458,13 @@ Examples:
     # List cases
     if args.list:
         list_cases()
-        sys.exit(0)
+        return 0
 
     # Validate arguments
     if not args.case and not args.case_config:
         parser.print_help()
         print("\nError: --case or --case-config is required (or use --list)")
-        sys.exit(1)
+        return 2
 
     # Get mesh factor (CLI override takes precedence)
     if args.mesh_factor is not None:
@@ -428,7 +479,7 @@ Examples:
 
         if not config_path.exists():
             print(f"Error: Config file not found: {config_path}")
-            sys.exit(1)
+            return 2
 
         print(f"Loading configuration from: {config_path}")
 
@@ -439,7 +490,7 @@ Examples:
         else:
             print(f"Error: Unsupported config file format: {config_path.suffix}")
             print("Supported formats: .yaml, .yml, .json")
-            sys.exit(1)
+            return 2
 
         enable_post = not args.no_post
         run_case(case_config, mesh_factor, args.dry_run, enable_postprocess=enable_post, cli_args=args)
@@ -451,8 +502,10 @@ Examples:
         print(f"Running ALL {len(CASE_REGISTRY)} cases with mesh={args.mesh}")
         print(f"{'='*70}")
 
-        for case_id, factory in CASE_REGISTRY.items():
-            case_config = factory()
+        for definition in CASE_DEFINITIONS:
+            case_config = normalize_case_config(
+                definition.factory(), source=definition.factory_source
+            )
             enable_post = not args.no_post
             run_case(case_config, mesh_factor, args.dry_run, enable_postprocess=enable_post, cli_args=args)
 
@@ -460,13 +513,19 @@ Examples:
         # Run single case
         case_id = resolve_case_id(args.case)
         if not case_id:
-            sys.exit(1)
+            return 2
 
         factory = CASE_REGISTRY[case_id]
-        case_config = factory()
+        definition = CASE_METADATA[case_id]
+        case_config = normalize_case_config(factory(), source=definition.factory_source)
         enable_post = not args.no_post
         run_case(case_config, mesh_factor, args.dry_run, enable_postprocess=enable_post, cli_args=args)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except (CaseConfigurationError, ValueError, RuntimeError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)

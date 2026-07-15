@@ -95,6 +95,7 @@ def create_case_02() -> CaseConfig:
         frp_sheets=[frp],
         fibres=None,
         subdomains=[],
+        solver_engine="multi",
         tolerance=1e-6,
         use_line_search=True,
         use_substepping=True,

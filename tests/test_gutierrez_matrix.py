@@ -29,8 +29,17 @@ def test_gutierrez_matrix_expected_configs(tmp_path):
     case03_bond_off = get("03_tensile_stn12", "bond-slip-off")
     assert case03_bond_off.status == "ok"
 
-    case08_default = get("08_beam_3pb_vvbs3_cfrp", "default")
-    failed = [result for result in results if result.status != "ok"]
-    if case08_default.status != "ok" and failed == [case08_default]:
-        pytest.xfail("Invalid FRP DOF mapping")
-    assert failed == []
+    assert get("03_tensile_stn12", "numba-off").status == "fail"
+    assert get("08_beam_3pb_vvbs3_cfrp", "bulk-elastic").status == "ok"
+    failed = {
+        (result.case_id, result.cfg_id)
+        for result in results
+        if result.status != "ok"
+    }
+    assert failed == {
+        ("03_tensile_stn12", "numba-off"),
+        ("08_beam_3pb_vvbs3_cfrp", "default"),
+        ("08_beam_3pb_vvbs3_cfrp", "bond-slip-off"),
+        ("08_beam_3pb_vvbs3_cfrp", "numba-on"),
+        ("08_beam_3pb_vvbs3_cfrp", "numba-off"),
+    }

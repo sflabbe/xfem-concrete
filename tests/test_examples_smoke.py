@@ -57,4 +57,4 @@ def test_examples_dry_run_overrides():
     combined_output = f"{result.stdout}\n{result.stderr}"
     assert "Active overrides:" in combined_output
     assert "concrete.model_type = elastic" in combined_output
-    assert "solver = multi" in combined_output
+    assert "solver_engine = multi" in combined_output

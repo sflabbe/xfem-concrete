@@ -5,6 +5,8 @@ Provides adapters to convert CaseConfig to XFEM solver inputs and execute simula
 """
 
 from typing import Tuple, Optional, Any, Dict, List
+import hashlib
+import json
 import numpy as np
 
 from examples.gutierrez_thesis.case_config import (
@@ -1063,6 +1065,21 @@ def run_case_solver(
             model.enable_bond_slip = cli_args.bond_slip == "on"
             print(f"Override: bond_slip = {cli_args.bond_slip} (via --bond-slip)")
 
+    # Registered examples are fail-closed at the adapter boundary as well as
+    # in the CLI.  Direct API callers therefore cannot bypass a known semantic
+    # engine/material mismatch.
+    from examples.gutierrez_thesis.catalog import CASE_METADATA, evaluate_compatibility
+
+    if case.case_id in CASE_METADATA:
+        compatibility = evaluate_compatibility(case, use_numba=bool(model.use_numba))
+        if not compatibility.supported:
+            raise CaseConfigurationError(
+                "engine_compatibility",
+                f"{case.solver_engine}/{case.concrete.model_type}/numba={bool(model.use_numba)}",
+                [compatibility.reason], case_id=case.case_id,
+                source=getattr(case, "_source", None),
+            )
+
     # Apply mesh factor
     nx = int(case.geometry.n_elem_x * mesh_factor)
     ny = int(case.geometry.n_elem_y * mesh_factor)
@@ -1414,6 +1431,23 @@ def run_case_solver(
     }
 
     # Postprocessing (FASE G)
+    provenance_overrides = list(getattr(case, "_overrides", ()))
+    if cli_args is not None and getattr(cli_args, "use_numba", False):
+        provenance_overrides.append({
+            "field": "use_numba", "previous": "auto", "effective": True,
+            "source": "CLI --use-numba",
+        })
+    elif cli_args is not None and getattr(cli_args, "no_numba", False):
+        provenance_overrides.append({
+            "field": "use_numba", "previous": "auto", "effective": False,
+            "source": "CLI --no-numba",
+        })
+    if cli_args is not None and getattr(cli_args, "bond_slip", None) is not None:
+        provenance_overrides.append({
+            "field": "bond_slip", "previous": "case default",
+            "effective": cli_args.bond_slip, "source": "CLI --bond-slip",
+        })
+
     result = AnalysisResult.from_solver_bundle(
         legacy_bundle,
         engine="multi" if use_multicrack else "single",
@@ -1421,6 +1455,18 @@ def run_case_solver(
         bond_layer_count=len(bond_layers or ()),
         use_numba=bool(model.use_numba),
         compat_mode=bool(case.compat_mode),
+        provenance={
+            "case_id": case.case_id,
+            "case_schema_version": case.schema_version,
+            "case_source": getattr(case, "_source", None),
+            "cli_overrides": provenance_overrides,
+            "canonical_config_sha256": hashlib.sha256(
+                json.dumps(
+                    case.to_dict(), sort_keys=True, separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+        },
     )
 
     if enable_postprocess:

@@ -30,7 +30,9 @@ pip install -e .
 pip install numba
 ```
 
-Numba provides ~28× speedup for bond-slip assembly and significant speedup for bulk constitutive kernels.
+Numba accelerates selected bond, cohesive, and bulk constitutive kernels. The
+element/Jacobian loops, sparse assembly, and linear solves remain Python/SciPy,
+so end-to-end speedup is case-dependent and the CLI reports support as partial.
 
 ### Run without install
 
@@ -48,34 +50,30 @@ python examples/run_gutierrez_beam.py --umax-mm 10 --nsteps 30 --nx 120 --ny 20
 python -m examples.gutierrez_thesis.run --list
 ```
 
-### Run a thesis case
+### Validate thesis definitions
 
 ```bash
-# Run T5A1 beam (Bosco 3-point bending)
-python -m examples.gutierrez_thesis.run --case t5a1 --mesh coarse
+# Validate all 13 aliases/factories without entering a solver
+python -m examples.gutierrez_thesis.run --case all --mesh coarse --dry-run
 
-# Run VVBS3 CFRP strengthened beam
-python -m examples.gutierrez_thesis.run --case vvbs3 --mesh medium
+# Supported elastic smoke families
+python -m examples.gutierrez_thesis.run --case pullout --dry-run
+python -m examples.gutierrez_thesis.run --case sspot --dry-run
 
-# Run Sorelli fibre-reinforced beam
-python -m examples.gutierrez_thesis.run --case sorelli --mesh fine
-
-# Run all cases (coarse mesh for speed)
-python -m examples.gutierrez_thesis.run --case all --mesh coarse
+# T5A1 is characterized but blocked before solve; this prints the reason
+python -m examples.gutierrez_thesis.run --case t5a1 --mesh coarse --dry-run
 ```
 
 ### Enable Numba acceleration
 
 ```bash
-# Auto-detect (default)
-python -m examples.gutierrez_thesis.run --case t5a1
-
-# Force enable
-python -m examples.gutierrez_thesis.run --case t5a1 --use-numba
-
-# Force disable
-python -m examples.gutierrez_thesis.run --case t5a1 --no-numba
+# Show effective partial support without solving
+python -m examples.gutierrez_thesis.run --case stn12 --use-numba --dry-run
 ```
+
+See `docs/examples.md` for the compatibility matrix. `cdp_full` multicrack
+cases currently fail closed because neither backend preserves that material
+contract; they no longer start a long, misleading solve.
 
 ---
 
@@ -95,40 +93,32 @@ All registered cases from the Gutiérrez (KIT, 2020) thesis are implemented as m
 | **01** | §5.2 | Pullout test (Lettow) | Bond-slip, segment masking |
 | **02** | §5.3 | FRP debonding (SSPOT) | FRP sheet, bilinear bond law |
 | **03** | §5.4 | Direct tension (STN12) | Multicrack, distributed cracking |
-| **04a** | §5.5.1 | 3PB beam T5A1 (Bosco) | Flexural cracking, validation |
-| **04b** | §5.5.1 | 3PB beam T6A1 (Bosco) | Flexural cracking |
-| **05** | §5.6.1 | Cyclic wall C1 | Cyclic loading, multicrack |
+| **04a** | §5.5.1 | 3PB beam T5A1 (Bosco) | Ambiguous definition; unsupported cdp_full/multi |
+| **04b** | §5.5.1 | 3PB beam T6A1 (Bosco) | Experimental; unsupported cdp_full/multi |
+| **05** | §5.6.1 | Cyclic wall C1 | Experimental; unsupported cdp_full/multi |
 | **06** | §6.2 | Fibre tensile test | Fibre bridging, Banholzer law |
-| **07** | §5.5.2 | 4PB beam (Jason 4PBT) | CFRP strengthening |
-| **08** | §5.5.3 | CFRP beam (VVBS3) | IC-debonding, validation |
-| **09** | §6.3 | Fibre beam (Sorelli) | Post-peak ductility, validation |
-| **10** | §5.6.2 | Cyclic wall C2 | Cyclic loading |
+| **07** | §5.5.2 | 4PB beam (Jason 4PBT) | Experimental; unsupported cdp_full/multi |
+| **08** | §5.5.3 | CFRP beam (VVBS3) | FRP defined; unsupported cdp_full/multi |
+| **09** | §6.3 | Fibre beam (Sorelli) | Synthetic reference; unsupported cdp_full/multi |
+| **10** | §5.6.2 | Cyclic wall C2 | Experimental; unsupported cdp_full/multi |
 
 ### Key Parameters per Case
 
-#### Case 04a: T5A1 Beam (Most Validated)
+#### Case 04a: T5A1 Beam (characterized, blocked)
 
 **Thesis Reference:**
 - Section: §5.5.1 - Three-point bending tests
 - Figure: Fig 5.20 - P–δ curve
 - Table: Table 5.10 - Material properties
 
-**Geometry:**
-- Dimensions: 1500×250×120 mm, span 1400 mm
-- Rebar: 2Ø16 mm (bottom), cover 30 mm
-
-**Material:**
-- Concrete: E = 31 GPa, fc = 35 MPa, ft = 3.2 MPa, Gf = 0.10 N/mm
-- Bond law: τmax = 15.0 MPa, s1 = 1.0 mm, s2 = 2.0 mm
-
-**Validation:**
-- Reference data: `validation/reference_data/t5a1.csv`
-- Test: `pytest tests/test_validation_curves.py::test_validate_t5a1_coarse`
-- Tolerance: |ΔPmax| < 10%, |ΔE| < 15%
+The factory/YAML describe 4000×400×200 mm with 4Ø12 bottom and 2Ø10 top;
+older README/reference placeholders describe 1500×250×120 mm with 2Ø16. The
+CSV is explicitly synthetic. No physical values were changed without a primary
+source. In addition, multicrack does not faithfully consume `cdp_full`.
 
 **Run:**
 ```bash
-python -m examples.gutierrez_thesis.run --case t5a1 --mesh coarse
+python -m examples.gutierrez_thesis.run --case t5a1 --mesh coarse --dry-run
 ```
 
 #### Case 08: VVBS3 CFRP Beam
@@ -153,7 +143,7 @@ python -m examples.gutierrez_thesis.run --case t5a1 --mesh coarse
 
 **Run:**
 ```bash
-python -m examples.gutierrez_thesis.run --case vvbs3 --mesh medium
+python -m examples.gutierrez_thesis.run --case vvbs3 --mesh medium --dry-run
 ```
 
 #### Case 09: Sorelli Fibre Beam
@@ -174,7 +164,7 @@ python -m examples.gutierrez_thesis.run --case vvbs3 --mesh medium
 
 **Run:**
 ```bash
-python -m examples.gutierrez_thesis.run --case sorelli --mesh fine
+python -m examples.gutierrez_thesis.run --case sorelli --mesh fine --dry-run
 ```
 
 ---
@@ -329,13 +319,9 @@ This prevents hanging DOFs in multicrack simulations.
 Sweep material/geometric parameters to study influence on response:
 
 ```bash
-# Sweep fracture energy Gf for T5A1 beam
+# Sweep bond strength on the supported elastic pullout path
 python -m examples.parametric.parametric_study \
-  --case t5a1 --param Gf --values 0.05,0.1,0.2 --mesh coarse
-
-# Sweep bond strength τmax for VVBS3 beam
-python -m examples.parametric.parametric_study \
-  --case vvbs3 --param tau_max --values 4.0,6.47,9.0 --plot
+  --case pullout --param tau_max --values 8.0,10.0,12.0 --mesh coarse
 
 # Available parameters: Gf, f_t, f_c, tau_max, s1, s2, n_bars, rho_fibre, etc.
 ```
@@ -346,23 +332,13 @@ python -m examples.parametric.parametric_study \
 
 ### 2. Bond Parameter Calibration
 
-Fit bond law parameters (τmax, s1, s2) to experimental P–δ curves:
+The historical calibration commands for VVBS3 are blocked until its
+`cdp_full` multicrack contract is supported. The module is retained for future
+use with provenance-bearing experimental data.
 
 ```bash
-# Calibrate VVBS3 FRP bond parameters
-python -m calibration.fit_bond_parameters \
-  --case vvbs3 \
-  --params tau_max,s1,s2 \
-  --init tau_max=6.47,s1=0.02,s2=0.25 \
-  --bounds 5-8,0.01-0.05,0.2-0.3 \
-  --method L-BFGS-B
-
-# Use global optimizer for robust fitting
-python -m calibration.fit_bond_parameters \
-  --case vvbs3 \
-  --params tau_max,s1 \
-  --method differential_evolution \
-  --max-iter 100
+# Inspect the CLI only; do not calibrate against placeholder CSVs
+python -m calibration.fit_bond_parameters --help
 ```
 
 **Output:** `calibration/results_<case>.json` (optimal parameters, convergence)
@@ -374,13 +350,9 @@ python -m calibration.fit_bond_parameters \
 Measure runtime, memory, and scaling across mesh sizes:
 
 ```bash
-# Benchmark single case with multiple meshes
+# Benchmark a supported case with multiple meshes
 python -m benchmarks.benchmark_scaling \
-  --case t5a1 --meshes coarse,medium,fine --plot
-
-# Benchmark all cases (fast meshes only)
-python -m benchmarks.benchmark_scaling \
-  --case all --meshes coarse,medium
+  --case pullout --meshes coarse,medium --plot
 
 # Bond-slip microbenchmark (Numba vs Python)
 python -m benchmarks.benchmark_bond_slip \
@@ -393,15 +365,15 @@ python -m benchmarks.benchmark_bond_slip \
 
 ### 4. Validation Curve Comparison
 
-Compare simulation results with experimental reference curves:
+The bundled curves are synthetic placeholders. These tests validate the
+comparison pipeline only and skip/xfail physical claims.
 
 ```bash
 # Run validation tests (requires simulation outputs)
 pytest tests/test_validation_curves.py -v -m slow
 
-# Example: Validate T5A1 beam
-python -m examples.gutierrez_thesis.run --case t5a1 --mesh coarse
-pytest tests/test_validation_curves.py::test_validate_t5a1_coarse -v -s
+# Characterize T5A1 without solving an incompatible path
+python -m examples.gutierrez_thesis.run --case t5a1 --mesh coarse --dry-run
 ```
 
 **Module:** `validation/compare_curves.py`

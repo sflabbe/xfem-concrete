@@ -549,6 +549,13 @@ def postprocess_results(
         crack = cracks_list[0] if cracks_list else None
         bond_states = results.reinforcement.get('bond_states')
         rebar_segs_canonical = results.reinforcement.get('segments')
+        # This postprocessor still needs two internal solver objects which are
+        # intentionally not public result fields. Keep that dependency behind
+        # the named compatibility adapter instead of accidental Mapping access.
+        legacy = results.to_legacy_dict()
+        bond_law = legacy.get('bond_law')
+        subdomain_mgr = legacy.get('subdomain_mgr')
+        cohesive_states = results.fields['cohesive_states']
     else:
         nodes = results['nodes']
         elems = results['elems']
@@ -558,8 +565,9 @@ def postprocess_results(
         cracks_list = results.get('cracks', [crack] if crack is not None else [])
         bond_states = results.get('bond_states', None)
         rebar_segs_canonical = results.get('rebar_segs', None)
-    bond_law = results.get('bond_law', None)
-    subdomain_mgr = results.get('subdomain_mgr', None)
+        bond_law = results.get('bond_law', None)
+        subdomain_mgr = results.get('subdomain_mgr', None)
+        cohesive_states = results.get('coh_states', None)
 
     # Load-displacement plot
     if case_config.outputs.save_load_displacement and len(history) > 0:
@@ -569,7 +577,7 @@ def postprocess_results(
     if cracks_list and case_config.outputs.save_crack_data:
         for i, c in enumerate(cracks_list):
             if c is not None and c.active:
-                crack_data = extract_crack_pattern(c, results.get('coh_states', None), nodes)
+                crack_data = extract_crack_pattern(c, cohesive_states, nodes)
                 print(f"  Crack #{i+1} tip: ({crack_data['tip'][0]*1e3:.1f}, {crack_data['tip'][1]*1e3:.1f}) mm")
 
     # Bond-slip profiles (if applicable)

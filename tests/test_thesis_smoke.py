@@ -27,6 +27,7 @@ try:
         RebarLayer, CEBFIPBondLaw,
     )
     from examples.gutierrez_thesis.solver_interface import run_case_solver
+    from xfem_clean.results import AnalysisResult
 except ImportError as e:
     pytest.skip(f"Import error: {e}", allow_module_level=True)
 
@@ -90,17 +91,16 @@ def test_case_01_pullout_smoke():
     bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
     # Validate
-    assert 'history' in bundle, "Bundle should have history"
-    assert len(bundle['history']) > 0, "History should not be empty"
+    assert isinstance(bundle, AnalysisResult)
+    assert bundle.steps, "History should not be empty"
 
     # Check for NaNs
-    history = bundle['history']
-    if isinstance(history[0], dict):
-        for row in history:
-            assert np.isfinite(row['u']), "u should be finite"
-            assert np.isfinite(row['P']), "P should be finite"
+    history = bundle.steps
+    for row in history:
+        assert np.isfinite(row['u']), "u should be finite"
+        assert np.isfinite(row['P']), "P should be finite"
 
-    print(f"  ✓ Case 01 smoke: {len(bundle['history'])} steps, no NaNs")
+    print(f"  ✓ Case 01 smoke: {len(bundle.steps)} steps, no NaNs")
 
 
 # =============================================================================
@@ -160,9 +160,9 @@ def test_case_02_frp_smoke():
 
     bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
-    assert 'history' in bundle
-    assert len(bundle['history']) > 0
-    print(f"  ✓ Case 02 smoke: {len(bundle['history'])} steps, no NaNs")
+    assert isinstance(bundle, AnalysisResult)
+    assert bundle.steps
+    print(f"  ✓ Case 02 smoke: {len(bundle.steps)} steps, no NaNs")
 
 
 # =============================================================================
@@ -222,9 +222,9 @@ def test_case_03_tensile_smoke():
 
     bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
-    assert 'history' in bundle
-    assert len(bundle['history']) > 0
-    print(f"  ✓ Case 03 smoke: {len(bundle['history'])} steps, no NaNs")
+    assert isinstance(bundle, AnalysisResult)
+    assert bundle.steps
+    print(f"  ✓ Case 03 smoke: {len(bundle.steps)} steps, no NaNs")
 
 
 # =============================================================================
@@ -284,9 +284,9 @@ def test_case_04_beam_smoke():
 
     bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
-    assert 'history' in bundle
-    assert len(bundle['history']) > 0
-    print(f"  ✓ Case 04 smoke: {len(bundle['history'])} steps, no NaNs")
+    assert isinstance(bundle, AnalysisResult)
+    assert bundle.steps
+    print(f"  ✓ Case 04 smoke: {len(bundle.steps)} steps, no NaNs")
 
 
 # =============================================================================
@@ -345,9 +345,9 @@ def test_case_05_wall_smoke():
 
     bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
-    assert 'history' in bundle
-    assert len(bundle['history']) > 0
-    print(f"  ✓ Case 05 smoke: {len(bundle['history'])} steps, no NaNs")
+    assert isinstance(bundle, AnalysisResult)
+    assert bundle.steps
+    print(f"  ✓ Case 05 smoke: {len(bundle.steps)} steps, no NaNs")
 
 
 # =============================================================================
@@ -407,9 +407,9 @@ def test_case_06_fibre_smoke():
 
     bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
-    assert 'history' in bundle
-    assert len(bundle['history']) > 0
-    print(f"  ✓ Case 06 smoke: {len(bundle['history'])} steps, no NaNs")
+    assert isinstance(bundle, AnalysisResult)
+    assert bundle.steps
+    print(f"  ✓ Case 06 smoke: {len(bundle.steps)} steps, no NaNs")
 
 
 # =============================================================================

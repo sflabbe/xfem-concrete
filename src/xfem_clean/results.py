@@ -71,6 +71,7 @@ class AnalysisResult(Mapping[str, Any]):
         use_numba: bool,
         compat_mode: bool,
         structured_warnings: tuple[Mapping[str, Any], ...] = (),
+        provenance: Mapping[str, Any] | None = None,
     ) -> "AnalysisResult":
         steps = normalize_history_rows(bundle.get("history"))
         cracks = tuple(bundle.get("cracks") or ())
@@ -110,6 +111,7 @@ class AnalysisResult(Mapping[str, Any]):
             "compat_mode": bool(compat_mode),
             "converged": bool(steps),
             "step_count": len(steps),
+            "provenance": dict(provenance or {}),
         }
         return cls(
             steps=steps,

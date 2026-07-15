@@ -169,6 +169,7 @@ def create_case_05() -> CaseConfig:
         outputs=outputs,
         rebar_layers=[rebar_h1, rebar_h2, rebar_v1],
         subdomains=[rigid_beam],
+        solver_engine="multi",
         tolerance=1e-6,
         use_line_search=True,
         use_substepping=True,

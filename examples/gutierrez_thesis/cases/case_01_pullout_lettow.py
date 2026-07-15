@@ -137,6 +137,7 @@ def create_case_01() -> CaseConfig:
         frp_sheets=[],
         fibres=None,
         subdomains=subdomains,
+        solver_engine="multi",
         max_steps=1000,
         tolerance=1e-6,
         use_line_search=True,

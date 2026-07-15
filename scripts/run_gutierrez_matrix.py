@@ -25,6 +25,7 @@ for path in (REPO_ROOT, SRC_ROOT):
 from examples.gutierrez_thesis.case_config import CyclicLoading, MonotonicLoading
 from examples.gutierrez_thesis.run import CASE_REGISTRY
 from examples.gutierrez_thesis.solver_interface import _should_use_multicrack, run_case_solver
+from xfem_clean.results import AnalysisResult
 
 
 @dataclass(frozen=True)
@@ -155,10 +156,10 @@ def _extract_history_metrics(history: Any) -> tuple[int, float | None, bool, str
     return nsteps, max_abs_p, first_nonfinite_tag != "", first_nonfinite_tag
 
 
-def _inspect_outputs(results: dict[str, Any]) -> tuple[int, float | None, bool, str]:
-    nsteps, max_abs_p, any_nonfinite, tag = _extract_history_metrics(results.get("history"))
+def _inspect_outputs(results: AnalysisResult) -> tuple[int, float | None, bool, str]:
+    nsteps, max_abs_p, any_nonfinite, tag = _extract_history_metrics(results.steps)
     if not any_nonfinite:
-        u_vec = results.get("u")
+        u_vec = results.fields["displacement_m"]
         if u_vec is not None and not np.isfinite(np.asarray(u_vec, dtype=float)).all():
             any_nonfinite = True
             tag = "u"
@@ -169,7 +170,7 @@ def _build_matrix(case_id: str, case_config) -> list[MatrixConfig]:
     configs = [
         MatrixConfig(
             cfg_id="default",
-            solver="auto",
+            solver=case_config.solver_engine,
             bulk=case_config.concrete.model_type,
             bond_slip=None,
             use_numba="auto",
@@ -180,7 +181,7 @@ def _build_matrix(case_id: str, case_config) -> list[MatrixConfig]:
         configs.append(
             MatrixConfig(
                 cfg_id="bond-slip-off",
-                solver="auto",
+                solver=case_config.solver_engine,
                 bulk=case_config.concrete.model_type,
                 bond_slip="off",
                 use_numba="auto",
@@ -191,7 +192,7 @@ def _build_matrix(case_id: str, case_config) -> list[MatrixConfig]:
         configs.append(
             MatrixConfig(
                 cfg_id="bulk-elastic",
-                solver="auto",
+                solver=case_config.solver_engine,
                 bulk="elastic",
                 bond_slip=None,
                 use_numba="auto",
@@ -203,14 +204,14 @@ def _build_matrix(case_id: str, case_config) -> list[MatrixConfig]:
             [
                 MatrixConfig(
                     cfg_id="numba-on",
-                    solver="auto",
+                    solver=case_config.solver_engine,
                     bulk=case_config.concrete.model_type,
                     bond_slip=None,
                     use_numba="on",
                 ),
                 MatrixConfig(
                     cfg_id="numba-off",
-                    solver="auto",
+                    solver=case_config.solver_engine,
                     bulk=case_config.concrete.model_type,
                     bond_slip=None,
                     use_numba="off",
