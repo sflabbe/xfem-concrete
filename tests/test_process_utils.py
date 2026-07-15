@@ -22,6 +22,35 @@ from tests.process_utils import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_TIMEOUT_PAYLOAD = r"""
+import json, os, pathlib, subprocess, sys, time
+readiness = pathlib.Path(sys.argv[1])
+marker, stdout_marker, stderr_marker = sys.argv[2:5]
+volume = int(sys.argv[5])
+with_grandchild = sys.argv[6] == "1"
+grandchild = None
+if with_grandchild:
+    grandchild = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(120)", marker]
+    )
+if stdout_marker:
+    sys.stdout.write(stdout_marker + "\n")
+if volume:
+    sys.stdout.write("O" * volume)
+sys.stdout.flush()
+if stderr_marker:
+    sys.stderr.write(stderr_marker + "\n")
+if volume:
+    sys.stderr.write("E" * volume)
+sys.stderr.flush()
+temporary = readiness.with_suffix(".tmp")
+temporary.write_text(json.dumps({
+    "child_pid": os.getpid(),
+    "grandchild_pid": grandchild.pid if grandchild else None,
+}), encoding="utf-8")
+temporary.replace(readiness)
+time.sleep(120)
+"""
 
 
 def _pid_exists(pid: int) -> bool:
@@ -55,16 +84,53 @@ def _marker_pids(marker: str) -> list[int]:
     return matches
 
 
+def _timeout_capture(
+    tmp_path: Path,
+    *,
+    stdout_marker: str = "",
+    stderr_marker: str = "",
+    volume: int = 0,
+    with_grandchild: bool = False,
+):
+    marker = f"xfem-timeout-{uuid.uuid4()}"
+    readiness = tmp_path / f"{marker}.json"
+    command = [
+        sys.executable,
+        "-u",
+        "-c",
+        _TIMEOUT_PAYLOAD,
+        str(readiness),
+        marker,
+        stdout_marker,
+        stderr_marker,
+        str(volume),
+        "1" if with_grandchild else "0",
+    ]
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        run_process(
+            command,
+            cwd=REPO_ROOT,
+            timeout=0.4,
+            terminate_grace=0.2,
+        )
+    assert readiness.exists(), "child never reached the independent readiness channel"
+    return caught.value, json.loads(readiness.read_text(encoding="utf-8")), marker
+
+
 def test_short_process_is_reaped():
     result = run_process(
-        [sys.executable, "-c", "print('owned-ok')"],
+        [
+            sys.executable,
+            "-c",
+            "import sys; print('owned-ok-ñ'); print('owned-err-λ', file=sys.stderr)",
+        ],
         cwd=REPO_ROOT,
         timeout=5,
     )
 
     assert result.returncode == 0
-    assert result.stdout == "owned-ok\n"
-    assert result.stderr == ""
+    assert result.stdout == "owned-ok-ñ\n"
+    assert result.stderr == "owned-err-λ\n"
     assert registered_process_count() == 0
 
 
@@ -85,25 +151,47 @@ def test_failed_process_preserves_return_code_and_diagnostics():
     assert registered_process_count() == 0
 
 
+def test_timeout_preserves_stdout_and_output_alias(tmp_path: Path):
+    exc, _, _ = _timeout_capture(tmp_path, stdout_marker="salida-ñ-λ")
+
+    assert exc.stdout == "salida-ñ-λ\n"
+    assert exc.output == exc.stdout
+    assert exc.stderr == ""
+    assert isinstance(exc.stdout, str)
+
+
+def test_timeout_preserves_stderr(tmp_path: Path):
+    exc, _, _ = _timeout_capture(tmp_path, stderr_marker="diagnóstico-stderr")
+
+    assert exc.stdout == ""
+    assert exc.stderr == "diagnóstico-stderr\n"
+    assert isinstance(exc.stderr, str)
+
+
+def test_timeout_preserves_both_streams_without_pipe_deadlock(tmp_path: Path):
+    volume = 128 * 1024
+    exc, _, _ = _timeout_capture(
+        tmp_path,
+        stdout_marker="stdout-distinct",
+        stderr_marker="stderr-distinct",
+        volume=volume,
+    )
+
+    assert exc.stdout == "stdout-distinct\n" + "O" * volume
+    assert exc.stderr == "stderr-distinct\n" + "E" * volume
+
+
 @pytest.mark.skipif(os.name != "posix", reason="strong process-group cleanup is POSIX-only")
-def test_internal_timeout_kills_child_and_grandchild():
-    marker = f"xfem-timeout-{uuid.uuid4()}"
-    payload = r"""
-import json, os, subprocess, sys, time
-grandchild = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)", sys.argv[1]])
-print(json.dumps({"child_pid": os.getpid(), "grandchild_pid": grandchild.pid}), flush=True)
-time.sleep(120)
-"""
+def test_internal_timeout_kills_child_and_grandchild(tmp_path: Path):
+    exc, pids, marker = _timeout_capture(
+        tmp_path,
+        stdout_marker="diagnostic-not-readiness",
+        stderr_marker="grandchild-diagnostic",
+        with_grandchild=True,
+    )
 
-    with pytest.raises(subprocess.TimeoutExpired) as caught:
-        run_process(
-            [sys.executable, "-u", "-c", payload, marker],
-            cwd=REPO_ROOT,
-            timeout=0.25,
-            terminate_grace=0.2,
-        )
-
-    pids = json.loads(caught.value.stdout.strip())
+    assert exc.stdout == "diagnostic-not-readiness\n"
+    assert exc.stderr == "grandchild-diagnostic\n"
     _wait_until(
         lambda: not _pid_exists(pids["child_pid"])
         and not _pid_exists(pids["grandchild_pid"]),

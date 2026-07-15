@@ -12,15 +12,18 @@ import atexit
 import os
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
-from typing import Mapping, Sequence
+from typing import BinaryIO, Mapping, Sequence
 
 
 DEFAULT_TERMINATE_GRACE = 1.0
+OUTPUT_ENCODING = "utf-8"
+OUTPUT_ERRORS = "strict"
 _CLEANUP_SIGNALS = tuple(
     signum for signum in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None))
     if signum is not None
@@ -29,7 +32,7 @@ _CLEANUP_SIGNALS = tuple(
 
 @dataclass(frozen=True)
 class _OwnedProcess:
-    process: subprocess.Popen[str]
+    process: subprocess.Popen[bytes]
     process_group: int
     command: tuple[str, ...]
 
@@ -130,7 +133,7 @@ def _signal_owned(owned: _OwnedProcess, signum: int) -> None:
         pass
 
 
-def _wait_direct_child(process: subprocess.Popen[str], timeout: float) -> None:
+def _wait_direct_child(process: subprocess.Popen[bytes], timeout: float) -> None:
     try:
         process.wait(timeout=max(0.0, timeout))
     except subprocess.TimeoutExpired:
@@ -180,6 +183,8 @@ def _spawn_owned(
     *,
     cwd: Path,
     env: Mapping[str, str] | None,
+    stdout: BinaryIO,
+    stderr: BinaryIO,
 ) -> _OwnedProcess:
     install_process_cleanup()
     popen_kwargs: dict[str, object] = {}
@@ -197,9 +202,8 @@ def _spawn_owned(
                 command,
                 cwd=cwd,
                 env=env,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=stdout,
+                stderr=stderr,
                 **popen_kwargs,
             )
             owned = _OwnedProcess(
@@ -214,6 +218,11 @@ def _spawn_owned(
     return owned
 
 
+def _read_capture(stream: BinaryIO) -> str:
+    stream.seek(0)
+    return stream.read().decode(OUTPUT_ENCODING, errors=OUTPUT_ERRORS)
+
+
 def run_process(
     command: Sequence[str],
     *,
@@ -223,35 +232,47 @@ def run_process(
     check: bool = False,
     terminate_grace: float = DEFAULT_TERMINATE_GRACE,
 ) -> subprocess.CompletedProcess[str]:
-    """Run an owned command, capture diagnostics, and reap its complete group."""
-    owned = _spawn_owned(command, cwd=cwd, env=env)
-    process = owned.process
-    try:
+    """Run an owned command and capture UTF-8 diagnostics from its complete group."""
+    with tempfile.TemporaryFile(mode="w+b") as stdout_capture, tempfile.TemporaryFile(
+        mode="w+b"
+    ) as stderr_capture:
+        owned = _spawn_owned(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=stdout_capture,
+            stderr=stderr_capture,
+        )
+        process = owned.process
         try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            _terminate_owned(owned, terminate_grace=terminate_grace)
-            stdout, stderr = process.communicate()
-            raise subprocess.TimeoutExpired(
-                command,
-                timeout,
-                output=stdout,
-                stderr=stderr,
-            ) from exc
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                _terminate_owned(owned, terminate_grace=terminate_grace)
+                stdout = _read_capture(stdout_capture)
+                stderr = _read_capture(stderr_capture)
+                raise subprocess.TimeoutExpired(
+                    command,
+                    timeout,
+                    output=stdout,
+                    stderr=stderr,
+                ) from exc
 
-        # A command that exits while leaving descendants behind still owns them.
-        if os.name == "posix" and _group_alive(owned.process_group):
-            _terminate_owned(owned, terminate_grace=terminate_grace)
+            # A command that exits while leaving descendants behind still owns them.
+            if os.name == "posix" and _group_alive(owned.process_group):
+                _terminate_owned(owned, terminate_grace=terminate_grace)
 
-        completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
-        if check and process.returncode:
-            raise subprocess.CalledProcessError(
-                process.returncode, command, output=stdout, stderr=stderr,
-            )
-        return completed
-    except BaseException:
-        _terminate_owned(owned, terminate_grace=terminate_grace)
-        raise
-    finally:
-        if process.poll() is not None:
-            _REGISTRY.unregister(owned)
+            stdout = _read_capture(stdout_capture)
+            stderr = _read_capture(stderr_capture)
+            completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            if check and process.returncode:
+                raise subprocess.CalledProcessError(
+                    process.returncode, command, output=stdout, stderr=stderr,
+                )
+            return completed
+        except BaseException:
+            _terminate_owned(owned, terminate_grace=terminate_grace)
+            raise
+        finally:
+            if process.poll() is not None:
+                _REGISTRY.unregister(owned)

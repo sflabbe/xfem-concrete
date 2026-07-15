@@ -4,17 +4,22 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import warnings
 from pathlib import Path
 
 import pytest
 
+import scripts.regression_manifest as regression_manifest
 from scripts.regression_manifest import (
+    CollectionError,
     REFERENCE,
     _compare,
+    _collected_test_count,
     build_manifest,
     canonical_json_bytes,
     compare_manifests,
+    main,
     semantic_hash,
     serialize_manifest,
 )
@@ -43,6 +48,110 @@ def generated_manifest():
 
 def test_canonical_regression_manifest(generated_manifest, reference_manifest):
     assert compare_manifests(generated_manifest, reference_manifest) == []
+    assert isinstance(generated_manifest["environment"]["collected_tests"], int)
+    assert generated_manifest["environment"]["collected_tests"] > 0
+
+
+def test_collection_count_parses_successful_pytest_output(monkeypatch):
+    completed = subprocess.CompletedProcess(
+        ["pytest"], 0, "controlled node ids\n17 tests collected in 0.12s\n", "",
+    )
+    monkeypatch.setattr(regression_manifest, "run_process", lambda *args, **kwargs: completed)
+
+    assert _collected_test_count() == 17
+
+
+def test_collection_nonzero_exit_preserves_diagnostics(monkeypatch):
+    completed = subprocess.CompletedProcess(
+        ["pytest"], 3, "collection-stdout", "collection-stderr",
+    )
+    monkeypatch.setenv("PYTHONWARNINGS", "error::DeprecationWarning")
+    monkeypatch.setattr(regression_manifest, "run_process", lambda *args, **kwargs: completed)
+
+    with pytest.raises(CollectionError) as caught:
+        _collected_test_count()
+
+    message = str(caught.value)
+    assert "pytest collection failed" in message
+    assert "returncode: 3" in message
+    assert "collection-stdout" in message
+    assert "collection-stderr" in message
+    assert "PYTHONWARNINGS: error::DeprecationWarning" in message
+    assert f"command: {regression_manifest.sys.executable} -m pytest --collect-only -q" in message
+
+
+@pytest.mark.parametrize(
+    ("stdout", "reason"),
+    [
+        ("collection finished without a summary", "no parseable count"),
+        ("0 tests collected in 0.01s\n", "unexpectedly found zero tests"),
+    ],
+)
+def test_collection_rejects_untrustworthy_count(monkeypatch, stdout, reason):
+    completed = subprocess.CompletedProcess(["pytest"], 0, stdout, "")
+    monkeypatch.setattr(regression_manifest, "run_process", lambda *args, **kwargs: completed)
+
+    with pytest.raises(CollectionError, match=reason):
+        _collected_test_count()
+
+
+def test_collection_warning_promoted_to_error_is_not_swallowed(monkeypatch):
+    completed = subprocess.CompletedProcess(
+        ["pytest"],
+        1,
+        "",
+        "DeprecationWarning: fatal collection warning",
+    )
+    monkeypatch.setenv("PYTHONWARNINGS", "error::DeprecationWarning")
+    monkeypatch.setattr(regression_manifest, "run_process", lambda *args, **kwargs: completed)
+
+    with pytest.raises(CollectionError, match="fatal collection warning"):
+        _collected_test_count()
+
+
+def test_cli_collection_failure_is_nonzero_and_never_prints_ok(monkeypatch, capsys):
+    def fail_collection():
+        raise CollectionError("returncode: 4\nstdout:\nbad-out\nstderr:\nbad-err")
+
+    monkeypatch.setattr(regression_manifest, "build_manifest", fail_collection)
+
+    assert main([]) == 2
+    captured = capsys.readouterr()
+    assert "manifest OK" not in captured.out + captured.err
+    assert "bad-out" in captured.err
+    assert "bad-err" in captured.err
+
+
+def test_cli_success_requires_integer_count(
+    monkeypatch, capsys, tmp_path, reference_manifest,
+):
+    manifest = copy.deepcopy(reference_manifest)
+    manifest["environment"] = {"collected_tests": 17}
+    reference = tmp_path / "reference.json"
+    reference.write_text(serialize_manifest(reference_manifest), encoding="utf-8")
+    monkeypatch.setattr(regression_manifest, "build_manifest", lambda: manifest)
+    monkeypatch.setattr(regression_manifest, "REFERENCE", reference)
+
+    assert main([]) == 0
+    captured = capsys.readouterr()
+    assert "manifest OK: 8 probes, 17 tests collected" in captured.out
+
+
+def test_cli_comparison_failure_is_nonzero(
+    monkeypatch, capsys, tmp_path, reference_manifest,
+):
+    manifest = copy.deepcopy(reference_manifest)
+    manifest["environment"] = {"collected_tests": 17}
+    manifest["probes"]["elastic_single"]["load_N"] *= 2.0
+    reference = tmp_path / "reference.json"
+    reference.write_text(serialize_manifest(reference_manifest), encoding="utf-8")
+    monkeypatch.setattr(regression_manifest, "build_manifest", lambda: manifest)
+    monkeypatch.setattr(regression_manifest, "REFERENCE", reference)
+
+    assert main([]) == 1
+    captured = capsys.readouterr()
+    assert "manifest OK" not in captured.out + captured.err
+    assert "Regression manifest mismatch" in captured.err
 
 
 def test_machine_roundoff_does_not_break_regression(reference_manifest):

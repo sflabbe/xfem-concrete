@@ -12,6 +12,7 @@ import math
 import os
 import platform
 import re
+import shlex
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -120,18 +121,49 @@ def _dependency_versions():
     return found
 
 
+class CollectionError(RuntimeError):
+    """Pytest collection failed or did not produce a trustworthy count."""
+
+
+def _collection_diagnostic(command, completed, env, reason):
+    warnings_setting = env.get("PYTHONWARNINGS", "<unset>")
+    return (
+        f"{reason}\n"
+        f"command: {shlex.join(command)}\n"
+        f"returncode: {completed.returncode}\n"
+        f"PYTHONWARNINGS: {warnings_setting}\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
+
+
 def _collected_test_count():
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC)
+    command = [sys.executable, "-m", "pytest", "--collect-only", "-q"]
     completed = run_process(
-        [sys.executable, "-m", "pytest", "--collect-only", "-q"],
+        command,
         cwd=ROOT,
         env=env,
         timeout=120,
         check=False,
     )
-    match = re.search(r"(\d+) tests? collected", completed.stdout + completed.stderr)
-    return int(match.group(1)) if match else None
+    if completed.returncode != 0:
+        raise CollectionError(_collection_diagnostic(
+            command, completed, env, "pytest collection failed",
+        ))
+    output = completed.stdout + completed.stderr
+    match = re.search(r"(?m)^(\d+) tests? collected(?: in [^\n]+)?$", output)
+    if match is None:
+        raise CollectionError(_collection_diagnostic(
+            command, completed, env, "pytest collection output has no parseable count",
+        ))
+    count = int(match.group(1))
+    if count == 0:
+        raise CollectionError(_collection_diagnostic(
+            command, completed, env, "pytest collection unexpectedly found zero tests",
+        ))
+    return count
 
 
 def _model():
@@ -398,11 +430,15 @@ def compare_manifests(actual, expected):
     return errors
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--json", action="store_true", help="print the generated manifest")
-    args = parser.parse_args()
-    manifest = build_manifest()
+    args = parser.parse_args(argv)
+    try:
+        manifest = build_manifest()
+    except CollectionError as exc:
+        print(f"Regression manifest collection failed:\n{exc}", file=sys.stderr)
+        return 2
     if args.json:
         print(serialize_manifest(manifest), end="")
     reference = json.loads(REFERENCE.read_text(encoding="utf-8"))
