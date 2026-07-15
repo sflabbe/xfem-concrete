@@ -8,6 +8,8 @@ from typing import Tuple
 
 import numpy as np
 
+from xfem_clean.utils.numpy_compat import trapezoid
+
 # -----------------------------
 # Cohesive bilinear law (Mode I)
 # -----------------------------
@@ -77,7 +79,7 @@ class CohesiveLaw:
         # Dimensionless integral I = ∫_0^1 f(x) dx for the Reinhardt curve (numerical quadrature).
         xs = np.linspace(0.0, 1.0, int(n))
         fx = (1.0 + (c1 * xs) ** 3) * np.exp(-c2 * xs) - xs * (1.0 + c1 ** 3) * math.exp(-c2)
-        return float(np.trapz(fx, xs))
+        return float(trapezoid(fx, xs))
 
     @property
     def delta0(self) -> float:
@@ -581,7 +583,7 @@ def cohesive_fracture_energy(law: CohesiveLaw, delta_max: float, n_quad: int = 2
         xs = np.linspace(0.0, wmax / wc, int(max(16, n_quad)))
         fx = (1.0 + (c1 * xs) ** 3) * np.exp(-c2 * xs) - xs * (1.0 + c1**3) * math.exp(-c2)
         t = ft * fx
-        G_soft = float(np.trapz(t, xs)) * wc
+        G_soft = float(trapezoid(t, xs)) * wc
         return float(G_el + G_soft)
 
     # Bilinear: closed form

@@ -1,11 +1,14 @@
 {
-  "schema_version": 1,
-  "provenance": {
-    "created": "2026-07-15",
-    "case09_prior_results": "invalid: density was multiplied by 10000 twice",
-    "numerical_policy": "All probes must remain stable except an explicitly reviewed golden update."
+  "canonicalization": {
+    "encoding": "UTF-8",
+    "field_order": "lexicographic",
+    "float_policy": "15 significant decimal digits; -0 is 0; NaN/+Inf/-Inf are tagged strings",
+    "format": "JSON",
+    "hash_scope": "schema, provenance, discrete probes, metric-to-tolerance map, tolerances",
+    "newline": "LF",
+    "record_order": "canonical-value",
+    "version": 1
   },
-  "semantic_sha256": "4e6c1a892c69099eea344336deb38689fc728a703ebf4640bb769afef25912f6",
   "probes": {
     "configuration": {
       "bond_layer_count": 1,
@@ -14,8 +17,16 @@
       "result_schema_version": 1
     },
     "csv_output": {
-      "rows": 2,
-      "sha256": "49ee5cc9ee4cfd887b11795792c6dc77d33fc4053b16b4917718a67b7d486663"
+      "columns": [
+        "u_m",
+        "P_N"
+      ],
+      "last_load_N": 2552.1731993725325,
+      "last_u_m": 1e-06,
+      "newline": "LF",
+      "origin_load_N": 0.0,
+      "origin_u_m": 0.0,
+      "rows": 2
     },
     "cyclic_reduced": {
       "max_displacement_m": 1e-05,
@@ -52,6 +63,35 @@
       "slip_m": 0.0005,
       "stress_Pa": 9675859.46729204,
       "tangent_Pa_m": 19351718934.58408
+    }
+  },
+  "provenance": {
+    "case09_prior_results": "invalid: density was multiplied by 10000 twice",
+    "created": "2026-07-15",
+    "numerical_policy": "Floating probes use named rtol/atol comparisons; the canonical hash covers only discrete metadata and the numerical comparison contract."
+  },
+  "schema_version": 2,
+  "semantic_sha256": "d3cb0d32ade091e7390a711ca705636cb2730c5ac2097348987cc496af60773c",
+  "tolerances": {
+    "constitutive": {
+      "atol": 1e-15,
+      "rtol": 1e-12
+    },
+    "displacement": {
+      "atol": 1e-15,
+      "rtol": 1e-12
+    },
+    "exact_numeric": {
+      "atol": 0.0,
+      "rtol": 0.0
+    },
+    "solver_load": {
+      "atol": 1e-12,
+      "rtol": 1e-08
+    },
+    "work": {
+      "atol": 1e-15,
+      "rtol": 0.0
     }
   }
 }

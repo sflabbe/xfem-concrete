@@ -28,6 +28,8 @@ import sys
 import os
 import pytest
 
+from tests.process_utils import install_process_cleanup
+
 # Add repo root and src/ to path for module imports
 repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 src_path = os.path.join(repo_root, 'src')
@@ -53,6 +55,7 @@ def pytest_addoption(parser):
 
 def pytest_configure(config):
     """Register the 'slow' marker."""
+    install_process_cleanup()
     config.addinivalue_line(
         "markers",
         "slow: marks tests as slow (deselect with -m 'not slow')"
