@@ -1135,19 +1135,18 @@ def run_analysis_xfem_multicrack(
     # Rebar segments
     rebar_segs = None
     if bond_layers is not None and len(bond_layers) > 0:
-        try:
-            seg_list = []
-            for layer in bond_layers:
-                seg = getattr(layer, "segments", None)
-                if seg is None:
-                    continue
-                seg = np.asarray(seg, dtype=float)
-                if seg.ndim == 2 and seg.shape[1] >= 2 and seg.shape[0] > 0:
-                    seg_list.append(seg)
-            if len(seg_list) > 0:
-                rebar_segs = np.vstack(seg_list)
-        except Exception:
-            rebar_segs = None
+        seg_list = []
+        for index, layer in enumerate(bond_layers):
+            seg = getattr(layer, "segments", None)
+            if seg is None:
+                raise ValueError(f"Invalid bond layer {index}: segments are required")
+            seg = np.asarray(seg, dtype=float)
+            if seg.ndim != 2 or seg.shape[1] < 2 or seg.shape[0] == 0:
+                raise ValueError(
+                    f"Invalid bond layer {index}: expected non-empty 2D segments, got {seg.shape}"
+                )
+            seg_list.append(seg)
+        rebar_segs = np.vstack(seg_list)
 
     if rebar_segs is None:
         rebar_segs = prepare_rebar_segments(nodes, cover=model.cover)

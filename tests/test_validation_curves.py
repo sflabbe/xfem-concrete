@@ -241,7 +241,7 @@ def test_generate_validation_summary():
             results[case_id] = metrics
             print(f"✓ Processed {case_id}")
         except Exception as e:
-            print(f"✗ Error processing {case_id}: {e}")
+            raise AssertionError(f"Error processing validation output for {case_id}") from e
 
     if results:
         save_validation_summary(results, output_file="validation/summary_validation.csv")

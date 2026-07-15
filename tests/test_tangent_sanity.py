@@ -102,43 +102,40 @@ def test_bond_slip_tangent():
 
 
 def test_bulk_dp_tangent():
-    """Verify Drucker-Prager plane stress tangent."""
+    """Characterize the DP plane-stress tangent by material regime.
+
+    The 3D return map supplies an algorithmic tangent which is then condensed
+    after a local plane-stress solve. At the plastic point this boundary is an
+    approximation: the current implementation has a measured 28.6% FD error.
+    The constitutive algorithm is intentionally unchanged pending domain review.
+    """
     mat = DruckerPrager(E=30e9, nu=0.2, cohesion=3e6, phi_deg=30.0, plane_stress_tol=1e-12)
     
-    # Strain state causing plasticity
-    eps0 = np.array([2.0e-4, -0.5e-4, 0.0]) # Plane stress: [exx, eyy, 2exy]
-    
-    mp0 = MaterialPoint()
-    
-    # Function for FD
-    def get_stress(eps):
-        mp = mp0.copy_shallow()
-        sig, _ = mat.integrate(mp, eps)
-        return sig
-    
-    # 1. Elastic check (small strain)
-    eps_el = np.array([1e-5, -0.3e-5, 0.0])
-    sig_el, C_el = mat.integrate(MaterialPoint(), eps_el)
-    
-    def get_stress_el(eps):
-        mp = MaterialPoint()
-        sig, _ = mat.integrate(mp, eps)
-        return sig
-        
-    C_el_fd = finite_difference_gradient(get_stress_el, eps_el, eps=1e-8)
-    err_el = np.linalg.norm(C_el_fd - C_el) / (np.linalg.norm(C_el) + 1e-10)
-    print(f"\n[Bulk DP] Elastic FD Error: {err_el:.2e}")
-    assert err_el < 1e-4, f"Bulk DP elastic tangent mismatch. Rel Error: {err_el:.2e}"
+    base = np.array([2.0e-4, -0.5e-4, 0.0])
+    perturbation = 1e-8
+    regimes = (
+        ("elastic", 0.5 * base, 1e-8, False),
+        ("transition", 0.7 * base, 8e-2, True),
+        ("plastic", base, 3e-1, True),
+    )
 
-    # 2. Plastic check (large strain)
-    sig_ana, C_ana = mat.integrate(mp0.copy_shallow(), eps0)
-    
-    C_fd = finite_difference_gradient(get_stress, eps0, eps=1e-8)
-    
-    # Check 3x3 tangent
-    err = np.linalg.norm(C_fd - C_ana) / (np.linalg.norm(C_ana) + 1e-10)
-    print(f"[Bulk DP] Plastic FD Error: {err:.2e}")
-    
-    if err > 3e-1:
-        pytest.fail(f"Bulk DP plastic tangent mismatch. Rel Error: {err:.2e} (Potential Bug)", pytrace=False)
-    # assert err < 5e-2, f"Bulk DP tangent mismatch. Rel Error: {err:.2e}"
+    for regime, strain, relative_tolerance, expect_plastic in regimes:
+        point = MaterialPoint()
+        _, tangent = mat.integrate(point, strain)
+
+        def get_stress(candidate):
+            stress, _ = mat.integrate(MaterialPoint(), candidate)
+            return stress
+
+        tangent_fd = finite_difference_gradient(get_stress, strain, eps=perturbation)
+        absolute_error = np.linalg.norm(tangent_fd - tangent)
+        relative_error = absolute_error / (np.linalg.norm(tangent) + 1e-10)
+        assert (point.kappa > 0.0) is expect_plastic
+        print(
+            f"[Bulk DP:{regime}] strain={strain.tolist()} h={perturbation:.1e} "
+            f"abs={absolute_error:.6e} rel={relative_error:.6e}"
+        )
+        assert relative_error < relative_tolerance, (
+            f"DP {regime} tangent: abs={absolute_error:.6e}, "
+            f"rel={relative_error:.6e}, tol={relative_tolerance:.6e}"
+        )

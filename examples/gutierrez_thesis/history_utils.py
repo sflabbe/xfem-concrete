@@ -12,9 +12,10 @@ History formats supported:
 from typing import Dict, List, Any, Union, Optional
 import numpy as np
 from xfem_clean.utils.numpy_compat import trapezoid
+from xfem_clean.results import AnalysisResult, normalize_history_rows
 
 
-def history_to_arrays(history: Union[List, np.ndarray]) -> Dict[str, np.ndarray]:
+def history_to_arrays(history: Union[List, np.ndarray, AnalysisResult]) -> Dict[str, np.ndarray]:
     """
     Convert history to standardized numpy arrays.
 
@@ -51,7 +52,8 @@ def history_to_arrays(history: Union[List, np.ndarray]) -> Dict[str, np.ndarray]
     >>> arrays = history_to_arrays(history_dict)
     >>> arrays['ncr']  # [0, 1]
     """
-    if not history or len(history) == 0:
+    rows = history.steps if isinstance(history, AnalysisResult) else normalize_history_rows(history)
+    if not rows:
         # Empty history
         return {
             'step': np.array([], dtype=int),
@@ -62,56 +64,18 @@ def history_to_arrays(history: Union[List, np.ndarray]) -> Dict[str, np.ndarray]
             'extras': {},
         }
 
-    # Detect format
-    first_row = history[0]
-    is_dict_format = isinstance(first_row, dict)
+    step = np.array([row.get('step', i) for i, row in enumerate(rows)], dtype=int)
+    u = np.array([row.get('u', 0.0) for row in rows], dtype=float)
+    P = np.array([row.get('P', 0.0) for row in rows], dtype=float)
+    M = np.array([row.get('M', np.nan) for row in rows], dtype=float)
+    ncr = np.array([row.get('ncr', 0) for row in rows], dtype=int)
 
-    if is_dict_format:
-        # Dict format: extract keys
-        n_rows = len(history)
-
-        # Extract standard keys
-        step = np.array([row.get('step', i) for i, row in enumerate(history)], dtype=int)
-        u = np.array([row.get('u', 0.0) for row in history])
-        P = np.array([row.get('P', 0.0) for row in history])
-        M = np.array([row.get('M', np.nan) for row in history])
-        ncr = np.array([row.get('ncr', 0) for row in history], dtype=int)
-
-        # Collect extra keys (beyond standard set)
-        standard_keys = {'step', 'u', 'P', 'M', 'ncr'}
-        all_keys = set()
-        for row in history:
-            all_keys.update(row.keys())
-        extra_keys = all_keys - standard_keys
-
-        extras = {}
-        for key in extra_keys:
-            extras[key] = np.array([row.get(key, np.nan) for row in history])
-
-    else:
-        # Numeric format: columns [step, u, P, M?, ...]
-        history_arr = np.array(history)
-        n_rows, n_cols = history_arr.shape
-
-        # Extract standard columns
-        step = history_arr[:, 0].astype(int)  # Column 0: step
-        u = history_arr[:, 1]                 # Column 1: displacement (m)
-        P = history_arr[:, 2]                 # Column 2: load (N)
-
-        # Column 3: moment (if present)
-        if n_cols > 3:
-            M = history_arr[:, 3]
-        else:
-            M = np.full(n_rows, np.nan)
-
-        # Number of cracks: not available in legacy numeric format
-        ncr = np.zeros(n_rows, dtype=int)
-
-        # Collect extra columns (beyond first 4)
-        extras = {}
-        if n_cols > 4:
-            for i in range(4, n_cols):
-                extras[f'col_{i}'] = history_arr[:, i]
+    standard_keys = {'step', 'u', 'P', 'M', 'ncr'}
+    extra_keys = set().union(*(row.keys() for row in rows)) - standard_keys
+    extras = {
+        key: np.array([row.get(key, np.nan) for row in rows])
+        for key in extra_keys
+    }
 
     return {
         'step': step,

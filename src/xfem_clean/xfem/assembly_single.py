@@ -144,10 +144,10 @@ def assemble_xfem_system(
     coh_wgt = []
     coh_delta_max = []
 
-    # TASK 5: Physical dissipation accumulators
-    D_coh_inc = 0.0  # Cohesive dissipation increment [J]
-    D_bond_inc = 0.0  # Bond-slip dissipation increment [J]
-    D_bulk_plastic_inc = 0.0  # Bulk plastic dissipation increment [J]
+    # Trapezoidal interface terms are signed work, not necessarily irreversible.
+    interface_work_inc = 0.0  # Cohesive/interface work increment [J]
+    bond_work_inc = 0.0  # Bond-interface work increment [J]
+    bulk_plastic_dissipation_inc = 0.0  # Constitutive plastic dissipation [J]
 
     crack_active = bool(crack.active)
     p0 = crack.p0() if crack_active else None
@@ -192,7 +192,9 @@ def assemble_xfem_system(
             seg = clip_segment_to_bbox(p0, pt, xmin, xmax, ymin, ymax)
             if seg is not None:
                 phis = [crack.phi(float(xe[a, 0]), float(xe[a, 1])) for a in range(4)]
-                if (min(phis) < 0.0) and (max(phis) > 0.0):
+                sign_change = (min(phis) < 0.0) and (max(phis) > 0.0)
+                tip_in = (crack.tip_x > xmin) and (crack.tip_x < xmax) and (crack.tip_y > ymin) and (crack.tip_y < ymax)
+                if sign_change or tip_in:
                     is_cut = True
 
         if not is_cut:
@@ -350,7 +352,7 @@ def assemble_xfem_system(
                             if compute_dissipation:
                                 # Physical dissipation = dW * volume (detJ * wgp * thickness)
                                 wgp = wx * wy
-                                D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
+                                bulk_plastic_dissipation_inc += dW * detJ * wgp * thickness_eff
 
                             eps_p3_new = np.array([eps_p6_new[0], eps_p6_new[1], eps_p6_new[3]], dtype=float)
                             if isinstance(mp_updates, BulkStatePatch):
@@ -404,7 +406,7 @@ def assemble_xfem_system(
                             if compute_dissipation:
                                 dW = mp.w_plastic - mp0.w_plastic
                                 wgp = wx * wy
-                                D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
+                                bulk_plastic_dissipation_inc += dW * detJ * wgp * thickness_eff
 
                     elif mp_states_comm is not None:
                         mp0 = mp_states_comm.get((e, ipid), mp_default())
@@ -416,7 +418,7 @@ def assemble_xfem_system(
                         if compute_dissipation:
                             dW = mp.w_plastic - mp0.w_plastic
                             wgp = wx * wy
-                            D_bulk_plastic_inc += dW * detJ * wgp * thickness_eff
+                            bulk_plastic_dissipation_inc += dW * detJ * wgp * thickness_eff
 
                     else:
                         mp = mp_default().copy_shallow()
@@ -752,7 +754,7 @@ def assemble_xfem_system(
                                     d_delta_n = delta_n - delta_n_old
                                     d_delta_t = delta_t - delta_t_old
                                     diss_local = 0.5 * ((t_n_old + t_n) * d_delta_n + (t_t_old + t_t) * d_delta_t) * wline
-                                    D_coh_inc += diss_local
+                                    interface_work_inc += diss_local
                                 else:
                                     # Mode I only
                                     delta_old = float(np.dot(gvec_n, q_prev[edofs]))
@@ -777,7 +779,7 @@ def assemble_xfem_system(
                                     # Trapezoidal dissipation: ΔD = 0.5 * (T_old + T_new) * Δδ
                                     d_delta = delta - delta_old
                                     diss_local = 0.5 * (T_old + T) * d_delta * wline
-                                    D_coh_inc += diss_local
+                                    interface_work_inc += diss_local
 
                             # Assemble force and stiffness
                             if use_mixed_mode:
@@ -876,7 +878,7 @@ def assemble_xfem_system(
 
             # TASK 5: Accumulate bond dissipation from all layers
             if compute_dissipation:
-                D_bond_inc += bond_aux.get("D_bond_inc", 0.0)
+                bond_work_inc += bond_aux.get("bond_work_inc", 0.0)
                 # Note: Dowel dissipation would be separate if implemented
 
         # For backward compatibility, return first layer's updates
@@ -928,7 +930,7 @@ def assemble_xfem_system(
 
         # TASK 5: Accumulate bond dissipation
         if compute_dissipation:
-            D_bond_inc += bond_aux.get("D_bond_inc", 0.0)
+            bond_work_inc += bond_aux.get("bond_work_inc", 0.0)
 
     # Reinforcement layers contribution (Dissertation Chapter 4.5, Eq. 4.92-4.103)
     reinforcement_updates = None
@@ -975,9 +977,13 @@ def assemble_xfem_system(
         "gp_weight": np.asarray(gp_wgt, dtype=float),
         "coh_weight": np.asarray(coh_wgt, dtype=float),
         "coh_delta_max": np.asarray(coh_delta_max, dtype=float),
-        # TASK 5: Physical dissipation (only meaningful when compute_dissipation=True)
-        "D_coh_inc": float(D_coh_inc),
-        "D_bond_inc": float(D_bond_inc),
-        "D_bulk_plastic_inc": float(D_bulk_plastic_inc),
+        "interface_work_inc": float(interface_work_inc),
+        "bond_work_inc": float(bond_work_inc),
+        "bulk_plastic_dissipation_inc": float(bulk_plastic_dissipation_inc),
+        # Deprecated aliases retained for legacy consumers. These two are work,
+        # despite the historical D prefix.
+        "D_coh_inc": float(interface_work_inc),
+        "D_bond_inc": float(bond_work_inc),
+        "D_bulk_plastic_inc": float(bulk_plastic_dissipation_inc),
     }
     return K, fint, coh_updates, mp_updates, aux, bond_updates, reinforcement_updates, contact_updates

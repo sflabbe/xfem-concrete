@@ -140,7 +140,6 @@ def test_wall_bcs_structure():
     print(f"  ✓ Prescribed scale: {bc_spec.prescribed_scale} (correct)")
 
     print("✅ Wall BCs structure: PASS")
-    return True
 
 
 @pytest.mark.slow
@@ -266,13 +265,10 @@ def test_wall_minimal_analysis():
             print(f"    ✓ Wall resistance correct sign (positive)")
 
         print("✅ Wall minimal analysis: PASS (BLOQUE 4 VALIDATED)")
-        return True
+        return None
 
     except Exception as e:
-        print(f"❌ Test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        raise AssertionError("Minimal wall analysis failed") from e
 
 
 if __name__ == "__main__":

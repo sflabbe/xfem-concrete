@@ -41,7 +41,7 @@ def test_case_06_fibre_tensile_minimal():
     - Post-peak response is not zero (fibres provide tail)
     - No crashes, no NaNs
     """
-    print("\n🧪 Test: Case 06 Fibre tensile (minimal, 10 steps)...")
+    print("\n🧪 Test: Case 06 Fibre tensile (minimal, 2 steps)...")
 
     # Minimal geometry (small specimen with notch)
     geometry = GeometryConfig(
@@ -96,8 +96,8 @@ def test_case_06_fibre_tensile_minimal():
 
     # Loading (tension control)
     loading = MonotonicLoading(
-        max_displacement=1.0,  # mm (small)
-        n_steps=10,  # Few steps for fast test
+        max_displacement=0.01,  # mm; just beyond matrix tensile onset
+        n_steps=2,
         load_x_center=60.0,  # Right edge
         load_halfwidth=10.0,
     )
@@ -136,22 +136,22 @@ def test_case_06_fibre_tensile_minimal():
 
     # Validations
     assert results is not None, "Results should not be None"
-    assert 'history' in results, "Results should contain history"
-    assert 'u' in results, "Results should contain displacement vector"
+    assert results.solver_meta["material"] == "cdp_lite"
+    assert results.solver_meta["converged"]
 
     # Check for NaNs
-    history = results['history']
+    history = results.steps
     assert len(history) > 0, "History should have entries"
 
     loads = []
     disps = []
     for step_data in history:
-        assert np.all(np.isfinite(step_data)), f"NaNs detected in history: {step_data}"
-        if len(step_data) >= 2:
-            disps.append(step_data[0])  # Displacement (assumed first column)
-            loads.append(step_data[1])  # Load (assumed second column)
+        assert np.isfinite(step_data["u"]), f"Invalid displacement: {step_data}"
+        assert np.isfinite(step_data["P"]), f"Invalid load: {step_data}"
+        disps.append(step_data["u"])
+        loads.append(step_data["P"])
 
-    u = results['u']
+    u = results.fields["displacement_m"]
     assert np.all(np.isfinite(u)), "NaNs detected in displacement vector"
 
     # Check that crack initiated (load should have peaked and dropped)

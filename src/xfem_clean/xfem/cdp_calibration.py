@@ -15,6 +15,10 @@ import cdp_generator
 from xfem_clean.xfem.model import XFEMModel
 
 
+class CDPDatasetError(ValueError):
+    """Raised when cdp_generator output does not satisfy the solver contract."""
+
+
 @dataclass
 class CDPCalibration:
     dilation_angle_deg: float
@@ -108,9 +112,11 @@ def calibrate_from_cdp_generator(model: XFEMModel) -> CDPCalibration:
         model.cdp_eps_in_c_tab = tuple(float(x) for x in list(eps_in_c))
         model.cdp_sig_c_tab_pa = tuple(float(x) * 1e6 for x in list(sig_c_mpa))
         model.cdp_dc_tab = tuple(float(x) for x in list(dc))
-    except Exception:
-        # Keep solver fallback curves if generator parsing fails.
-        pass
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise CDPDatasetError(
+            "Invalid cdp_generator dataset: expected numeric tension and compression "
+            "tables with crack opening/stress/damage and inelastic strain/stress/damage"
+        ) from exc
 
     return CDPCalibration(
         dilation_angle_deg=dilation,
@@ -157,13 +163,15 @@ def apply_cdp_generator_calibration(model: XFEMModel) -> CDPCalibration:
         # N/mm -> N/m (J/m^2)
         model.Gf = float(calib.G_f_nmm) * 1000.0
     # Generator's f_cm (MPa) is mean compressive strength; keep fc magnitude aligned.
-    try:
-        if model.cdp_class:
+    if model.cdp_class:
+        try:
             from cdp_generator.material_properties import ec2_concrete
             props = ec2_concrete(model.cdp_class)
             f_cm = float(props["f_cm"]) * 1e6
             model.fc = abs(float(f_cm))
-    except Exception:
-        pass
+        except (ImportError, KeyError, TypeError, ValueError) as exc:
+            raise CDPDatasetError(
+                f"Invalid EC2 concrete class dataset for {model.cdp_class!r}"
+            ) from exc
 
     return calib

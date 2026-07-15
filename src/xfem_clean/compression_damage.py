@@ -54,9 +54,20 @@ class ConcreteCompressionModel:
     E_0 : float
         Initial modulus
     """
+    # Core parameters used by Eq. (3.46)
     f_c: float
     eps_c1: float
     E_0: float
+
+    # Optional parameters.
+    # These are accepted for compatibility with older factory code paths.
+    # The current implementation keeps the same response: parabolic branch
+    # up to eps_c1 and a constant plateau afterwards.
+    eps_cu: float = 0.0035
+    alpha_residual: float = 0.20
+    curve_kind: str = "parabolic_plateau"
+    compression_strain_sign: float = -1.0
+    damage_max: float = 0.999
 
     def __post_init__(self):
         """Validate parameters."""
@@ -66,6 +77,16 @@ class ConcreteCompressionModel:
             raise ValueError("Peak strain eps_c1 must be positive")
         if self.E_0 <= 0.0:
             raise ValueError("Elastic modulus E_0 must be positive")
+
+        # Optional parameters validation
+        if self.eps_cu <= 0.0:
+            raise ValueError("Ultimate strain eps_cu must be positive")
+        if self.eps_cu < self.eps_c1:
+            raise ValueError("eps_cu must be greater than or equal to eps_c1")
+        if not (0.0 <= self.alpha_residual <= 1.0):
+            raise ValueError("alpha_residual must be in [0, 1]")
+        if self.damage_max <= 0.0 or self.damage_max > 1.0:
+            raise ValueError("damage_max must be in (0, 1]")
 
     def sigma_epsilon_curve(self, eps: float) -> Tuple[float, float]:
         """Compute stress and tangent modulus from strain.
@@ -143,8 +164,8 @@ class ConcreteCompressionModel:
         # Damage
         d_c = 1.0 - E_sec / self.E_0
 
-        # Clamp to [0, 1]
-        d_c = max(0.0, min(1.0, d_c))
+        # Clamp to [0, damage_max]
+        d_c = max(0.0, min(float(self.damage_max), d_c))
 
         return float(d_c)
 
@@ -155,6 +176,7 @@ class ConcreteCompressionModel:
 
 def compute_equivalent_compressive_strain(
     eps: np.ndarray,
+    compression_strain_sign: float = -1.0,
 ) -> float:
     """Compute equivalent compressive strain from strain tensor.
 
@@ -186,8 +208,12 @@ def compute_equivalent_compressive_strain(
     eps_1 = eps_avg + R  # Maximum principal
     eps_2 = eps_avg - R  # Minimum principal
 
-    # Equivalent compressive strain (negative principal → compression)
-    eps_eq_c = max(0.0, -min(eps_1, eps_2))
+    # Equivalent compressive strain depends on the sign convention.
+    # Default: compression corresponds to negative strains.
+    if compression_strain_sign < 0.0:
+        eps_eq_c = max(0.0, -min(eps_1, eps_2))
+    else:
+        eps_eq_c = max(0.0, max(eps_1, eps_2))
 
     return float(eps_eq_c)
 
@@ -199,49 +225,62 @@ def compute_equivalent_compressive_strain(
 def stress_update_compression_damage(
     eps: np.ndarray,
     model: ConcreteCompressionModel,
-    D_0: np.ndarray,
+    D_0: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
-    """Compute stress tensor with compression damage.
+    """Compute stress update with compression damage.
 
-    Uses secant stiffness approach:
-        σ = (1 - d_c) * D_0 : ε
+    Compatible with two call styles
+
+    1 stress_update_compression_damage(eps, model, D_0)
+    2 stress_update_compression_damage(eps, D_0, model)
 
     Parameters
     ----------
     eps : np.ndarray
-        Strain tensor [εxx, εyy, γxy] (Voigt notation)
+        Strain vector [eps_xx, eps_yy, gamma_xy] in Voigt notation.
     model : ConcreteCompressionModel
-        Compression model parameters
+        Compression model.
     D_0 : np.ndarray
-        Undamaged elastic stiffness matrix [3, 3]
+        Undamaged stiffness matrix.
 
     Returns
     -------
     sigma : np.ndarray
-        Stress tensor [σxx, σyy, σxy] (Voigt notation)
+        Stress vector in Voigt notation.
     D_sec : np.ndarray
-        Secant stiffness matrix [3, 3]
+        Secant stiffness matrix.
     d_c : float
-        Damage parameter
+        Compression damage variable in [0, 1].
     """
-    # Compute equivalent compressive strain
-    eps_eq_c = compute_equivalent_compressive_strain(eps)
+    # Handle legacy argument order: (eps, D_0, model)
+    if D_0 is None and isinstance(model, np.ndarray):
+        raise ValueError("D_0 is required")
+    if isinstance(model, np.ndarray) and isinstance(D_0, ConcreteCompressionModel):
+        model, D_0 = D_0, model
 
-    # Compute damage
+    eps = np.asarray(eps, dtype=float).reshape(3)
+    D_0 = np.asarray(D_0, dtype=float)
+
+    # Equivalent compressive strain (positive magnitude)
+    eps_eq_c = compute_equivalent_compressive_strain(
+        eps,
+        compression_strain_sign=getattr(model, "compression_strain_sign", -1.0),
+    )
+
+    # Damage from secant stiffness
     d_c = model.compute_damage(eps_eq_c)
 
-    # Degraded stiffness
-    D_sec = (1.0 - d_c) * D_0
+    # Nominal stress from undamaged stiffness
+    sigma_0 = D_0 @ eps
 
-    # Stress
-    sigma = np.dot(D_sec, eps)
+    # Apply scalar compression damage to the full stress tensor
+    sigma = (1.0 - d_c) * sigma_0
+
+    # Secant stiffness
+    D_sec = (1.0 - d_c) * D_0
 
     return sigma, D_sec, float(d_c)
 
-
-# =============================================================================
-# Uniaxial Compression Test
-# =============================================================================
 
 def uniaxial_compression_test(
     model: ConcreteCompressionModel,

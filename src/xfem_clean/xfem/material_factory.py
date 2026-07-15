@@ -112,20 +112,48 @@ def make_bulk_material(model: XFEMModel):
 
     if bm == "compression-damage":
         # P1: Compression damage model per thesis Eq. (3.44-3.46)
-        # Parabolic stress-strain up to peak, then constant plateau (no softening)
-        f_c_mpa = float(model.fc) / 1e6  # Convert Pa to MPa
+        # Lightweight compression-only bulk model.
+        # Default curve: fib/EC2 style hyperbolic ascending branch with linear softening.
 
-        # Check if user provided custom parameters
+        # Peak strain eps_c1
         if hasattr(model, "compression_eps_c1") and model.compression_eps_c1 is not None:
             eps_c1 = float(model.compression_eps_c1)
         else:
-            # Default: Model Code 2010 formula εc1 ≈ 0.7 * fc^0.31 / 1000
-            eps_c1 = 0.0022  # Default for fc ~ 30 MPa
+            eps_c1 = 0.0022  # Reasonable default for normal strength concrete
+
+        # Ultimate strain eps_cu
+        if hasattr(model, "compression_eps_cu") and model.compression_eps_cu is not None:
+            eps_cu = float(model.compression_eps_cu)
+        else:
+            eps_cu = 0.0035
+
+        # Residual stress ratio at eps_cu
+        if hasattr(model, "compression_alpha_residual") and model.compression_alpha_residual is not None:
+            alpha_res = float(model.compression_alpha_residual)
+        else:
+            alpha_res = 0.20
+
+        # Curve kind
+        if hasattr(model, "compression_curve_kind") and model.compression_curve_kind is not None:
+            curve_kind = str(model.compression_curve_kind)
+        else:
+            curve_kind = "fib_hyperbola"
+
+        # Strain sign convention for compression
+        # Default assumes compression corresponds to negative strains.
+        if hasattr(model, "compression_strain_sign") and model.compression_strain_sign is not None:
+            comp_sign = float(model.compression_strain_sign)
+        else:
+            comp_sign = -1.0
 
         return ConcreteCompressionModel(
             f_c=float(model.fc),
             eps_c1=eps_c1,
             E_0=float(model.E),
+            eps_cu=eps_cu,
+            alpha_residual=alpha_res,
+            curve_kind=curve_kind,
+            compression_strain_sign=comp_sign,
         )
 
     raise ValueError(f"Unknown bulk_material='{model.bulk_material}'")

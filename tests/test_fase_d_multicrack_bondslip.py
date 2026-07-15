@@ -61,7 +61,6 @@ def test_multicrack_dof_mapping():
     assert dofs.ndof == expected_ndof, f"Total DOFs should be {expected_ndof}, got {dofs.ndof}"
 
     print("✅ DOF mapping con bond-slip: PASS")
-    return True
 
 
 def test_multicrack_assembly_signature():
@@ -82,7 +81,6 @@ def test_multicrack_assembly_signature():
     assert 'subdomain_mgr' in params, "subdomain_mgr parameter should exist"
 
     print("✅ Assembly signature: PASS")
-    return True
 
 
 def test_dof_transfer_with_steel():
@@ -124,7 +122,6 @@ def test_dof_transfer_with_steel():
     assert q_new[dofs.steel[1, 0]] == 3.0, "Steel DOF transfer failed"
 
     print("✅ Steel DOF transfer: PASS")
-    return True
 
 
 def test_subdomain_manager_integration():
@@ -155,7 +152,6 @@ def test_subdomain_manager_integration():
     assert mgr.get_effective_thickness(0, 0.1) == 0.0, "Void thickness should be 0"
 
     print("✅ SubdomainManager integration: PASS")
-    return True
 
 
 @pytest.mark.slow
@@ -249,20 +245,10 @@ def test_multicrack_bondslip_crack_initiation():
             assert np.isfinite(r["P"]), "Load should be finite"
 
         print("✅ Bond-slip + crack initiation: PASS (BUGFIX VALIDATED)")
-        return True
+        return None
 
     except Exception as e:
-        if "steel_dof_offset" in str(e) or "size mismatch" in str(e):
-            print(f"❌ BUG STILL PRESENT: {e}")
-            raise
-        else:
-            # Some other error (mesh too coarse, convergence, etc.)
-            print(f"⚠️  Test failed with: {e}")
-            # Don't fail the test for convergence issues, only for the specific bug
-            import traceback
-            traceback.print_exc()
-            print("✅ Bond-slip + crack initiation: PASS (no steel_dof_offset bug detected)")
-            return True
+        raise AssertionError("Multicrack bond-slip characterization failed") from e
 
 
 def main():

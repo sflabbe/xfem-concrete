@@ -22,6 +22,7 @@ wheels/
 
 # Virtual environments
 venv/
+.venv/
 env/
 ENV/
 
@@ -39,17 +40,14 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
-# Output files
-*.png
-*.pdf
-*.vtk
-*.csv
+# Generated output directories. Fixtures and golden files remain versionable.
 outputs/
 results/
 tests/tmp/
 benchmarks/results/
 calibration/results/
 validation/outputs/
+examples/gutierrez_thesis/outputs/
 
 # VTK outputs
 vtk/

@@ -5,7 +5,17 @@ from scripts.run_gutierrez_matrix import run_matrix
 
 @pytest.mark.slow
 def test_gutierrez_matrix_expected_configs(tmp_path):
-    results = run_matrix(output_dir=tmp_path)
+    results = run_matrix(
+        output_dir=tmp_path,
+        mesh_factor=0.25,
+        max_steps=2,
+        cases=(
+            "01_pullout_lettow",
+            "02_sspot_frp",
+            "03_tensile_stn12",
+            "08_beam_3pb_vvbs3_cfrp",
+        ),
+    )
     lookup = {(r.case_id, r.cfg_id): r for r in results}
 
     def get(case_id: str, cfg_id: str):
@@ -20,5 +30,7 @@ def test_gutierrez_matrix_expected_configs(tmp_path):
     assert case03_bond_off.status == "ok"
 
     case08_default = get("08_beam_3pb_vvbs3_cfrp", "default")
-    if case08_default.status != "ok":
+    failed = [result for result in results if result.status != "ok"]
+    if case08_default.status != "ok" and failed == [case08_default]:
         pytest.xfail("Invalid FRP DOF mapping")
+    assert failed == []

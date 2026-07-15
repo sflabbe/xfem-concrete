@@ -117,13 +117,10 @@ def test_multicrack_return_bundle():
 
         print("    ✓ Bundle contents are valid")
         print("✅ multicrack return_bundle: PASS (BLOQUE 2 VALIDATED)")
-        return True
+        return None
 
     except Exception as e:
-        print(f"❌ Test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        raise AssertionError("Multicrack return bundle analysis failed") from e
 
 
 if __name__ == "__main__":

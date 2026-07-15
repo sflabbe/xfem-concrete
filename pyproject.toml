@@ -6,20 +6,24 @@ build-backend = "setuptools.build_meta"
 name = "xfem-clean-ordered"
 version = "0.1.0"
 description = "Ordered XFEM prototype (stable solver reorganized into clean kernel structure)."
-requires-python = ">=3.10"
-dependencies = ["numpy", "scipy", "matplotlib"]
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "numpy>=1.24,<3",
+    "scipy>=1.10,<2",
+]
 
 [project.optional-dependencies]
 test = [
-    "pytest>=8",
-    "numpy",
-    "scipy",
-    "numba",
-    "pyyaml",
-    "matplotlib",
-    "pandas",
-    "openpyxl",
+    "pytest>=7.2,<9",
+    "pyyaml>=6,<7",
 ]
+export = [
+    "matplotlib>=3.6,<4",
+    "pandas>=1.5,<3",
+    "openpyxl>=3,<4",
+]
+numba = ["numba>=0.56,<0.64"]
+cdp = ["pyyaml>=6,<7"]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -32,4 +36,8 @@ norecursedirs = ["examples", "docs", "outputs", "tests/tmp"]
 markers = [
     "slow: marks tests as slow (run with pytest -m slow)",
     "fast: marks tests as fast (default)",
+]
+filterwarnings = [
+    "ignore:path is deprecated.*:DeprecationWarning",
+    "ignore:invalid escape sequence.*:DeprecationWarning",
 ]

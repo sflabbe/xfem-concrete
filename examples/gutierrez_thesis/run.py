@@ -23,6 +23,7 @@ if _SRC not in sys.path:
 import time
 from pathlib import Path
 from typing import Optional, Dict, Callable
+from examples.gutierrez_thesis.case_config import normalize_case_config
 
 # Import case factories
 from examples.gutierrez_thesis.cases.case_01_pullout_lettow import create_case_01
@@ -159,6 +160,14 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
             case_config.loading.n_steps = cli_args.nsteps
             override_messages.append(f"n_steps = {cli_args.nsteps}")
 
+    if cli_args and getattr(cli_args, 'max_displacement', None) is not None:
+        if not hasattr(case_config.loading, 'max_displacement'):
+            raise ValueError("--max-displacement requires monotonic loading")
+        case_config.loading.max_displacement = cli_args.max_displacement
+        override_messages.append(
+            f"max_displacement = {cli_args.max_displacement} mm"
+        )
+
     if cli_args and hasattr(cli_args, 'cycles') and cli_args.cycles is not None:
         if hasattr(case_config.loading, 'n_cycles_per_target'):
             case_config.loading.n_cycles_per_target = cli_args.cycles
@@ -169,6 +178,7 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
         override_messages.append(f"output_dir = {cli_args.output_dir}")
 
     if cli_args and hasattr(cli_args, 'solver') and cli_args.solver is not None:
+        case_config.solver_engine = cli_args.solver
         override_messages.append(f"solver = {cli_args.solver}")
 
     if cli_args and hasattr(cli_args, 'bond_slip') and cli_args.bond_slip is not None:
@@ -178,6 +188,8 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
         override_messages.append("use_numba = True")
     elif cli_args and hasattr(cli_args, 'no_numba') and cli_args.no_numba:
         override_messages.append("use_numba = False")
+
+    case_config = normalize_case_config(case_config)
 
     if override_messages:
         print("Active overrides:")
@@ -207,38 +219,29 @@ def run_case(case_config, mesh_factor: float = 1.0, dry_run: bool = False, enabl
         print("\nSaving results...")
         import csv
         history_file = output_dir / "load_displacement.csv"
-        from collections.abc import Mapping
-
-        def _get_value(row, key, idx=None, default=0.0):
-            if isinstance(row, Mapping):
-                return row.get(key, default)
-            if idx is not None:
-                return row[idx]
-            return default
-
         with open(history_file, 'w', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(['step', 'u_mm', 'P_kN', 'M_kNm', 'kappa', 'R',
                              'crack_tip_x', 'crack_tip_y', 'angle_deg', 'crack_active',
                              'W_plastic', 'W_damage_t', 'W_damage_c', 'W_cohesive', 'W_total'])
-            for row in results['history']:
+            for row in results.steps:
                 # Convert units: m → mm, N → kN, J → J
                 row_out = [
-                    int(_get_value(row, "step", idx=0, default=0)),              # step
-                    _get_value(row, "u", idx=1, default=0.0) * 1e3,              # u [mm]
-                    _get_value(row, "P", idx=2, default=0.0) / 1e3,              # P [kN]
-                    _get_value(row, "M", idx=3, default=0.0) / 1e3,              # M [kN·m]
-                    _get_value(row, "kappa", idx=4, default=0.0),                # kappa
-                    _get_value(row, "R", idx=5, default=0.0),                    # R
-                    _get_value(row, "crack_tip_x", idx=6, default=0.0),          # crack_tip_x [m]
-                    _get_value(row, "crack_tip_y", idx=7, default=0.0),          # crack_tip_y [m]
-                    _get_value(row, "angle_deg", idx=8, default=0.0),            # angle [deg]
-                    int(_get_value(row, "crack_active", idx=9, default=0)),      # crack_active
-                    _get_value(row, "W_plastic", idx=10, default=0.0),           # W_plastic [J]
-                    _get_value(row, "W_damage_t", idx=11, default=0.0),          # W_damage_t [J]
-                    _get_value(row, "W_damage_c", idx=12, default=0.0),          # W_damage_c [J]
-                    _get_value(row, "W_cohesive", idx=13, default=0.0),          # W_cohesive [J]
-                    _get_value(row, "W_total", idx=14, default=0.0),             # W_total [J]
+                    int(row.get("step", 0)),
+                    row.get("u", 0.0) * 1e3,
+                    row.get("P", 0.0) / 1e3,
+                    row.get("M", 0.0) / 1e3,
+                    row.get("kappa", 0.0),
+                    row.get("R", 0.0),
+                    row.get("crack_tip_x", 0.0),
+                    row.get("crack_tip_y", 0.0),
+                    row.get("angle_deg", 0.0),
+                    int(row.get("crack_active", 0)),
+                    row.get("W_plastic", 0.0),
+                    row.get("W_damage_t", 0.0),
+                    row.get("W_damage_c", 0.0),
+                    row.get("W_cohesive", 0.0),
+                    row.get("W_total", 0.0),
                 ]
                 writer.writerow(row_out)
         print(f"  → {history_file}")
@@ -264,7 +267,7 @@ def list_cases():
     print("\nAvailable Cases:")
     print("=" * 70)
     for case_id, factory in CASE_REGISTRY.items():
-        case = factory()
+        case = normalize_case_config(factory())
         print(f"  {case_id:30s} - {case.description}")
     print("=" * 70)
     print(f"\nTotal: {len(CASE_REGISTRY)} cases")
@@ -343,6 +346,11 @@ Examples:
         "--nsteps",
         type=int,
         help="Override number of steps"
+    )
+    parser.add_argument(
+        "--max-displacement",
+        type=float,
+        help="Override maximum monotonic displacement in mm"
     )
     parser.add_argument(
         "--cycles",

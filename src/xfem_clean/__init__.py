@@ -12,6 +12,7 @@ from .constitutive import (
     CDPPlaceholder,
 )
 from .xfem import XFEMModel, XFEMCrack, XFEMDofs, run_analysis_xfem, run_analysis_xfem_multicrack
+from .results import AnalysisResult
 
 __all__ = [
     "CohesiveLaw", "CohesiveState", "cohesive_update",
@@ -22,4 +23,5 @@ __all__ = [
     "DruckerPragerPlaceholder", "CDPPlaceholder",
     "XFEMModel", "XFEMCrack", "XFEMDofs",
     "run_analysis_xfem", "run_analysis_xfem_multicrack",
+    "AnalysisResult",
 ]

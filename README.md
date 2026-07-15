@@ -86,7 +86,7 @@ python -m examples.gutierrez_thesis.run --case t5a1 --no-numba
 - Bond-slip continuation (`bond_gamma`) now scales both interface forces and stiffness (including dowel contributions), keeping gamma ramps consistent.
 - Multicrack linear solves now check linear residuals and fall back to LSMR/regularization for ill-conditioned steps, allowing substepping to recover instead of hard errors.
 
-All cases from Gutierrez (KIT, 2020) PhD thesis are implemented with validation against experimental data.
+All registered cases from the Gutiérrez (KIT, 2020) thesis are implemented as maintained Python case factories. The bundled reference CSV files are synthetic placeholders for pipeline regression, not experimental validation evidence; see `docs/validation.md`.
 
 ### Case Overview
 
@@ -210,13 +210,13 @@ pytest tests/test_validation_curves.py::test_validate_t5a1_coarse -v -s
 pytest tests/test_validation_curves.py::test_validate_vvbs3_coarse -v -s
 pytest tests/test_validation_curves.py::test_validate_sorelli_coarse -v -s
 
-# Full regression suite
-pytest tests/test_regression_cases.py -v
+# Compact canonical regression manifest
+PYTHONPATH=src python3 scripts/regression_manifest.py
 ```
 
 ### Validation metrics
 
-Tests verify against experimental data using:
+Placeholder-curve pipeline tests currently calculate:
 
 - **Peak load error:** |ΔPmax| < 10%
 - **Energy error:** |ΔE| < 15%
@@ -227,10 +227,11 @@ Tests verify against experimental data using:
 
 - `tests/test_smoke.py` - Import smoke tests
 - `tests/test_tools_smoke.py` - Tool execution tests (parametric, calibration, benchmarks)
-- `tests/test_validation_curves.py` - Experimental curve comparison (slow)
-- `tests/test_regression_cases.py` - Regression tests with reference ranges
+- `tests/test_validation_curves.py` - Placeholder-curve pipeline checks (slow)
+- `tests/test_regression_cases.py` - Canonical manifest comparison
 - `tests/test_thesis_smoke.py` - Thesis case smoke tests
-- `tests/regression/reference_cases.yml` - Expected ranges for regression
+- `tests/regression/canonical_manifest.json` - Versioned numerical golden
+- `tests/regression/reference_cases.yml` - Inactive legacy placeholder ranges
 
 ---
 
@@ -566,15 +567,16 @@ xfem-concrete/
 ├── tests/                            # Test suite
 │   ├── test_smoke.py                 # Import smoke tests
 │   ├── test_tools_smoke.py           # Tool execution tests
-│   ├── test_validation_curves.py     # Experimental validation (slow)
+│   ├── test_validation_curves.py     # Placeholder pipeline checks (slow)
 │   ├── test_regression_cases.py      # Regression tests
 │   ├── test_thesis_smoke.py          # Thesis case smoke tests
 │   ├── test_bond_jacobian_coupling.py  # Bond convergence tests
 │   └── regression/                   # Regression references
-│       └── reference_cases.yml
-├── validation/                       # Validation data
+│       ├── canonical_manifest.json   # Numerical regression golden
+│       └── reference_cases.yml       # Inactive legacy ranges
+├── validation/                       # Validation pipeline and placeholder data
 │   ├── compare_curves.py             # Curve comparison utilities
-│   └── reference_data/               # Experimental curves
+│   └── reference_data/               # Synthetic placeholder curves
 │       ├── t5a1.csv                  # Bosco T5A1 beam
 │       ├── vvbs3.csv                 # VVBS3 CFRP beam
 │       ├── sorelli.csv               # Sorelli fibre beam

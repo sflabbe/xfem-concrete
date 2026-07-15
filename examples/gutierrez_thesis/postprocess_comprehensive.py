@@ -9,8 +9,69 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
+
+
+def _final_step_from_history(history):
+    # Best effort extraction of the last load step index.
+    if history is None:
+        return None
+
+    # Numpy array
+    try:
+        import numpy as _np
+        if isinstance(history, _np.ndarray):
+            if history.size == 0:
+                return None
+            if history.ndim == 2 and history.shape[1] >= 1:
+                return int(history[-1, 0])
+            if history.ndim == 1:
+                return int(history[-1])
+    except Exception:
+        pass
+
+    # Dict
+    if isinstance(history, dict):
+        for k in ('step', 'i', 'increment', 'load_step'):
+            if k in history:
+                try:
+                    return int(history[k])
+                except Exception:
+                    return None
+        return None
+
+    # List or tuple
+    try:
+        if len(history) == 0:
+            return None
+        last = history[-1]
+    except Exception:
+        return None
+
+    if isinstance(last, dict):
+        for k in ('step', 'i', 'increment', 'load_step'):
+            if k in last:
+                try:
+                    return int(last[k])
+                except Exception:
+                    return None
+        return None
+
+    try:
+        return int(last[0])
+    except Exception:
+        try:
+            return int(last)
+        except Exception:
+            return None
+
+
+def _step_tag(step):
+    return 'final' if step is None else f"{int(step):04d}"
+
 import numpy as np
 import csv
+
+from xfem_clean.results import normalize_history_rows
 
 
 # =============================================================================
@@ -18,7 +79,19 @@ import csv
 # =============================================================================
 
 def _lazy_import_plt():
-    """Import matplotlib lazily so core runs without plotting deps."""
+    """
+    Lazy import matplotlib.pyplot with helpful error message.
+
+    Returns
+    -------
+    plt : module
+        matplotlib.pyplot module
+
+    Raises
+    ------
+    ImportError
+        If matplotlib is not installed
+    """
     try:
         import matplotlib.pyplot as plt
         return plt
@@ -26,108 +99,6 @@ def _lazy_import_plt():
         raise ImportError(
             "Plotting requires matplotlib. Install with: pip install matplotlib"
         ) from e
-
-
-def _history_to_2d_array(history):
-    """Coerce history into a numeric 2D array.
-
-    Supports:
-      * list of dicts (expects keys like step, u, P)
-      * list of sequences (step, u, P)
-      * numpy arrays
-
-    Returns an array with shape (n, m). When possible, columns are:
-      col 0: step
-      col 1: displacement u
-      col 2: load P
-    """
-
-    if history is None:
-        return np.empty((0, 0), dtype=float)
-
-    try:
-        arr = np.array(history, dtype=object)
-    except Exception:
-        return np.empty((0, 0), dtype=float)
-
-    if arr.size == 0:
-        return np.empty((0, 0), dtype=float)
-
-    # list of dicts
-    if arr.ndim == 1 and all(isinstance(x, dict) for x in arr.tolist()):
-        rows = []
-        for i, d in enumerate(arr.tolist()):
-            step = d.get('step', d.get('i', i))
-            u = d.get('u', d.get('disp', d.get('displacement', np.nan)))
-            P = d.get('P', d.get('load', d.get('force', np.nan)))
-            rows.append([step, u, P])
-        try:
-            return np.asarray(rows, dtype=float)
-        except Exception:
-            return np.empty((0, 0), dtype=float)
-
-    # list of tuples / lists or a numeric array
-    try:
-        arr2 = np.asarray(history, dtype=float)
-    except Exception:
-        try:
-            arr2 = np.asarray(arr.tolist(), dtype=float)
-        except Exception:
-            return np.empty((0, 0), dtype=float)
-
-    if arr2.ndim == 1:
-        arr2 = arr2.reshape(-1, 1)
-
-    return arr2
-
-
-def _final_step_from_history(history):
-    """Return final step index from history for file naming.
-
-    Returns None when the step cannot be inferred.
-    """
-
-    try:
-        history_arr = _history_to_2d_array(history)
-        if history_arr.shape[0] == 0:
-            return None
-
-        step = history_arr[-1, 0]
-        if step is None:
-            return int(history_arr.shape[0] - 1)
-
-        # NaN check for float
-        try:
-            if float(step) != float(step):
-                return int(history_arr.shape[0] - 1)
-        except Exception:
-            return int(history_arr.shape[0] - 1)
-
-        return int(step)
-    except Exception:
-        return None
-
-    # Newer formats may store history as dict: step -> (u, P, ...)
-    if isinstance(history, dict):
-        if not history:
-            return None
-        last_key = max(history.keys())
-        try:
-            return int(last_key)
-        except Exception:
-            return last_key
-
-    # List or array-like: rows with step as first entry
-    try:
-        return int(history[-1][0])
-    except Exception:
-        pass
-
-    # Fallback: list of scalars
-    try:
-        return int(history[-1])
-    except Exception:
-        return None
 
 
 # =============================================================================
@@ -451,39 +422,15 @@ def plot_load_displacement(
     """
     plt = _lazy_import_plt()
 
-    # Handle different history formats
-    def _is_dict_history(h) -> bool:
-        # Multicrack solver may return list[dict] or np.ndarray(dtype=object) of dicts
-        if isinstance(h, list):
-            return len(h) > 0 and isinstance(h[0], dict)
-        if isinstance(h, np.ndarray):
-            return h.dtype == object and h.size > 0 and isinstance(h.flat[0], dict)
-        return False
+    rows = normalize_history_rows(history)
+    if not rows:
+        print("  Warning: empty history, skipping load-displacement plot.")
+        return
+    if any("u" not in row or "P" not in row for row in rows):
+        raise ValueError("History rows must provide canonical 'u' and 'P' values.")
 
-    if _is_dict_history(history):
-        seq = history if isinstance(history, list) else list(history)
-        u_mm = np.array([h.get('u', np.nan) for h in seq], dtype=float) * 1e3  # m → mm
-        P_kN = np.array([h.get('P', np.nan) for h in seq], dtype=float) / 1e3  # N → kN
-    else:
-        # Single-crack format: 2D array with columns [step, u, P, ...]
-        history_arr = np.asarray(history)
-
-        if history_arr.size == 0:
-            print("  Warning: empty history, skipping load-displacement plot.")
-            return
-
-        # Some callers may pass a 1D object array of tuples/lists; promote to 2D
-        if history_arr.ndim == 1 and isinstance(history_arr.flat[0], (list, tuple, np.ndarray)):
-            history_arr = np.asarray(list(history_arr), dtype=float)
-
-        if history_arr.ndim != 2 or history_arr.shape[1] < 3:
-            raise ValueError(
-                f"Unexpected history array shape: {history_arr.shape}. "
-                "Expected (n, >=3) with [step, u, P, ...] or a dict sequence with keys 'u' and 'P'."
-            )
-
-        u_mm = history_arr[:, 1].astype(float) * 1e3  # m → mm
-        P_kN = history_arr[:, 2].astype(float) / 1e3  # N → kN
+    u_mm = np.array([row["u"] for row in rows], dtype=float) * 1e3  # m -> mm
+    P_kN = np.array([row["P"] for row in rows], dtype=float) / 1e3  # N -> kN
 
 # Save CSV
     csv_file = output_dir / "load_displacement.csv"
@@ -510,61 +457,48 @@ def plot_load_displacement(
     print(f"  Plot saved: {plot_file.name}")
 
 
-def plot_slip_profile(
-    x_mm: np.ndarray,
-    slip_mm: np.ndarray,
-    output_dir: Path,
-    step: Optional[int] = None,
-):
-    """Generate slip(x) profile plot."""
-    plt = _lazy_import_plt()
+def plot_slip_profile(x_mm, slip_mm, output_dir: Path, step: int | None = None):
+    """Plot slip along the reinforcement length.
 
-    if step is None:
-        plot_file = output_dir / "slip_profile_final.png"
-        title_step = "final"
-    else:
-        plot_file = output_dir / f"slip_profile_step_{step:04d}.png"
-        title_step = f"step {step}"
+    step may be None when the step index cannot be extracted from history.
+    """
+    import matplotlib.pyplot as plt
 
-    plt.figure()
-    plt.plot(x_mm, slip_mm)
-    plt.xlabel("Position along rebar (mm)")
-    plt.ylabel("Slip (mm)")
-    plt.title(f"Bond slip profile ({title_step})")
+    plot_file = output_dir / f"slip_profile_step_{_step_tag(step)}.png"
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(x_mm, slip_mm, marker='o')
+    plt.xlabel('Position along rebar (mm)')
+    plt.ylabel('Slip (mm)')
+    plt.title(f'Slip Profile at step {_step_tag(step)}')
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(plot_file, dpi=150)
     plt.close()
-    print(f"  Slip plot saved: {plot_file.name}")
 
-def plot_bond_stress_profile(
-    x_mm: np.ndarray,
-    tau_mpa: np.ndarray,
-    output_dir: Path,
-    step: Optional[int] = None,
-):
-    """Generate bond stress profile plot."""
-    plt = _lazy_import_plt()
 
-    if step is None:
-        plot_file = output_dir / "bond_stress_profile_final.png"
-        title_step = "final"
-    else:
-        plot_file = output_dir / f"bond_stress_profile_step_{step:04d}.png"
-        title_step = f"step {step}"
+def plot_bond_stress_profile(x_mm, tau_mpa, output_dir: Path, step: int | None = None):
+    """Plot bond stress along the reinforcement length."""
+    import matplotlib.pyplot as plt
 
-    plt.figure()
-    plt.plot(x_mm, tau_mpa)
-    plt.xlabel("Position along rebar (mm)")
-    plt.ylabel("Bond stress (MPa)")
-    plt.title(f"Bond stress profile ({title_step})")
+    plot_file = output_dir / f"bond_stress_profile_step_{_step_tag(step)}.png"
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(x_mm, tau_mpa, marker='o')
+    plt.xlabel('Position along rebar (mm)')
+    plt.ylabel('Bond stress (MPa)')
+    plt.title(f'Bond Stress Profile at step {_step_tag(step)}')
     plt.grid(True)
     plt.tight_layout()
     plt.savefig(plot_file, dpi=150)
     plt.close()
-    print(f"  Bond stress plot saved: {plot_file.name}")
 
-def postprocess_case(case, results: Dict[str, Any]):
+
+# =============================================================================
+# MAIN POSTPROCESS FUNCTION
+# =============================================================================
+
+def postprocess_case(case, results):
     """
     Unified postprocessing entry point for solver_interface.
 
@@ -581,7 +515,7 @@ def postprocess_case(case, results: Dict[str, Any]):
 
 
 def postprocess_results(
-    results: Dict[str, Any],
+    results,
     case_config,  # CaseConfig
     output_dir: Path,
 ):
@@ -604,12 +538,26 @@ def postprocess_results(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    nodes = results['nodes']
-    elems = results['elems']
-    u = results['u']
-    history = results['history']
-    crack = results.get('crack', None)
-    bond_states = results.get('bond_states', None)
+    from xfem_clean.results import AnalysisResult
+
+    if isinstance(results, AnalysisResult):
+        nodes = results.fields['nodes_m']
+        elems = results.fields['elements']
+        u = results.fields['displacement_m']
+        history = results.steps
+        cracks_list = list(results.cracks)
+        crack = cracks_list[0] if cracks_list else None
+        bond_states = results.reinforcement.get('bond_states')
+        rebar_segs_canonical = results.reinforcement.get('segments')
+    else:
+        nodes = results['nodes']
+        elems = results['elems']
+        u = results['u']
+        history = results['history']
+        crack = results.get('crack', None)
+        cracks_list = results.get('cracks', [crack] if crack is not None else [])
+        bond_states = results.get('bond_states', None)
+        rebar_segs_canonical = results.get('rebar_segs', None)
     bond_law = results.get('bond_law', None)
     subdomain_mgr = results.get('subdomain_mgr', None)
 
@@ -618,7 +566,6 @@ def postprocess_results(
         plot_load_displacement(history, output_dir)
 
     # Crack pattern extraction (handle both single crack and multicrack)
-    cracks_list = results.get('cracks', [crack] if crack is not None else [])
     if cracks_list and case_config.outputs.save_crack_data:
         for i, c in enumerate(cracks_list):
             if c is not None and c.active:
@@ -627,7 +574,7 @@ def postprocess_results(
 
     # Bond-slip profiles (if applicable)
     if bond_states is not None and bond_law is not None:
-        rebar_segs = results.get('rebar_segs', None)
+        rebar_segs = rebar_segs_canonical
 
         if rebar_segs is not None and len(rebar_segs) > 0:
             # Slip profile
@@ -808,12 +755,10 @@ def postprocess_results(
     # VTK export (final step)
     if case_config.outputs.save_vtk:
         if len(history) > 0:
-            # Handle both numeric and dict history formats
-            if isinstance(history[0], dict):
-                final_step = history[-1].get('step', len(history)-1)
-            else:
-                final_step = _final_step_from_history(history)
-            export_vtk_step(output_dir / "vtk", final_step, nodes, elems, u)
+            final_step = _final_step_from_history(history)
+            if final_step is None:
+                final_step = len(history) - 1
+            export_vtk_step(output_dir / "vtk", int(final_step), nodes, elems, u)
 
     print("\n✓ Postprocessing completed")
     print(f"✓ Outputs saved to: {output_dir}\n")

@@ -66,7 +66,8 @@ def compute_energy_residual(results: Dict) -> float:
     if len(u_arr) == 0:
         return 0.0
 
-    W_external = np.trapezoid(np.abs(P_arr), u_arr)  # [J]
+    from xfem_clean.utils.numpy_compat import trapezoid
+    W_external = trapezoid(np.abs(P_arr), u_arr)  # [J]
 
     # Internal dissipation (try to extract from extras, otherwise fallback)
     extras = arrays['extras']

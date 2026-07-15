@@ -103,10 +103,10 @@ def bond_slip_assembly_kernel(
         Triplets for stiffness matrix (COO format)
     s_current : np.ndarray
         Current slip values [n_seg]
-    D_bond_inc : float
-        Bond dissipation increment [J]
-    D_dowel_inc : float
-        Dowel dissipation increment [J]
+    bond_work_inc : float
+        Signed bond-interface work increment [J]
+    dowel_work_inc : float
+        Signed dowel work increment [J]
 
     Notes
     -----
@@ -131,8 +131,8 @@ def bond_slip_assembly_kernel(
     s_current = np.zeros(n_seg, dtype=np.float64)
 
     # Dissipation accumulators
-    D_bond_inc = 0.0
-    D_dowel_inc = 0.0
+    bond_work_inc = 0.0
+    dowel_work_inc = 0.0
 
     # Unpack bond parameters (THESIS PARITY: extended for proper εu)
     tau_max = bond_params[0]
@@ -469,7 +469,7 @@ def bond_slip_assembly_kernel(
             # Trapezoidal rule: ΔW = 0.5*(τ_old + τ_new)*(s_new - s_old)*perimeter*L
             ds = s - s_prev
             dW_bond_seg = 0.5 * (tau_prev + tau) * ds * perimeter * L0
-            D_bond_inc += dW_bond_seg
+            bond_work_inc += dW_bond_seg
 
         # Stiffness contribution: K_seg = K_bond * g ⊗ g^T (full 8x8 segment Jacobian)
         # where:
@@ -794,11 +794,11 @@ def bond_slip_assembly_kernel(
                 # Trapezoidal rule: ΔW = 0.5*(σ_old + σ_new)*(w_new - w_old)*perimeter*L
                 dw = w - w_prev
                 dW_dowel_seg = 0.5 * (sigma_prev + sigma) * dw * perimeter * L0
-                D_dowel_inc += dW_dowel_seg
+                dowel_work_inc += dW_dowel_seg
 
     # Trim arrays
     rows_out = rows[:entry_idx]
     cols_out = cols[:entry_idx]
     data_out = data[:entry_idx]
 
-    return f, rows_out, cols_out, data_out, s_current, D_bond_inc, D_dowel_inc
+    return f, rows_out, cols_out, data_out, s_current, bond_work_inc, dowel_work_inc

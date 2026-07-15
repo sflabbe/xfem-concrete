@@ -26,6 +26,7 @@ try:
     from examples.gutierrez_thesis.solver_interface import (
         run_case_solver, case_config_to_xfem_model
     )
+    from xfem_clean.results import AnalysisResult
 except ImportError as e:
     pytest.skip(f"Import error: {e}", allow_module_level=True)
 
@@ -91,7 +92,7 @@ def test_case_01_pullout_coarse():
         bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
         # Verify bundle structure
-        assert isinstance(bundle, dict), "Should return dict"
+        assert isinstance(bundle, AnalysisResult), "Should return AnalysisResult"
         assert 'history' in bundle, "Should have history"
 
         history = bundle['history']
@@ -177,7 +178,7 @@ def test_case_03_tensile_coarse():
     try:
         bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
-        assert isinstance(bundle, dict), "Should return dict"
+        assert isinstance(bundle, AnalysisResult), "Should return AnalysisResult"
         assert 'history' in bundle, "Should have history"
         assert 'cracks' in bundle, "Should have cracks"
 
@@ -267,7 +268,7 @@ def test_case_04_beam_coarse():
     try:
         bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
-        assert isinstance(bundle, dict), "Should return dict"
+        assert isinstance(bundle, AnalysisResult), "Should return AnalysisResult"
         assert 'history' in bundle, "Should have history"
 
         history = bundle['history']
@@ -361,7 +362,7 @@ def test_case_05_wall_coarse():
     try:
         bundle = run_case_solver(case, mesh_factor=1.0, enable_postprocess=False)
 
-        assert isinstance(bundle, dict), "Should return dict"
+        assert isinstance(bundle, AnalysisResult), "Should return AnalysisResult"
         assert 'history' in bundle, "Should have history"
 
         history = bundle['history']

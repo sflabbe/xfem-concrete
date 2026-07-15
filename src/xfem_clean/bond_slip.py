@@ -1246,8 +1246,9 @@ def assemble_bond_slip(
         Updated bond-slip states (trial)
     aux : dict, optional
         Auxiliary data (only returned if return_aux=True), including:
-        - D_bond_inc: Bond dissipation increment [J] (if compute_dissipation=True)
-        - D_dowel_inc: Dowel dissipation increment [J] (if enable_dowel and compute_dissipation)
+        - bond_work_inc: signed bond-interface work increment [J]
+        - dowel_work_inc: signed dowel work increment [J]
+        Deprecated ``D_bond_inc`` and ``D_dowel_inc`` aliases are also present.
     """
     n_seg = steel_segments.shape[0]
     ndof_total = u_total.shape[0]
@@ -1388,7 +1389,7 @@ def assemble_bond_slip(
             if compute_dissipation and u_total_prev is not None:
                 u_total_prev_numba = np.ascontiguousarray(u_total_prev, dtype=np.float64)
 
-            f_bond, rows, cols, data, s_curr, D_bond_inc, D_dowel_inc = bond_slip_assembly_kernel(
+            f_bond, rows, cols, data, s_curr, bond_work_inc, dowel_work_inc = bond_slip_assembly_kernel(
                 u_total,
                 steel_segments,
                 steel_dof_map,
@@ -1422,8 +1423,12 @@ def assemble_bond_slip(
             tau_current=np.zeros(n_seg),  # Computed inline; could extract if needed
         )
 
-        # TASK 5: Dissipation tracking (Numba path - now implemented)
-        aux = {"D_bond_inc": D_bond_inc, "D_dowel_inc": D_dowel_inc}
+        aux = {
+            "bond_work_inc": bond_work_inc,
+            "dowel_work_inc": dowel_work_inc,
+            "D_bond_inc": bond_work_inc,
+            "D_dowel_inc": dowel_work_inc,
+        }
 
     else:
         # Part A4: Pure Python fallback for debugging
@@ -1505,9 +1510,8 @@ def _bond_slip_assembly_python(
     data = []
     s_current = np.zeros(n_seg, dtype=float)
 
-    # TASK 5: Dissipation accumulators
-    D_bond_inc = 0.0  # Bond dissipation increment [J]
-    D_dowel_inc = 0.0  # Dowel dissipation increment [J]
+    bond_work_inc = 0.0  # Signed trapezoidal interface work [J]
+    dowel_work_inc = 0.0  # Signed trapezoidal dowel work [J]
 
     # Use provided perimeter or compute from bond_law.d_bar
     if perimeter is None:
@@ -1763,7 +1767,7 @@ def _bond_slip_assembly_python(
             # ΔD = 0.5 * (tau_old + tau_new) * (s_new - s_old) * perimeter * L0
             d_slip = s - s_old
             diss_local = 0.5 * (tau_old + tau) * d_slip * perimeter * L0
-            D_bond_inc += diss_local
+            bond_work_inc += diss_local
 
         # Bond force
         F_bond = tau * perimeter * L0
@@ -1817,7 +1821,7 @@ def _bond_slip_assembly_python(
                 # ΔD = 0.5 * (sigma_old + sigma_new) * (w_new - w_old) * perimeter * L0
                 d_opening = w_pos - w_old_pos
                 diss_dowel_local = 0.5 * (sigma_dowel_old + sigma_dowel) * d_opening * perimeter * L0
-                D_dowel_inc += diss_dowel_local
+                dowel_work_inc += diss_dowel_local
 
             # Convert traction to force: F = sigma * perimeter * L0
             F_dowel = sigma_dowel * perimeter * L0
@@ -1921,10 +1925,12 @@ def _bond_slip_assembly_python(
         tau_current=np.zeros(n_seg),
     )
 
-    # Auxiliary data (TASK 5: dissipation)
+    # D_* aliases are deprecated: these trapezoidal terms are signed work.
     aux = {
-        "D_bond_inc": float(D_bond_inc),
-        "D_dowel_inc": float(D_dowel_inc),
+        "bond_work_inc": float(bond_work_inc),
+        "dowel_work_inc": float(dowel_work_inc),
+        "D_bond_inc": float(bond_work_inc),
+        "D_dowel_inc": float(dowel_work_inc),
     }
 
     # Always return 4 values (conditional return handled by caller)

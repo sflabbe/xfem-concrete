@@ -17,6 +17,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
+import pytest
 
 
 def test_omega_y_with_proper_epsilon_u():
@@ -239,6 +240,9 @@ def test_omega_c_infrastructure():
 
 def test_python_numba_parity_simple():
     """Test that Python and Numba paths give similar results for simple case."""
+    from xfem_clean.numba.utils import NUMBA_AVAILABLE
+    if not NUMBA_AVAILABLE:
+        pytest.skip("Numba is not installed or unsupported by this interpreter")
     from xfem_clean.bond_slip import (
         BondSlipModelCode2010,
         BondSlipStateArrays,
@@ -251,11 +255,11 @@ def test_python_numba_parity_simple():
         [1, 2, 0.1, 1.0, 0.0],
     ], dtype=float)
 
-    # DOF map: node i → DOFs [2*i, 2*i+1] (concrete) and [4+2*i, 4+2*i+1] (steel)
+    # Three concrete nodes occupy DOFs 0..5; steel starts at offset 6.
     steel_dof_map = np.array([
-        [4, 5],   # Node 0
-        [6, 7],   # Node 1
-        [8, 9],   # Node 2
+        [6, 7],   # Node 0
+        [8, 9],   # Node 1
+        [10, 11], # Node 2
     ], dtype=np.int64)
 
     # Create bond law
@@ -269,40 +273,26 @@ def test_python_numba_parity_simple():
     states = BondSlipStateArrays.zeros(2)
 
     # Create displacement vector (small perturbation)
-    u = np.zeros(10, dtype=float)
-    u[6] = 1e-5  # Steel node 1, x-direction
+    u = np.zeros(12, dtype=float)
+    u[8] = 1e-5  # Steel node 1, x-direction
 
-    # Assemble with Python
-    try:
-        f_py, K_py, states_py = assemble_bond_slip(
-            u, steel_segments, 4, bond_law, states,
-            steel_dof_map=steel_dof_map,
-            steel_EA=1e6,
-            use_numba=False,
-        )
+    f_py, K_py, states_py = assemble_bond_slip(
+        u, steel_segments, 6, bond_law, states,
+        steel_dof_map=steel_dof_map,
+        steel_EA=1e6,
+        use_numba=False,
+    )
+    f_nb, K_nb, states_nb = assemble_bond_slip(
+        u, steel_segments, 6, bond_law, states,
+        steel_dof_map=steel_dof_map,
+        steel_EA=1e6,
+        use_numba=True,
+    )
 
-        # Assemble with Numba (if available)
-        try:
-            f_nb, K_nb, states_nb = assemble_bond_slip(
-                u, steel_segments, 4, bond_law, states,
-                steel_dof_map=steel_dof_map,
-                steel_EA=1e6,
-                use_numba=True,
-            )
-
-            # Compare
-            f_diff = np.linalg.norm(f_py - f_nb) / (np.linalg.norm(f_py) + 1e-10)
-            K_diff = np.linalg.norm((K_py - K_nb).data) / (np.linalg.norm(K_py.data) + 1e-10)
-
-            assert f_diff < 1e-8, f"Python/Numba force mismatch: relative error = {f_diff:.2e}"
-            assert K_diff < 1e-8, f"Python/Numba stiffness mismatch: relative error = {K_diff:.2e}"
-
-            print(f"✓ Python/Numba parity: force error = {f_diff:.2e}, K error = {K_diff:.2e}")
-        except Exception as e:
-            print(f"⚠ Numba not available or failed, skipping parity test: {e}")
-
-    except Exception as e:
-        print(f"⚠ Python assembly failed (expected if numpy not available): {e}")
+    f_diff = np.linalg.norm(f_py - f_nb) / (np.linalg.norm(f_py) + 1e-10)
+    K_diff = np.linalg.norm((K_py - K_nb).data) / (np.linalg.norm(K_py.data) + 1e-10)
+    assert f_diff < 1e-8, f"Python/Numba force mismatch: relative error = {f_diff:.2e}"
+    assert K_diff < 1e-8, f"Python/Numba stiffness mismatch: relative error = {K_diff:.2e}"
 
 
 if __name__ == "__main__":

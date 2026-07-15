@@ -1,6 +1,6 @@
-import subprocess
 import sys
 from pathlib import Path
+from tests.process_utils import run_process
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -8,12 +8,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def run_runner(args):
     command = [sys.executable, "-m", "examples.gutierrez_thesis.run", *args]
-    return subprocess.run(
+    return run_process(
         command,
         cwd=REPO_ROOT,
         check=True,
-        text=True,
-        capture_output=True,
+        timeout=30,
     )
 
 

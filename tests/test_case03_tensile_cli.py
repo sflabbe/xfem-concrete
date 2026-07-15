@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import csv
 import os
-import subprocess
 import sys
 from math import isfinite
 from pathlib import Path
 
 import pytest
+from tests.process_utils import run_process
 
 
 @pytest.mark.slow
@@ -35,13 +35,11 @@ def test_case03_tensile_cli_multicrack(tmp_path: Path) -> None:
         str(output_dir),
     ]
 
-    result = subprocess.run(
+    result = run_process(
         cmd,
-        capture_output=True,
-        text=True,
-        check=False,
         cwd=repo_root,
         env=env,
+        timeout=180,
     )
 
     assert result.returncode == 0, (

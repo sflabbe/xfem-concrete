@@ -9,12 +9,14 @@ import numpy as np
 
 from examples.gutierrez_thesis.case_config import (
     CaseConfig,
+    CaseConfigurationError,
     CEBFIPBondLaw,
     BilinearBondLaw as BilinearBondLawConfig,
     BanholzerBondLaw as BanholzerBondLawConfig,
     RebarLayer,
     FRPSheet,
     SubdomainConfig,
+    normalize_case_config,
 )
 
 from xfem_clean.xfem.model import XFEMModel
@@ -28,17 +30,19 @@ from xfem_clean.bond_slip import (
 )
 from xfem_clean.xfem.subdomains import build_subdomain_manager_from_config
 from xfem_clean.fem.mesh import structured_quad_mesh
+from xfem_clean.results import AnalysisResult
+
+
+class BondLayerConfigurationError(ValueError):
+    """Raised when a configured reinforcement cannot form a bond layer."""
 
 
 # =============================================================================
 # BOND LAW MAPPER
 # =============================================================================
 
-_WARNED_BOND_UNITS_CASES: set[str] = set()
-
-
 def _reset_warned_cases_for_tests() -> None:
-    _WARNED_BOND_UNITS_CASES.clear()
+    """Deprecated no-op retained for old unit tests."""
 
 
 def map_bond_law(bond_law_config: Any, case_id: str = "unknown") -> Any:
@@ -58,39 +62,13 @@ def map_bond_law(bond_law_config: Any, case_id: str = "unknown") -> Any:
         Bond law for solver
     """
     if isinstance(bond_law_config, CEBFIPBondLaw):
-        def _valid_slips(slips: Tuple[float, float, float]) -> bool:
-            s1, s2, s3 = slips
-            return s1 > 0.0 and s1 <= s2 and s2 < s3
-
         s_raw = (bond_law_config.s1, bond_law_config.s2, bond_law_config.s3)
-        s_mm = tuple(s * 1e-3 for s in s_raw)  # mm → m
-        s_m = s_raw
-
-        ok_mm = _valid_slips(s_mm)
-        ok_m = _valid_slips(s_m)
-
-        if ok_mm and not ok_m:
-            s1, s2, s3 = s_mm
-        elif ok_m and not ok_mm:
-            s1, s2, s3 = s_m
-        elif ok_mm and ok_m:
-            case_key = case_id or "__unknown__"
-            if case_key not in _WARNED_BOND_UNITS_CASES:
-                import warnings
-                warnings.warn(
-                    "Ambiguous bond-slip units for case "
-                    f"{case_key}: raw={s_raw}, mm->m={s_mm}, m={s_m}. "
-                    "Defaulting to mm->m conversion.",
-                    RuntimeWarning,
-                )
-                _WARNED_BOND_UNITS_CASES.add(case_key)
-            s1, s2, s3 = s_mm
-        else:
-            raise ValueError(
-                "Invalid bond-slip params for case="
-                f"{case_id}: raw={s_raw}, mm->m={s_mm}, m={s_m}. "
-                "Require 0 < s1 <= s2 < s3."
+        s1_mm, s2_mm, s3_mm = s_raw
+        if not (s1_mm > 0.0 and s1_mm <= s2_mm and s2_mm < s3_mm):
+            raise CaseConfigurationError(
+                "bond_law.slip_mm", s_raw, ["0 < s1 <= s2 < s3"], case_id=case_id,
             )
+        s1, s2, s3 = (s * 1e-3 for s in s_raw)
 
         # Convert MPa to Pa
         return CustomBondSlipLaw(
@@ -124,7 +102,10 @@ def map_bond_law(bond_law_config: Any, case_id: str = "unknown") -> Any:
         )
 
     else:
-        raise ValueError(f"Unknown bond law type: {type(bond_law_config)}")
+        raise CaseConfigurationError(
+            "bond_law.type", type(bond_law_config).__name__,
+            ["BanholzerBondLaw", "BilinearBondLaw", "CEBFIPBondLaw"], case_id=case_id,
+        )
 
 
 # =============================================================================
@@ -189,7 +170,7 @@ def build_bond_layers_from_case(
                 # Snap to nearest x-grid to avoid empty selections on coarse meshes
                 x_levels = np.unique(np.round(nodes[:, 0], 12))
                 if x_levels.size == 0:
-                    raise ValueError(
+                    raise BondLayerConfigurationError(
                         "No x-levels available to place vertical rebars for case "
                         f"{case.case_id}, layer {layer_idx}."
                     )
@@ -206,7 +187,7 @@ def build_bond_layers_from_case(
                 # Create segments connecting consecutive nodes
                 n_segs = len(nodes_at_x) - 1
                 if n_segs < 1:
-                    raise ValueError(
+                    raise BondLayerConfigurationError(
                         "Insufficient nodes for vertical rebar placement: "
                         f"case={case.case_id}, layer={layer_idx}, "
                         f"x_target={x_position:.6f} m, x_snapped={x_bar:.6f} m, "
@@ -235,7 +216,7 @@ def build_bond_layers_from_case(
                     segments[i] = [n1, n2, L0, cx, cy]
 
             else:
-                raise ValueError(
+                raise BondLayerConfigurationError(
                     f"Unsupported rebar orientation: {orientation}° "
                     f"(only 0° and 90° supported currently)"
                 )
@@ -460,7 +441,7 @@ def build_bcs_from_case(
         # Positive scale for pullout (pull in +x direction)
         prescribed_scale = 1.0
 
-    elif "frp" in case_name or "sspot" in case_name:
+    elif case.frp_sheets:
         # FRP SHEET TEST (SSPOT - Single Shear Push-Off Test):
         # - Fix bottom edge (y=0): uy=0 for all nodes
         # - Fix ux=0 for left bottom corner (prevent rigid body)
@@ -780,6 +761,9 @@ def case_config_to_xfem_model(case: CaseConfig) -> XFEMModel:
         XFEM solver model
     """
 
+    if not getattr(case, "_normalized", False):
+        case = normalize_case_config(case)
+
     # Convert units: mm → m, MPa → Pa, N/mm → N/m
     L = case.geometry.length * 1e-3  # mm → m
     H = case.geometry.height * 1e-3
@@ -841,7 +825,7 @@ def case_config_to_xfem_model(case: CaseConfig) -> XFEMModel:
         "cdp_lite": "cdp-lite",
         "cdp_full": "cdp",
     }
-    bulk_material = bulk_material_map.get(case.concrete.model_type, "elastic")
+    bulk_material = bulk_material_map[case.concrete.model_type]
 
     # Bond-slip configuration (rebar or FRP)
     enable_bond_slip = len(case.rebar_layers) > 0 or len(case.frp_sheets) > 0
@@ -981,6 +965,9 @@ def _should_use_multicrack(case: CaseConfig) -> bool:
     - Non-elastic bulk material (CDP/DP)
     - Cyclic loading
     """
+    if case.solver_engine != "auto":
+        return case.solver_engine == "multi"
+
     multicrack_case_ids = {
         "03_tensile_stn12",
         "04_beam_3pb_t5a1",
@@ -1016,7 +1003,7 @@ def run_case_solver(
     return_bundle: bool = True,
     output_dir: Optional[str] = None,
     cli_args=None,  # CLI arguments for overrides (e.g., --use-numba)
-) -> Dict[str, Any]:
+) -> AnalysisResult:
     """
     Run XFEM solver for a thesis case.
 
@@ -1037,19 +1024,21 @@ def run_case_solver(
 
     Returns
     -------
-    results : dict
-        Solver results with keys:
-        - 'nodes': node coordinates
-        - 'elems': element connectivity
-        - 'u': displacement vector
-        - 'history': load-displacement history
-        - 'crack': crack object
-        - 'bond_states': bond-slip states (if applicable)
+    AnalysisResult
+        Schema-versioned result. Historical dict keys remain available through
+        its deprecated compatibility mapping.
     """
+
+    case = normalize_case_config(case)
 
     if cli_args is not None and hasattr(cli_args, "bulk") and cli_args.bulk is not None:
         case.concrete.model_type = cli_args.bulk
         print(f"Override: concrete.model_type = {cli_args.bulk} (via --bulk)")
+
+    if cli_args is not None and hasattr(cli_args, "solver") and cli_args.solver is not None:
+        case.solver_engine = cli_args.solver
+
+    case = normalize_case_config(case)
 
     # Create model
     model = case_config_to_xfem_model(case)
@@ -1082,17 +1071,17 @@ def run_case_solver(
     # FASE D: Dispatcher for single-crack vs multicrack vs cyclic
     is_cyclic = hasattr(case.loading, 'loading_type') and case.loading.loading_type == "cyclic"
     use_multicrack = _should_use_multicrack(case)
-    solver_override = None
-    if cli_args is not None and hasattr(cli_args, "solver") and cli_args.solver is not None:
-        solver_override = cli_args.solver
-        use_multicrack = cli_args.solver == "multi"
-        print(f"Override: solver = {cli_args.solver} (via --solver)")
+    solver_override = case.solver_engine if case.solver_engine != "auto" else None
+    if solver_override is not None:
+        print(f"Override: solver = {solver_override} (via normalized config)")
 
     if model.enable_bond_slip and not use_multicrack:
-        use_multicrack = True
         if solver_override == "single":
-            print("Override: bond-slip on -> forcing multicrack solver (single-crack disabled).")
+            raise CaseConfigurationError(
+                "solver_engine", "single", ["multi"], case_id=case.case_id,
+            )
         else:
+            use_multicrack = True
             print("Auto: bond-slip on -> using multicrack solver.")
 
     # Extract loading parameters
@@ -1186,18 +1175,12 @@ def run_case_solver(
         bond_law = map_bond_law(case.rebar_layers[0].bond_law, case_id=case.case_id)
 
     if case.rebar_layers or case.frp_sheets:
-        try:
-            # Try multi-layer approach first
-            bond_layers = build_bond_layers_from_case(case, nodes, elems)
-            if bond_layers:
-                print(f"  Built {len(bond_layers)} bond layer(s):")
-                for layer in bond_layers:
-                    print(f"    - {layer.layer_id}: {layer.segments.shape[0]} segments, "
-                          f"EA={layer.EA/1e6:.1f} MN, perimeter={layer.perimeter*1e3:.1f} mm")
-        except Exception as e:
-            print(f"  Warning: build_bond_layers_from_case() failed: {e}")
-            print(f"  Falling back to legacy single-layer approach")
-            bond_layers = None
+        bond_layers = build_bond_layers_from_case(case, nodes, elems)
+        if bond_layers:
+            print(f"  Built {len(bond_layers)} bond layer(s):")
+            for layer in bond_layers:
+                print(f"    - {layer.layer_id}: {layer.segments.shape[0]} segments, "
+                      f"EA={layer.EA/1e6:.1f} MN, perimeter={layer.perimeter*1e3:.1f} mm")
 
     # Prepare rebar/FRP segments for BC mapping
     from xfem_clean.rebar import prepare_rebar_segments, prepare_edge_segments
@@ -1413,7 +1396,7 @@ def run_case_solver(
         )
 
     # Package results with all necessary data for postprocessing
-    results = {
+    legacy_bundle = {
         'nodes': bundle['nodes'],
         'elems': bundle['elems'],
         'u': bundle['u'],
@@ -1431,8 +1414,17 @@ def run_case_solver(
     }
 
     # Postprocessing (FASE G)
+    result = AnalysisResult.from_solver_bundle(
+        legacy_bundle,
+        engine="multi" if use_multicrack else "single",
+        material=case.concrete.model_type,
+        bond_layer_count=len(bond_layers or ()),
+        use_numba=bool(model.use_numba),
+        compat_mode=bool(case.compat_mode),
+    )
+
     if enable_postprocess:
         from examples.gutierrez_thesis.postprocess_comprehensive import postprocess_case
-        postprocess_case(case, results)
+        postprocess_case(case, result)
 
-    return results
+    return result

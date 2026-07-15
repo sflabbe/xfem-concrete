@@ -130,10 +130,11 @@ def test_case_02_frp_sspot_minimal():
     assert 'u' in results, "Results should contain displacement vector"
 
     # Check for NaNs
-    history = results['history']
-    assert len(history) > 0, "History should have entries"
-    for step_data in history:
-        assert np.all(np.isfinite(step_data)), f"NaNs detected in history: {step_data}"
+    assert results.steps, "Canonical steps should have entries"
+    for step_data in results.steps:
+        for key in ("step", "u", "P"):
+            assert key in step_data, f"Missing {key!r} in canonical step"
+            assert np.isfinite(step_data[key]), f"Non-finite {key}: {step_data}"
 
     u = results['u']
     assert np.all(np.isfinite(u)), "NaNs detected in displacement vector"

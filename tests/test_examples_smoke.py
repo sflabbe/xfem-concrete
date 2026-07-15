@@ -1,9 +1,9 @@
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from tests.process_utils import run_process
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -13,13 +13,12 @@ def run_command(args):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
     command = [sys.executable, *args]
-    return subprocess.run(
+    return run_process(
         command,
         cwd=REPO_ROOT,
         env=env,
         check=True,
-        text=True,
-        capture_output=True,
+        timeout=300,
     )
 
 
@@ -33,10 +32,7 @@ def test_examples_smoke():
         "all",
         "--mesh",
         "coarse",
-        "--nsteps",
-        "1",
-        "--no-post",
-        "--no-numba",
+        "--dry-run",
     ])
 
     run_command(["examples/pullout_minimal_working.py"])

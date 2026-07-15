@@ -189,17 +189,19 @@ def test_assembly_routine():
 
     C = plane_stress_C(E, nu)
 
+    # No crack
+    crack = XFEMCrack(
+        x0=0.0, y0=0.0, tip_x=0.0, tip_y=0.0, stop_y=L, active=False,
+    )
+
     # DOFs (no enrichment, no steel)
     dofs = build_xfem_dofs(
         nodes=nodes,
-        enriched_nodes=[],
-        tip_enriched_nodes=[],
+        elems=elems,
+        crack=crack,
+        H_region_ymax=-1.0,
         rebar_segs=None,
     )
-
-    # No crack
-    crack = XFEMCrack(x0=0.0, y0=0.0, angle=0.0, length=0.0)
-    crack.active = False
 
     # Zero displacement
     q = np.zeros(dofs.ndof, dtype=float)

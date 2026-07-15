@@ -79,7 +79,9 @@ class XFEMCrack:
         if seg is None:
             return False
         phis = [self.phi(float(xe[a, 0]), float(xe[a, 1])) for a in range(xe.shape[0])]
-        return (min(phis) < 0.0) and (max(phis) > 0.0)
+        sign_change = (min(phis) < 0.0) and (max(phis) > 0.0)
+        tip_in = (self.tip_x > xmin) and (self.tip_x < xmax) and (self.tip_y > ymin) and (self.tip_y < ymax)
+        return bool(sign_change or tip_in)
 
 
 def tip_polar(x: float, y: float, xt: float, yt: float, r_eps: float = 1e-12):

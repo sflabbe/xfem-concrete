@@ -54,7 +54,10 @@ class RunResult:
 
 def _apply_smoke_limits(case_config, max_steps: int) -> None:
     if isinstance(case_config.loading, MonotonicLoading):
-        case_config.loading.n_steps = min(case_config.loading.n_steps, max_steps)
+        original_steps = max(1, case_config.loading.n_steps)
+        limited_steps = min(original_steps, max_steps)
+        case_config.loading.max_displacement *= limited_steps / original_steps
+        case_config.loading.n_steps = limited_steps
     elif isinstance(case_config.loading, CyclicLoading):
         case_config.loading.targets = case_config.loading.targets[:1]
         case_config.loading.n_cycles_per_target = min(case_config.loading.n_cycles_per_target, 1)

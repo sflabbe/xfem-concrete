@@ -20,54 +20,6 @@ from examples.parametric.parametric_study import (
     modify_case_parameter,
     extract_case_metrics,
 )
-from examples.gutierrez_thesis.history_utils import extract_metrics, history_to_arrays
-
-
-def test_history_to_arrays_numeric():
-    """Test history_to_arrays with numeric format."""
-    print("\n[test_history_to_arrays_numeric]")
-    history = [
-        [0, 0.0, 0.0],
-        [1, 1e-3, 5000.0],
-        [2, 2e-3, 8000.0],
-    ]
-
-    arrays = history_to_arrays(history)
-    assert len(arrays['u']) == 3
-    assert np.allclose(arrays['P'], [0.0, 5000.0, 8000.0])
-    print("  ✓ Numeric format OK")
-
-
-def test_history_to_arrays_dict():
-    """Test history_to_arrays with dict format (multicrack)."""
-    print("\n[test_history_to_arrays_dict]")
-    history = [
-        {'step': 0, 'u': 0.0, 'P': 0.0, 'ncr': 0},
-        {'step': 1, 'u': 1e-3, 'P': 5000.0, 'ncr': 1},
-        {'step': 2, 'u': 2e-3, 'P': 8000.0, 'ncr': 2},
-    ]
-
-    arrays = history_to_arrays(history)
-    assert len(arrays['u']) == 3
-    assert np.allclose(arrays['ncr'], [0, 1, 2])
-    print("  ✓ Dict format OK")
-
-
-def test_extract_metrics():
-    """Test metric extraction."""
-    print("\n[test_extract_metrics]")
-    history = [
-        [0, 0.0, 0.0],
-        [1, 1e-3, 5000.0],
-        [2, 2e-3, 8000.0],
-        [3, 4e-3, 6000.0],
-    ]
-
-    metrics = extract_metrics(history)
-    assert abs(metrics['P_max_kN'] - 8.0) < 1e-6
-    assert abs(metrics['u_at_Pmax_mm'] - 2.0) < 1e-6
-    assert abs(metrics['ductility'] - 2.0) < 1e-6
-    print("  ✓ extract_metrics OK")
 
 
 def test_parametric_modify_parameter():

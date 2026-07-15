@@ -68,9 +68,10 @@ def create_case_09() -> CaseConfig:
         nu=0.3,
         diameter=0.5,  # mm (typical steel fibre)
         length=30.0,  # mm (typical for such specimens)
-        density=34300.0,  # fibres/m² (3.43 fibres/cm²)
+        density=3.43,  # fibres/cm²; adapter normalizes to exactly 34 300 fibres/m²
         orientation_deg=0.0,  # Horizontal orientation preferred
         volume_fraction_multiplier=1.0,
+        explicit_fraction=0.5,  # Case source: model 50% explicitly
     )
 
     # Fibre bond law (Banholzer)

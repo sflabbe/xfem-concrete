@@ -127,7 +127,10 @@ def build_xfem_dofs(
         tip_nodes = np.zeros(nnode, dtype=bool)
     else:
         xmin, xmax, ymin, ymax = tip_patch
-        tip_nodes = (xs >= xmin) & (xs <= xmax) & (ys >= ymin) & (ys <= ymax)
+        r = max(float(xmax - crack.tip_x), float(crack.tip_x - xmin), float(ymax - crack.tip_y), float(crack.tip_y - ymin))
+        dx = xs - float(crack.tip_x)
+        dy = ys - float(crack.tip_y)
+        tip_nodes = (dx * dx + dy * dy <= r * r) & (xs >= xmin) & (xs <= xmax) & (ys >= ymin) & (ys <= ymax)
 
     H = -np.ones((nnode, 2), dtype=int)
     tip = -np.ones((nnode, 4, 2), dtype=int)

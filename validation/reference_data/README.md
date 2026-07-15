@@ -1,6 +1,6 @@
-# Reference Experimental Data
+# Synthetic Reference Placeholders
 
-This directory contains digitized P-δ curves from experimental tests reported in the thesis.
+This directory currently contains synthetic P-delta curves shaped for testing the validation pipeline. None of the three CSV files is a digitized experimental dataset.
 
 ## Data Sources
 
@@ -49,6 +49,6 @@ print(ref_data.head())
 
 ## Notes
 
-- These curves represent **experimental data** from literature
-- Used for quantitative validation (RMSE, peak error, energy error)
-- Target tolerances: |ΔPmax| < 10%, |ΔE| < 15%
+- These curves are **synthetic placeholders**.
+- They test parsing and metric computation only.
+- Numerical thresholds against them are regression thresholds, not validation accuracy claims.

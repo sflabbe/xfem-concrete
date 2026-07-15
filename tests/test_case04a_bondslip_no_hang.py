@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from tests.process_utils import run_process
 
 
 @pytest.mark.slow
@@ -26,6 +26,8 @@ def test_case04a_bondslip_no_hang(tmp_path: Path) -> None:
         "coarse",
         "--nsteps",
         "1",
+        "--max-displacement",
+        "0.1",
         "--bond-slip",
         "on",
         "--no-post",
@@ -34,11 +36,8 @@ def test_case04a_bondslip_no_hang(tmp_path: Path) -> None:
         str(output_dir),
     ]
 
-    result = subprocess.run(
+    result = run_process(
         cmd,
-        capture_output=True,
-        text=True,
-        check=False,
         cwd=repo_root,
         env=env,
         timeout=120,

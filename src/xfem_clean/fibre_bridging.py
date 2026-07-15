@@ -300,8 +300,9 @@ def fibre_config_from_case(fibre_reinf, thickness_m: float) -> FibreBridgingConf
     # Assume some spread if not specified (fibres aren't perfectly aligned)
     orientation_std_deg = 30.0  # Default: ±30° spread
 
-    # Explicit fraction (for speed, model 10% of fibres and scale forces by 10)
-    explicit_fraction = 0.1
+    # Sampling is a case input. Never replace it with an adapter default because
+    # it controls both the sampled count and the force scale.
+    explicit_fraction = float(fibre.explicit_fraction)
 
     # Random seed
     random_seed = fibre_reinf.random_seed

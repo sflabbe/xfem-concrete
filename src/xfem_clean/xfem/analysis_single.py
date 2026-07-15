@@ -365,6 +365,7 @@ def run_analysis_xfem(
         with actual steel DOFs from dofs_obj.
         """
         nonlocal load_dofs, fixed_base
+        case_id = getattr(model, "case_id", "unknown")
 
         if bc_spec is None:
             return
@@ -389,7 +390,6 @@ def run_analysis_xfem(
                 )
             return
 
-        case_id = getattr(model, "case_id", "unknown")
 
         # Resolve prescribed_dofs (load_dofs)
         resolved_load_dofs = []

@@ -6,9 +6,52 @@ bond laws, loading programs, and output specifications.
 """
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 from typing import List, Optional, Dict, Any, Tuple
 from enum import Enum
 import json
+
+
+CASE_SCHEMA_VERSION = 1
+MATERIAL_ALIASES = {
+    "elastic": "elastic",
+    "linear_elastic": "elastic",
+    "linear-elastic": "elastic",
+    "dp": "dp",
+    "drucker_prager": "dp",
+    "drucker-prager": "dp",
+    "cdp_lite": "cdp_lite",
+    "cdp-lite": "cdp_lite",
+    "cdp_full": "cdp_full",
+    "cdp-full": "cdp_full",
+    "cdp": "cdp_full",
+}
+ENGINE_ALIASES = {
+    "auto": "auto",
+    "single": "single",
+    "single_crack": "single",
+    "single-crack": "single",
+    "multi": "multi",
+    "multicrack": "multi",
+    "multi_crack": "multi",
+}
+
+
+class CaseConfigurationError(ValueError):
+    """Raised when a case cannot be normalized without guessing."""
+
+    def __init__(self, field_name, value, valid_values, *, case_id="unknown", source=None):
+        valid = ", ".join(repr(item) for item in valid_values)
+        origin = f", source={source!r}" if source else ""
+        super().__init__(
+            f"Invalid case configuration: field={field_name!r}, value={value!r}, "
+            f"valid=[{valid}], case_id={case_id!r}{origin}"
+        )
+        self.field_name = field_name
+        self.value = value
+        self.valid_values = tuple(valid_values)
+        self.case_id = case_id
+        self.source = source
 
 
 class LoadingType(Enum):
@@ -167,6 +210,7 @@ class FibreConfig:
     density: float  # fibres per cm^2 in crack zone
     orientation_deg: float = 0.0  # Mean orientation (0=horizontal)
     volume_fraction_multiplier: float = 1.0  # For sensitivity studies
+    explicit_fraction: float = 1.0  # Fraction sampled explicitly; forces are scaled accordingly
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -177,6 +221,7 @@ class FibreConfig:
             "density": self.density,
             "orientation_deg": self.orientation_deg,
             "volume_fraction_multiplier": self.volume_fraction_multiplier,
+            "explicit_fraction": self.explicit_fraction,
         }
 
     @classmethod
@@ -657,6 +702,9 @@ class CaseConfig:
     tolerance: float = 1e-6
     use_line_search: bool = True
     use_substepping: bool = True
+    schema_version: int = CASE_SCHEMA_VERSION
+    solver_engine: str = "auto"
+    compat_mode: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON/YAML export"""
@@ -675,6 +723,9 @@ class CaseConfig:
             "tolerance": self.tolerance,
             "use_line_search": self.use_line_search,
             "use_substepping": self.use_substepping,
+            "schema_version": self.schema_version,
+            "solver_engine": self.solver_engine,
+            "compat_mode": self.compat_mode,
         }
 
     def save_json(self, filepath: str):
@@ -693,7 +744,7 @@ class CaseConfig:
         """Load from JSON file"""
         with open(filepath, 'r') as f:
             data = json.load(f)
-        return cls.from_dict(data)
+        return normalize_case_config(cls.from_dict(data), source=filepath)
 
     @classmethod
     def load_yaml(cls, filepath: str) -> 'CaseConfig':
@@ -701,7 +752,7 @@ class CaseConfig:
         import yaml
         with open(filepath, 'r') as f:
             data = yaml.safe_load(f)
-        return cls.from_dict(data)
+        return normalize_case_config(cls.from_dict(data), source=filepath)
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'CaseConfig':
@@ -739,4 +790,83 @@ class CaseConfig:
             tolerance=data.get('tolerance', 1e-6),
             use_line_search=data.get('use_line_search', True),
             use_substepping=data.get('use_substepping', True),
+            schema_version=data.get('schema_version', CASE_SCHEMA_VERSION),
+            solver_engine=data.get('solver_engine', 'auto'),
+            compat_mode=data.get('compat_mode', False),
         )
+
+
+def normalize_case_config(case: CaseConfig, *, source: Optional[str] = None) -> CaseConfig:
+    """Return one validated, canonical copy of a thesis case configuration.
+
+    Python factories are the canonical source. Importers may pass ``source`` so
+    diagnostics name the YAML/JSON file that supplied an invalid value.
+    """
+    normalized = deepcopy(case)
+    case_id = normalized.case_id or "unknown"
+
+    if normalized.schema_version != CASE_SCHEMA_VERSION:
+        raise CaseConfigurationError(
+            "schema_version", normalized.schema_version, [CASE_SCHEMA_VERSION],
+            case_id=case_id, source=source,
+        )
+
+    raw_material = str(normalized.concrete.model_type).strip().lower()
+    try:
+        normalized.concrete.model_type = MATERIAL_ALIASES[raw_material]
+    except KeyError as exc:
+        raise CaseConfigurationError(
+            "concrete.model_type", raw_material, sorted(MATERIAL_ALIASES),
+            case_id=case_id, source=source,
+        ) from exc
+
+    raw_engine = str(normalized.solver_engine).strip().lower()
+    try:
+        normalized.solver_engine = ENGINE_ALIASES[raw_engine]
+    except KeyError as exc:
+        raise CaseConfigurationError(
+            "solver_engine", raw_engine, sorted(ENGINE_ALIASES),
+            case_id=case_id, source=source,
+        ) from exc
+
+    loading_type = getattr(normalized.loading, "loading_type", None)
+    if loading_type not in {"monotonic", "cyclic"}:
+        raise CaseConfigurationError(
+            "loading.loading_type", loading_type, ["cyclic", "monotonic"],
+            case_id=case_id, source=source,
+        )
+
+    if normalized.geometry.n_elem_x <= 0 or normalized.geometry.n_elem_y <= 0:
+        raise CaseConfigurationError(
+            "geometry.element_counts",
+            (normalized.geometry.n_elem_x, normalized.geometry.n_elem_y),
+            ["positive integers"], case_id=case_id, source=source,
+        )
+
+    law_types = {"ceb_fip", "bilinear", "banholzer"}
+    configured_laws = [layer.bond_law for layer in normalized.rebar_layers]
+    configured_laws += [sheet.bond_law for sheet in normalized.frp_sheets]
+    if normalized.fibres is not None:
+        fibre = normalized.fibres.fibre
+        if fibre.density <= 0.0:
+            raise CaseConfigurationError(
+                "fibres.fibre.density_fibres_cm2", fibre.density, ["a positive value"],
+                case_id=case_id, source=source,
+            )
+        if not 0.0 < fibre.explicit_fraction <= 1.0:
+            raise CaseConfigurationError(
+                "fibres.fibre.explicit_fraction", fibre.explicit_fraction, ["0 < value <= 1"],
+                case_id=case_id, source=source,
+            )
+        configured_laws.append(normalized.fibres.bond_law)
+
+    for law in configured_laws:
+        if getattr(law, "law_type", None) not in law_types:
+            raise CaseConfigurationError(
+                "bond_law.law_type", getattr(law, "law_type", None), sorted(law_types),
+                case_id=case_id, source=source,
+            )
+
+    setattr(normalized, "_normalized", True)
+    setattr(normalized, "_source", source)
+    return normalized

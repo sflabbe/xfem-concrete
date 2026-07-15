@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "created": "2026-07-15",
+    "case09_prior_results": "invalid: density was multiplied by 10000 twice",
+    "numerical_policy": "All probes must remain stable except an explicitly reviewed golden update."
+  },
+  "semantic_sha256": "4e6c1a892c69099eea344336deb38689fc728a703ebf4640bb769afef25912f6",
+  "probes": {
+    "configuration": {
+      "bond_layer_count": 1,
+      "material": "cdp_lite",
+      "multicrack_engine": "multi",
+      "result_schema_version": 1
+    },
+    "csv_output": {
+      "rows": 2,
+      "sha256": "49ee5cc9ee4cfd887b11795792c6dc77d33fc4053b16b4917718a67b7d486663"
+    },
+    "cyclic_reduced": {
+      "max_displacement_m": 1e-05,
+      "min_displacement_m": -1e-05,
+      "net_elastic_work_J": 0.0,
+      "step_count": 5
+    },
+    "elastic_single": {
+      "converged": true,
+      "displacement_m": 1e-06,
+      "load_N": 2552.1731993725325,
+      "step_count": 1
+    },
+    "fibres": {
+      "density_fibres_m2": 34300.0,
+      "explicit_fraction": 0.5,
+      "seed": 42,
+      "tangent_Pa_m": 6220467580.187558,
+      "traction_Pa": 622046.7580187558
+    },
+    "frp": {
+      "slip_m": 0.0005,
+      "stress_Pa": 1000000.0,
+      "tangent_Pa_m": 2000000000.0
+    },
+    "multicrack": {
+      "converged": true,
+      "crack_count": 0,
+      "displacement_m": 1e-06,
+      "load_N": 140.97910914191064,
+      "step_count": 1
+    },
+    "pullout_bond": {
+      "slip_m": 0.0005,
+      "stress_Pa": 9675859.46729204,
+      "tangent_Pa_m": 19351718934.58408
+    }
+  }
+}

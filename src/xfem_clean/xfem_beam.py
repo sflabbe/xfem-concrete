@@ -1,4 +1,9 @@
-"""
+"""Frozen legacy beam solver.
+
+New code must use ``xfem_clean.xfem``. This module is retained unchanged for
+release compatibility and characterization tests; removal requires external
+consumer evidence.
+
 2D RC beam prototype with:
 - Q4 plane-stress elements
 - Concrete Damaged Plasticity (CDP) inspired by Abaqus (Lubliner/Lee-Fenves form)

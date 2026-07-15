@@ -139,10 +139,10 @@ def test_history_to_arrays_extra_columns():
 
     arrays = history_to_arrays(history)
 
-    assert 'col_4' in arrays['extras']
-    assert 'col_5' in arrays['extras']
-    assert np.allclose(arrays['extras']['col_4'], [1.0, 3.0])
-    assert np.allclose(arrays['extras']['col_5'], [2.0, 4.0])
+    assert 'kappa' in arrays['extras']
+    assert 'R' in arrays['extras']
+    assert np.allclose(arrays['extras']['kappa'], [1.0, 3.0])
+    assert np.allclose(arrays['extras']['R'], [2.0, 4.0])
 
 
 if __name__ == '__main__':

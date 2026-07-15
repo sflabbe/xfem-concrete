@@ -119,13 +119,10 @@ def test_cyclic_u_targets_single_crack():
         assert len(history) >= len(u_targets), f"Should have at least {len(u_targets)} steps"
 
         print("✅ Cyclic u_targets single-crack: PASS (BLOQUE 3 VALIDATED)")
-        return True
+        return None
 
     except Exception as e:
-        print(f"❌ Test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
+        raise AssertionError("Cyclic single-crack analysis failed") from e
 
 
 def test_generate_cyclic_u_targets():
@@ -161,7 +158,6 @@ def test_generate_cyclic_u_targets():
     print("    ✓ No unwanted consecutive zeros")
 
     print("✅ generate_cyclic_u_targets: PASS")
-    return True
 
 
 if __name__ == "__main__":

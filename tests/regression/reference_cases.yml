@@ -1,4 +1,7 @@
-# Reference values for regression testing
+# LEGACY INACTIVE RANGES: not consumed by the supported regression suite.
+# These values are broad synthetic smoke placeholders, not validation data.
+# Use canonical_manifest.json and scripts/regression_manifest.py instead.
+# Reference values for historical regression testing
 # All values in SI units unless specified
 # Ranges are intentionally wide for smoke testing - tighten as validation progresses
 

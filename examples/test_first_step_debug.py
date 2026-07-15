@@ -65,7 +65,7 @@ print(f"\n--- NEWTON ITERATION 1 ---")
 print(f"Target displacement: {u_step*1e6:.2f} μm at DOF {load_dof}")
 
 # Assembly at u=0
-    K, fint, _, _, _, bond_new, _, _ = assemble_xfem_system(
+K, fint, _, _, _, bond_new, _, _ = assemble_xfem_system(
     nodes=nodes,
     elems=elems,
     dofs=dofs,
